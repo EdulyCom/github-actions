@@ -12,11 +12,6 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 concurrency:
   group: ai-review-${{ inputs.pr_number || github.event.pull_request.number }}
   cancel-in-progress: true
@@ -25,6 +20,10 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     outputs:
       verdict: ${{ steps.r.outputs.verdict }}
     steps:
@@ -45,6 +44,7 @@ jobs:
     needs: [review]
     if: ${{ needs.review.outputs.verdict == 'pass' }}
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Prove the verdict output gates this job
         run: echo "ai-review verdict was 'pass' — this job only runs because the gate passed."
