@@ -21,8 +21,8 @@ inputs:
   private-key:
     description: >
       GitHub App private key, paired with `app-id`. A token is minted for
-      this job only, scoped to `pull-requests: write` and `issues: write`
-      (never the installation's full permission set).
+      this job only, scoped to `pull-requests: write`, `issues: write`, and
+      `checks: read` (never the installation's full permission set).
     required: false
   github-token:
     description: >
