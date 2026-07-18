@@ -7,8 +7,11 @@ description: >
   reads to gate its heavier build/test/deploy lanes. See
   docs/adr/0001-ci-native-ai-review-gate.md for why the gate is an ordinary
   job output rather than an identity-pinned Check Run, and why the review
-  identity is cosmetic. This phase ships a STUBBED verdict — the real
-  two-stage AI review pipeline lands in a later phase.
+  identity is cosmetic. The verdict is produced by a real two-stage AI
+  review pipeline: a Haiku context stage summarizes the diff, then a
+  diff-size-routed Sonnet/Opus review stage performs the full rubric scan
+  and returns a schema-validated result that a deterministic step
+  recomputes the pass/fail decision from.
 
 inputs:
   app-id:
@@ -65,26 +68,25 @@ inputs:
     default: "✗ /ai-qa"
   confidence-threshold:
     description: >
-      Minimum confidence (0-100) required for a pass verdict. Declared now
-      as part of this action's interface; not yet consumed by this
-      stubbed harness — the real review pipeline (a later phase) reads it.
+      Minimum confidence (0-100) required for a pass verdict. Consumed by
+      the deterministic Publish review step, which recomputes confidence
+      from the review stage's reported P0-P3 counts and test-quality
+      signals and compares it against this threshold.
     required: false
     default: "90"
   sonnet-model:
     description: >
       Model ID used by the diff-size routing step for small diffs (≤15
-      files and ≤400 changed lines). Declared now as part of this action's
-      interface and consumed by this phase's routing step; the routed
-      model itself is consumed by the review stage (a later phase).
+      files and ≤400 changed lines). Consumed by the routing step, whose
+      output feeds the Review stage (Sonnet/Opus) as the model to run.
       Override when a gateway aliases model names.
     required: false
     default: "claude-sonnet-5"
   opus-model:
     description: >
       Model ID used by the diff-size routing step for large diffs (>15
-      files or >400 changed lines). Declared now as part of this action's
-      interface and consumed by this phase's routing step; the routed
-      model itself is consumed by the review stage (a later phase).
+      files or >400 changed lines). Consumed by the routing step, whose
+      output feeds the Review stage (Sonnet/Opus) as the model to run.
       Override when a gateway aliases model names.
     required: false
     default: "claude-opus-4-8"
@@ -98,8 +100,8 @@ inputs:
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
-      `anthropic-auth-token` — supply exactly one. Required for the context stage (this
-      phase) and the future review stage (a later phase) to call the Anthropic API.
+      `anthropic-auth-token` — supply exactly one. Required for both the Context stage
+      and the Review stage (Sonnet/Opus) to call the Anthropic API.
     required: false
   anthropic-auth-token:
     description: >
@@ -323,7 +325,19 @@ runs:
         # pull-requests/issues/checks-scoped identity used by the publishing
         # steps later in this action.
         github_token: ${{ inputs.github-token }}
-        claude_args: --model ${{ inputs.haiku-model }}
+        # Root cause of the context.md handoff failure (Task 2.4 fix round): this
+        # step ran with NO --allowedTools at all, so claude-code-action's headless
+        # permission model silently denied every Write and most Bash tool calls
+        # (confirmed via live run 29635771162's Context-stage permission_denials_count
+        # of 6, and anthropics/claude-code-action's own base-action/README.md, which
+        # shows `Write` must be explicitly allowlisted — it is not a default tool).
+        # Both stages run as plain composite-action steps on the same runner
+        # checkout (no container isolation), so once Write is permitted here, the
+        # Review stage's relative-path read of `context.md` at the repository root
+        # resolves to the same file.
+        claude_args: |
+          --model ${{ inputs.haiku-model }}
+          --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read the PR diff (the working tree is already checked out at the PR head
           commit; diff it against the merge-base with the repository's default
@@ -342,6 +356,25 @@ runs:
           Do NOT review the change. Do NOT judge correctness, quality, or security.
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
           output is the factual context.md summary — a later stage does the review.
+
+    - name: Verify context.md handoff
+      id: context-verify
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Durable regression check for the Task 2.4 fix-round finding that the
+        # Context stage's Write tool calls were silently denied (see the
+        # --allowedTools comment on the Context stage step above). This makes
+        # the handoff's health visible in every run's plain step log instead of
+        # requiring a permission_denials_count archaeology dig.
+        if [ ! -s context.md ]; then
+          echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          exit 0
+        fi
+        echo "context.md present: $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        echo "--- context.md preview (first 20 lines) ---"
+        head -n 20 context.md
 
     - name: CI signal (re-review only)
       id: ci-signal
@@ -381,6 +414,84 @@ runs:
           fi
         fi
         echo "signal=${SIGNAL}" >> "${GITHUB_OUTPUT}"
+
+    - name: Review stage (Sonnet/Opus)
+      id: review
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      # Same anthropics/claude-code-action#1294 workaround as the Context stage above:
+      # this action version rejects ANTHROPIC_AUTH_TOKEN alone, so the bearer token also
+      # fills anthropic_api_key to pass validation, while ANTHROPIC_CUSTOM_HEADERS carries
+      # the real bearer credential on the wire.
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        # Deliberately NOT steps.identity.outputs.author-token, for the same
+        # least-privilege reason as the Context stage: this step only reads the
+        # repo, calls the Anthropic API, and returns structured output — it
+        # never calls the GitHub API to post anything. The App-minted identity
+        # is reserved for the deterministic Publish review step below.
+        github_token: ${{ inputs.github-token }}
+        plugins: superpowers@superpowers-marketplace
+        plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
+        claude_args: |
+          --model ${{ steps.route.outputs.model }}
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
+        prompt: |
+          You are performing an automated code review. Attempt to load the
+          live `/requesting-code-review` skill if the superpowers plugin
+          installed successfully; if it is unavailable, proceed without it —
+          do not fail or block on a missing plugin.
+
+          Read `ai-review/rubric.md` at the repository root. This is the
+          authoritative review methodology: an 8-angle scan (intent alignment
+          first, then line-by-line diff, removed-behavior audit, cross-file
+          tracing, reuse, simplification, efficiency, altitude), a severity
+          scale (P0-P3), and a full review checklist. Follow it.
+
+          The PR number is available in the `PR_NUMBER` environment variable.
+          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` (and
+          follow any linked issue reference in the body) to establish the
+          stated goal for the rubric's Angle H (Intent alignment) — do this
+          before analyzing the diff, per the rubric's Angle H methodology
+          (frame-setting must happen before code analysis, not after).
+
+          Read `context.md` at the repository root (written by an earlier
+          context-gathering stage) for a summary of what changed and its
+          callers/callees/related helpers.
+
+          Read the PR diff yourself: the working tree is already checked out
+          at the PR head commit; diff it against the merge-base with the
+          repository's default branch (discover the default branch yourself,
+          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`).
+
+          Perform the full 8-angle scan from the rubric against the diff.
+          Classify every confirmed or plausible finding into P0/P1/P2/P3 per
+          the rubric's severity definitions, and count them.
+
+          Also assess test quality per the rubric's Testing section: are
+          there tests for the changed logic (`no_tests_for_changed_logic`),
+          is coverage on critical paths below target
+          (`coverage_below_threshold_on_critical_paths`), and are any tests
+          failing (`tests_failing`)? Report these as three booleans; omit any
+          you cannot assess rather than guessing.
+
+          Write a complete review as `comment_markdown`: findings grouped by
+          severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
+          state "_None._" for empty sections), strengths, and a leading bold
+          verdict token literally `**✅ PASS**` or `**❌ FAIL**` matching your
+          own `verdict` field. Do not include any HTML marker comment in
+          `comment_markdown` — the caller adds one separately.
+
+          Return your full assessment via the required structured output
+          schema. `counts` must be accurate — a later deterministic step
+          recomputes the actual pass/fail decision from `counts` alone and
+          does not trust your `verdict` field; report it anyway as your own
+          best assessment.
 
     - name: Reset prior review and labels
       id: reset
@@ -466,43 +577,101 @@ runs:
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         PASS_LABEL: ${{ inputs.pass-label }}
         FAIL_LABEL: ${{ inputs.fail-label }}
+        CONFIDENCE_THRESHOLD: ${{ inputs.confidence-threshold }}
+        CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
+        REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
           const failLabel = process.env.FAIL_LABEL;
+          const confidenceThreshold = Number(process.env.CONFIDENCE_THRESHOLD);
+          const ciSignal = process.env.CI_SIGNAL;
 
-          // STUB: hardcoded verdict. The real two-stage AI review pipeline
-          // (a later phase) replaces this block with a schema-validated
-          // model verdict; every step around it (identity, reset, publish
-          // plumbing, output wiring) is already the real harness.
-          const verdict = {
-            verdict: "pass",
-            confidence: 95,
-            merge_risk: "low",
-            review_event: "APPROVE",
-          };
+          let review;
+          try {
+            review = JSON.parse(process.env.REVIEW_JSON);
+          } catch (err) {
+            core.setFailed(`Review stage did not return valid structured output: ${err.message}`);
+            return;
+          }
+
+          const counts = review.counts || {};
+          const p0 = Number(counts.p0) || 0;
+          const p1 = Number(counts.p1) || 0;
+          const p2 = Number(counts.p2) || 0;
+          const p3 = Number(counts.p3) || 0;
+
+          let confidence = 100 - 30 * p0 - 15 * p1 - 5 * p2;
+
+          // Test-quality adjustment (rubric.md "Confidence Rate Calculation").
+          // no_tests_for_changed_logic and coverage_below_threshold_on_critical_paths
+          // both describe "tests are inadequate" at different severities, so only the
+          // worse of the two applies; tests_failing is an independent, stackable
+          // penalty (a PR can have adequate but currently-failing tests).
+          if (review.no_tests_for_changed_logic) {
+            confidence -= 15;
+          } else if (review.coverage_below_threshold_on_critical_paths) {
+            confidence -= 5;
+          }
+          if (review.tests_failing) {
+            confidence -= 10;
+          }
+
+          confidence = Math.max(0, Math.min(100, confidence));
+
+          // A completed failing/timed-out required-check conclusion (only available on
+          // a workflow_dispatch re-review — see the ci-signal step) is treated as an
+          // automatic fail, matching the rubric's "failing required CI = auto-P0" rule.
+          const ciFailed = ciSignal === "fail" || ciSignal === "timeout";
+
+          let pass = confidence >= confidenceThreshold && p0 === 0 && p1 === 0 && !ciFailed;
+
+          const intentDeviated = review.intent === "deviated";
+          if (intentDeviated) {
+            pass = false;
+          }
+
+          const verdict = pass ? "pass" : "fail";
+          const reviewEvent = pass ? "APPROVE" : "REQUEST_CHANGES";
+
+          let mergeRisk;
+          if (p0 > 0 || p1 > 2) {
+            mergeRisk = "high";
+          } else if (p1 >= 1 || confidence < 70) {
+            mergeRisk = "medium";
+          } else {
+            mergeRisk = "low";
+          }
+
+          const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
+          const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
+          const mismatchNote =
+            review.verdict && review.verdict !== verdict
+              ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
+              : "";
 
           const body = [
             "<!-- ai-review -->",
-            "**✅ PASS**",
+            `${rejectedBanner}${verdictLine}`,
+            ...(mismatchNote ? [mismatchNote] : []),
             "",
-            `Confidence: ${verdict.confidence} · Merge risk: ${verdict.merge_risk}`,
+            `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
             "",
-            "_This is a stubbed verdict from the ai-review harness. The real review pipeline lands in a later phase._",
+            review.comment_markdown || "_No review content returned._",
           ].join("\n");
 
           await github.rest.pulls.createReview({
             owner: context.repo.owner,
             repo: context.repo.repo,
             pull_number: prNumber,
-            event: verdict.review_event,
+            event: reviewEvent,
             body,
           });
 
-          const winnerLabel = verdict.verdict === "pass" ? passLabel : failLabel;
-          const loserLabel = verdict.verdict === "pass" ? failLabel : passLabel;
+          const winnerLabel = verdict === "pass" ? passLabel : failLabel;
+          const loserLabel = verdict === "pass" ? failLabel : passLabel;
 
           await github.rest.issues.addLabels({
             owner: context.repo.owner,
@@ -526,7 +695,7 @@ runs:
             }
           }
 
-          core.setOutput("verdict", verdict.verdict);
-          core.setOutput("confidence", String(verdict.confidence));
-          core.setOutput("merge_risk", verdict.merge_risk);
-          core.setOutput("review_event", verdict.review_event);
+          core.setOutput("verdict", verdict);
+          core.setOutput("confidence", String(confidence));
+          core.setOutput("merge_risk", mergeRisk);
+          core.setOutput("review_event", reviewEvent);
