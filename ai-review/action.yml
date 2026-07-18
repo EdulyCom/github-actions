@@ -325,7 +325,19 @@ runs:
         # pull-requests/issues/checks-scoped identity used by the publishing
         # steps later in this action.
         github_token: ${{ inputs.github-token }}
-        claude_args: --model ${{ inputs.haiku-model }}
+        # Root cause of the context.md handoff failure (Task 2.4 fix round): this
+        # step ran with NO --allowedTools at all, so claude-code-action's headless
+        # permission model silently denied every Write and most Bash tool calls
+        # (confirmed via live run 29635771162's Context-stage permission_denials_count
+        # of 6, and anthropics/claude-code-action's own base-action/README.md, which
+        # shows `Write` must be explicitly allowlisted — it is not a default tool).
+        # Both stages run as plain composite-action steps on the same runner
+        # checkout (no container isolation), so once Write is permitted here, the
+        # Review stage's relative-path read of `context.md` at the repository root
+        # resolves to the same file.
+        claude_args: |
+          --model ${{ inputs.haiku-model }}
+          --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read the PR diff (the working tree is already checked out at the PR head
           commit; diff it against the merge-base with the repository's default
