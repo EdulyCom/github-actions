@@ -659,6 +659,37 @@ runs:
               ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
               : "";
 
+          // The review-stage prompt instructs the model not to prepend its own
+          // verdict token / confidence-merge-risk line / HTML marker to
+          // comment_markdown (this step owns that banner), but model
+          // instruction-following is not guaranteed — strip any leading copy of
+          // those artifacts defensively so a non-compliant response can't
+          // duplicate the banner above it.
+          function stripLeadingBannerArtifacts(markdown) {
+            if (!markdown) return markdown;
+            const verdictTokenRe = /^\*\*(?:✅ PASS|❌ FAIL)\*\*\s*$/;
+            const confidenceLineRe = /^Confidence:\s*\d+\s*·\s*Merge risk:\s*\S+\s*$/i;
+            const htmlCommentRe = /^<!--.*-->\s*$/;
+            const lines = markdown.split("\n");
+            let start = 0;
+            while (start < lines.length) {
+              const line = lines[start];
+              if (
+                line.trim() === "" ||
+                verdictTokenRe.test(line) ||
+                confidenceLineRe.test(line) ||
+                htmlCommentRe.test(line)
+              ) {
+                start += 1;
+                continue;
+              }
+              break;
+            }
+            return lines.slice(start).join("\n");
+          }
+
+          const commentBody = stripLeadingBannerArtifacts(review.comment_markdown);
+
           const body = [
             "<!-- ai-review -->",
             `${rejectedBanner}${verdictLine}`,
@@ -666,7 +697,7 @@ runs:
             "",
             `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
             "",
-            review.comment_markdown || "_No review content returned._",
+            commentBody || "_No review content returned._",
           ].join("\n");
 
           await github.rest.pulls.createReview({
