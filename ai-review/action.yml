@@ -1,0 +1,359 @@
+name: ai-review
+description: >
+  Runs the CI-native AI review gate against a pull request: authors a
+  native GitHub PR review (APPROVE / REQUEST_CHANGES) and a pass/fail
+  label, then exposes the verdict as a job output
+  (`verdict`/`confidence`/`merge_risk`/`review_event`) a consumer's own CI
+  reads to gate its heavier build/test/deploy lanes. See
+  docs/adr/0001-ci-native-ai-review-gate.md for why the gate is an ordinary
+  job output rather than an identity-pinned Check Run, and why the review
+  identity is cosmetic. This phase ships a STUBBED verdict — the real
+  two-stage AI review pipeline lands in a later phase.
+
+inputs:
+  app-id:
+    description: >
+      GitHub App ID. Optional — when supplied together with `private-key`,
+      the review and labels are authored under that App's own slug
+      (`<app-slug>[bot]`) instead of `github-actions[bot]`. Purely a
+      cosmetic identity choice; never a gate input. See ADR 0001 (b).
+    required: false
+  private-key:
+    description: >
+      GitHub App private key, paired with `app-id`. A token is minted for
+      this job only, scoped to `pull-requests: write` and `issues: write`
+      (never the installation's full permission set).
+    required: false
+  github-token:
+    description: >
+      Fallback token used to call the GitHub REST API when `app-id` /
+      `private-key` are not set. Defaults to the calling workflow's own
+      GITHUB_TOKEN; override only if the caller needs a different identity
+      or scope.
+    required: false
+    default: ${{ github.token }}
+  pr-number:
+    description: >
+      Pull request number to review. Optional — defaults to the
+      triggering event's `pull_request.number`. Required when the caller
+      workflow is invoked via `workflow_dispatch` (e.g. a maintainer
+      manually reviewing a fork PR).
+    required: false
+  pass-label:
+    description: Label applied to the PR when the review verdict is a pass.
+    required: false
+    default: "✓ /ai-review"
+  fail-label:
+    description: Label applied to the PR when the review verdict is a fail.
+    required: false
+    default: "✗ /ai-review"
+  qa-pass-label:
+    description: >
+      Post-merge `ai-qa` pass label. This action clears it (does not
+      apply it) on every new commit so a stale QA badge from a prior
+      commit doesn't linger on the PR.
+    required: false
+    default: "✓ /ai-qa"
+  qa-fail-label:
+    description: >
+      Post-merge `ai-qa` fail label. This action clears it (does not
+      apply it) on every new commit, for the same reason as
+      `qa-pass-label`.
+    required: false
+    default: "✗ /ai-qa"
+  confidence-threshold:
+    description: >
+      Minimum confidence (0-100) required for a pass verdict. Declared now
+      as part of this action's interface; not yet consumed by this
+      stubbed harness — the real review pipeline (a later phase) reads it.
+    required: false
+    default: "90"
+
+outputs:
+  verdict:
+    description: "'pass' or 'fail'. Empty when the review was skipped (fork PR, draft, or closed)."
+    value: ${{ steps.publish.outputs.verdict }}
+  confidence:
+    description: "Confidence score, 0-100."
+    value: ${{ steps.publish.outputs.confidence }}
+  merge_risk:
+    description: "'low', 'medium', or 'high'."
+    value: ${{ steps.publish.outputs.merge_risk }}
+  review_event:
+    description: "GitHub review event posted: APPROVE or REQUEST_CHANGES."
+    value: ${{ steps.publish.outputs.review_event }}
+
+runs:
+  using: composite
+  steps:
+    - name: Author token
+      id: author
+      if: inputs.app-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        permission-pull-requests: write
+        permission-issues: write
+
+    - name: Resolve author identity
+      id: identity
+      shell: bash
+      env:
+        APP_TOKEN: ${{ steps.author.outputs.token }}
+        APP_SLUG: ${{ steps.author.outputs.app-slug }}
+        FALLBACK_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -n "${APP_TOKEN}" ]; then
+          echo "::add-mask::${APP_TOKEN}"
+          {
+            echo "author-token=${APP_TOKEN}"
+            echo "author-login=${APP_SLUG}[bot]"
+          } >> "${GITHUB_OUTPUT}"
+        else
+          echo "::add-mask::${FALLBACK_TOKEN}"
+          {
+            echo "author-token=${FALLBACK_TOKEN}"
+            echo "author-login=github-actions[bot]"
+          } >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Resolve PR number
+      id: pr
+      shell: bash
+      env:
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        PR_NUMBER="${INPUT_PR_NUMBER:-${EVENT_PR_NUMBER}}"
+        if [ -z "${PR_NUMBER}" ]; then
+          echo "::error::No pr-number input and no pull_request event payload; nothing to review."
+          exit 1
+        fi
+        echo "pr-number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+
+    - name: Fork guard
+      id: fork-guard
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+      run: |
+        set -euo pipefail
+        if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${HEAD_REPO}" ] && [ -n "${BASE_REPO}" ] && [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+          echo "::notice::skipped — fork; maintainer can workflow_dispatch"
+          echo "is-fork=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "is-fork=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Clear stale labels on new commit
+      id: stale-clear
+      if: steps.fork-guard.outputs.is-fork != 'true' && github.event.action == 'synchronize'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        PASS_LABEL: ${{ inputs.pass-label }}
+        FAIL_LABEL: ${{ inputs.fail-label }}
+        QA_PASS_LABEL: ${{ inputs.qa-pass-label }}
+        QA_FAIL_LABEL: ${{ inputs.qa-fail-label }}
+      with:
+        github-token: ${{ steps.identity.outputs.author-token }}
+        script: |
+          const prNumber = Number(process.env.PR_NUMBER);
+          const labels = [
+            process.env.PASS_LABEL,
+            process.env.FAIL_LABEL,
+            process.env.QA_PASS_LABEL,
+            process.env.QA_FAIL_LABEL,
+          ];
+
+          for (const name of labels) {
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name,
+              });
+              core.info(`Removed stale label '${name}'.`);
+            } catch (err) {
+              if (err.status === 404 || err.status === 422) {
+                core.info(`Label '${name}' not present; skipping.`);
+              } else {
+                throw err;
+              }
+            }
+          }
+
+    - name: Draft/closed gate
+      id: pr-state
+      if: steps.fork-guard.outputs.is-fork != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        STATE_JSON="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json isDraft,state)"
+        IS_DRAFT="$(echo "${STATE_JSON}" | jq -r '.isDraft')"
+        STATE="$(echo "${STATE_JSON}" | jq -r '.state')"
+        if [ "${IS_DRAFT}" = "true" ] || [ "${STATE}" = "CLOSED" ] || [ "${STATE}" = "MERGED" ]; then
+          echo "::notice::skipped — PR is draft or closed"
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Reset prior review and labels
+      id: reset
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
+        PASS_LABEL: ${{ inputs.pass-label }}
+        FAIL_LABEL: ${{ inputs.fail-label }}
+        QA_PASS_LABEL: ${{ inputs.qa-pass-label }}
+        QA_FAIL_LABEL: ${{ inputs.qa-fail-label }}
+      with:
+        github-token: ${{ steps.identity.outputs.author-token }}
+        script: |
+          const prNumber = Number(process.env.PR_NUMBER);
+          const authorLogin = process.env.AUTHOR_LOGIN;
+
+          const { data: reviews } = await github.rest.pulls.listReviews({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: prNumber,
+          });
+
+          // dismissReview only accepts APPROVED or CHANGES_REQUESTED reviews
+          // (a COMMENTED review throws a 422) — filter before calling it, and
+          // still wrap the call defensively in case of a race.
+          const dismissible = reviews.filter(
+            (review) =>
+              review.user?.login === authorLogin &&
+              (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED"),
+          );
+
+          for (const review of dismissible) {
+            try {
+              await github.rest.pulls.dismissReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                review_id: review.id,
+                message: "Superseded by a new ai-review run.",
+              });
+              core.info(`Dismissed prior review #${review.id} by '${authorLogin}'.`);
+            } catch (err) {
+              if (err.status === 404 || err.status === 422) {
+                core.info(`Review #${review.id} could not be dismissed; skipping.`);
+              } else {
+                throw err;
+              }
+            }
+          }
+
+          const labels = [
+            process.env.PASS_LABEL,
+            process.env.FAIL_LABEL,
+            process.env.QA_PASS_LABEL,
+            process.env.QA_FAIL_LABEL,
+          ];
+
+          for (const name of labels) {
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name,
+              });
+              core.info(`Removed label '${name}'.`);
+            } catch (err) {
+              if (err.status === 404 || err.status === 422) {
+                core.info(`Label '${name}' not present; skipping.`);
+              } else {
+                throw err;
+              }
+            }
+          }
+
+    - name: Publish review
+      id: publish
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        PASS_LABEL: ${{ inputs.pass-label }}
+        FAIL_LABEL: ${{ inputs.fail-label }}
+      with:
+        github-token: ${{ steps.identity.outputs.author-token }}
+        script: |
+          const prNumber = Number(process.env.PR_NUMBER);
+          const passLabel = process.env.PASS_LABEL;
+          const failLabel = process.env.FAIL_LABEL;
+
+          // STUB: hardcoded verdict. The real two-stage AI review pipeline
+          // (a later phase) replaces this block with a schema-validated
+          // model verdict; every step around it (identity, reset, publish
+          // plumbing, output wiring) is already the real harness.
+          const verdict = {
+            verdict: "pass",
+            confidence: 95,
+            merge_risk: "low",
+            review_event: "APPROVE",
+          };
+
+          const body = [
+            "<!-- ai-review -->",
+            "**✅ PASS**",
+            "",
+            `Confidence: ${verdict.confidence} · Merge risk: ${verdict.merge_risk}`,
+            "",
+            "_This is a stubbed verdict from the ai-review harness. The real review pipeline lands in a later phase._",
+          ].join("\n");
+
+          await github.rest.pulls.createReview({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: prNumber,
+            event: verdict.review_event,
+            body,
+          });
+
+          const winnerLabel = verdict.verdict === "pass" ? passLabel : failLabel;
+          const loserLabel = verdict.verdict === "pass" ? failLabel : passLabel;
+
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            labels: [winnerLabel],
+          });
+
+          try {
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              name: loserLabel,
+            });
+          } catch (err) {
+            if (err.status === 404 || err.status === 422) {
+              core.info(`Label '${loserLabel}' not present; skipping.`);
+            } else {
+              throw err;
+            }
+          }
+
+          core.setOutput("verdict", verdict.verdict);
+          core.setOutput("confidence", String(verdict.confidence));
+          core.setOutput("merge_risk", verdict.merge_risk);
+          core.setOutput("review_event", verdict.review_event);
