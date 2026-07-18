@@ -128,10 +128,19 @@ runs:
         MERGE_SHA: ${{ github.sha }}
       run: |
         set -uo pipefail
-        PR_JSON="$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls" 2>/dev/null || echo '[]')"
-        PR_NUMBER="$(echo "${PR_JSON}" | jq -r '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty')"
+        PR_NUMBER=""
+        for attempt in 1 2 3 4 5; do
+          PR_JSON="$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls" 2>/dev/null || echo '[]')"
+          PR_NUMBER="$(echo "${PR_JSON}" | jq -r '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty')"
+          if [ -n "${PR_NUMBER}" ]; then
+            break
+          fi
+          if [ "${attempt}" -lt 5 ]; then
+            sleep 3
+          fi
+        done
         if [ -z "${PR_NUMBER}" ]; then
-          echo "::notice::ai-qa skipped — no merged pull request is associated with commit ${MERGE_SHA} (a direct push to the default branch, or GitHub has not yet indexed the association)"
+          echo "::notice::ai-qa skipped — no merged pull request is associated with commit ${MERGE_SHA} after 5 attempts (a direct push to the default branch, or GitHub has not yet indexed the association)"
           echo "skip=true" >> "${GITHUB_OUTPUT}"
         else
           echo "skip=false" >> "${GITHUB_OUTPUT}"
@@ -208,6 +217,7 @@ runs:
     # token itself and carry the real bearer via a custom header instead.
     - name: Triage failing logs (Haiku)
       id: triage
+      continue-on-error: true
       if: >-
         steps.merge.outputs.skip != 'true' &&
         (steps.health.outputs.status != 'healthy' || steps.test.outputs.exit-code != '0') &&

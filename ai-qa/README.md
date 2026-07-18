@@ -132,15 +132,21 @@ issue comment is.
 
 ## Self-test
 
-There is no live consumer wired up for `ai-qa` yet — a later task adds one.
-Until then, this action can't be exercised end to end against a real merge;
-validation for this task was limited to static checks (YAML parses, every
-third-party `uses:` is a full-length SHA, no `${{ }}` inside a `run:`/
-`script:` body). Once a consumer is wired up, the same checks
-`ai-review`'s self-test performs apply here: merge a PR into a repo running
-this action and confirm (a) the report comment appears (and updates in
-place on a re-run against the same merge commit, rather than duplicating),
-(b) `pass-label`/`fail-label` reconcile correctly for both an outright pass
-and a deliberately broken health-url/test-command, and (c) an unreachable
-health-url still produces a report (timeout, not a hung job) once
-`deploy-timeout` elapses.
+`.github/workflows/ai-qa-selftest.yml` runs this action against every push
+to this repo's own `main` — i.e. every PR merged here exercises `ai-qa` for
+real, against the actual merge commit `github.sha` resolves to. It uses a
+deliberately trivial happy-path config (`health-url` pointing at this
+repo's own raw `README.md`, `test-command: "true"`) purely to prove the
+report/label pipeline end to end; it is not a substitute for testing a
+real deploy-health/test-command pair.
+
+To exercise the failure path (a deliberately broken health-url or
+test-command, or an unreachable health-url timing out rather than hanging
+the job) or the sticky-comment update-in-place behavior on a repeat merge
+commit, run the checks `ai-review`'s self-test performs against a
+consumer repo with a real deployment: merge a PR and confirm (a) the
+report comment appears and updates in place on a re-run against the same
+merge commit rather than duplicating, (b) `pass-label`/`fail-label`
+reconcile correctly for both an outright pass and a deliberately broken
+health-url/test-command, and (c) an unreachable health-url still produces
+a report once `deploy-timeout` elapses.
