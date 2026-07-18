@@ -408,6 +408,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
+          --allowedTools "Bash(gh pr view:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the

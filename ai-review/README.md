@@ -7,14 +7,16 @@ exposes the verdict as this action's own outputs
 workflow can gate its own heavier build/test/deploy jobs on
 `verdict == 'pass'`.
 
-**This phase ships a STUBBED verdict.** The `Publish review` step always
-posts a hardcoded `pass` / confidence `95` / merge risk `low` / `APPROVE`
-result — there is no model call yet. Everything *around* that one block is
-the real harness: identity resolution, fork/draft/closed guards, stale-label
-clearing, prior-review reset, and the output wiring a consumer's gate job
-depends on. The real two-stage AI review pipeline replaces only the stub
-block in a later phase; the interface below (inputs and outputs) does not
-change when that happens.
+The verdict comes from a real two-stage AI review: a Haiku context stage
+summarizes the diff, then a diff-size-routed Sonnet/Opus review stage
+performs the full rubric scan (see `ai-review/rubric.md`) and returns a
+schema-validated structured result. The `Publish review` step never trusts
+the model's self-reported verdict directly — it deterministically
+recomputes confidence, verdict, and merge risk from the model's reported
+P0-P3 finding counts and test-quality signals, then posts that as a native
+PR review and label. Everything *around* the model calls is the harness:
+identity resolution, fork/draft/closed guards, stale-label clearing,
+prior-review reset, and the output wiring a consumer's gate job depends on.
 
 See
 [`docs/adr/0001-ci-native-ai-review-gate.md`](../docs/adr/0001-ci-native-ai-review-gate.md)
@@ -47,13 +49,28 @@ injection-safety rule.
    `qa-fail-label`) if present, so a stale badge from the previous commit
    never lingers next to new commits. Runs even on a draft PR.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
-   PR skips Reset and Publish (logs `skipped — PR is draft or closed`).
-7. **Reset prior review and labels** — dismisses this action's own prior
-   `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
-   can't be dismissed via the API and is left alone) and removes all four
-   labels, so a re-run supersedes cleanly instead of stacking reviews.
-8. **Publish review** — posts the (stubbed) verdict as a native PR review
-   and the corresponding pass/fail label, then sets the four job outputs.
+   PR skips every remaining step (logs `skipped — PR is draft or closed`).
+7. **Checkout / compute diff stats and route model** — checks out the PR
+   head commit and picks `sonnet-model` or `opus-model` based on diff size
+   (file count and churn).
+8. **Context stage (Haiku)** — summarizes the diff and its
+   callers/callees/related helpers into `context.md` for the review stage
+   to read.
+9. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
+   reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
+   `no_ci`) so the Publish step can treat a failing/timed-out required
+   check as an automatic fail.
+10. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
+    diff and returns a schema-validated structured result (verdict,
+    confidence, merge risk, intent alignment, P0-P3 counts, test-quality
+    signals, and the review markdown body).
+11. **Reset prior review and labels** — dismisses this action's own prior
+    `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
+    can't be dismissed via the API and is left alone) and removes all four
+    labels, so a re-run supersedes cleanly instead of stacking reviews.
+12. **Publish review** — deterministically recomputes the verdict from the
+    review stage's structured output and posts it as a native PR review and
+    the corresponding pass/fail label, then sets the four job outputs.
 
 ## Inputs
 
@@ -67,7 +84,7 @@ injection-safety rule.
 | `fail-label` | Label applied when the verdict is a fail. | No | `✗ /ai-review` |
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
-| `confidence-threshold` | Minimum confidence (0-100) required for a pass. Declared now as part of the interface; not yet consumed by this stubbed harness. | No | `90` |
+| `confidence-threshold` | Minimum confidence (0-100) required for a pass. Consumed by the Publish review step, which recomputes confidence from the review stage's reported P0-P3 counts and test-quality signals and compares it against this threshold. | No | `90` |
 
 ## Outputs
 
@@ -80,9 +97,9 @@ injection-safety rule.
 
 ## Usage
 
-This is the same shape shown in `docs/consumer-integration.md`, section 2a,
-using only the inputs this phase actually implements (App credentials are
-optional; Anthropic credentials are wired up in a later phase):
+This is the same shape shown in `docs/consumer-integration.md`, section 2a
+(App credentials are optional; one of `anthropic-api-key` or
+`anthropic-auth-token` is required for the review stage to call the model):
 
 ```yaml
 concurrency:
@@ -105,6 +122,7 @@ jobs:
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          anthropic-auth-token: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
 
   review-gate:
     runs-on: ubuntu-latest
@@ -139,11 +157,12 @@ This repo's own `.github/workflows/selftest.yml` exercises the full path
 end to end: it runs `ai-review` on this repo's own PRs and a `gated-demo`
 job `needs: [review]` with `if: needs.review.outputs.verdict == 'pass'` —
 proving the `verdict` output actually gates a downstream job, not just that
-the action runs without error. Since the verdict is currently stubbed to
-always pass, `gated-demo` should run on every non-draft, non-fork PR in
-this repo; check the `review` job's log for the PR review and label it
-posted, and confirm `gated-demo` shows as skipped instead on a draft PR.
+the action runs without error. Since the verdict now comes from a real
+model review, `gated-demo` runs only when the review stage's findings
+clear the confidence threshold with no P0/P1s and no failing required CI;
+check the `review` job's log for the PR review and label it posted, and
+confirm `gated-demo` shows as skipped instead on a draft PR or a PR that
+fails review.
 A `synchronize` push (a new commit on an existing PR) should show the
 stale labels being cleared, the prior review being dismissed, and a fresh
-review/label being published — `gated-demo` still runs afterward, since the
-stub always resolves to a pass.
+review/label being published, reflecting the latest commit's own verdict.
