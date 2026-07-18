@@ -1,0 +1,54 @@
+name: auto-assign
+description: >
+  Assigns a pull request's author as its own assignee when the PR is opened
+  or marked ready for review. Skips PRs authored by a bot account and PRs
+  that already have an assignee.
+
+inputs:
+  github-token:
+    description: >
+      Token used to call the GitHub REST API to add the assignee. Defaults
+      to the calling workflow's own GITHUB_TOKEN; override only if the
+      caller needs a different identity or scope (e.g. an App
+      installation token).
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Assign PR author
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const author = process.env.PR_AUTHOR;
+          const prNumber = Number(process.env.PR_NUMBER);
+
+          if (!author || !prNumber) {
+            core.info("No pull_request author/number in the event payload; skipping.");
+            return;
+          }
+
+          if (author.endsWith("[bot]")) {
+            core.info(`PR author '${author}' is a bot account; skipping auto-assign.`);
+            return;
+          }
+
+          const existingAssignees = context.payload.pull_request.assignees || [];
+          if (existingAssignees.length > 0) {
+            core.info(`PR #${prNumber} already has ${existingAssignees.length} assignee(s); skipping auto-assign.`);
+            return;
+          }
+
+          await github.rest.issues.addAssignees({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            assignees: [author],
+          });
+
+          core.info(`Assigned '${author}' to PR #${prNumber}.`);
