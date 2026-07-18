@@ -624,7 +624,7 @@ runs:
           const body = [
             "<!-- ai-review -->",
             `${rejectedBanner}${verdictLine}`,
-            mismatchNote,
+            ...(mismatchNote ? [mismatchNote] : []),
             "",
             `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
             "",
