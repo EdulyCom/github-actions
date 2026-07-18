@@ -85,11 +85,6 @@ using only the inputs this phase actually implements (App credentials are
 optional; Anthropic credentials are wired up in a later phase):
 
 ```yaml
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 concurrency:
   group: ci-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -98,6 +93,10 @@ jobs:
   ai-review:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
@@ -110,6 +109,7 @@ jobs:
   review-gate:
     runs-on: ubuntu-latest
     needs: [ai-review]
+    permissions: {}
     steps:
       - name: Require a passing AI review verdict
         env:
@@ -128,9 +128,10 @@ jobs:
       - run: echo "build steps go here"
 ```
 
-The workflow-level `pull-requests: write` permission is required for
-`createReview`/`addLabels`/`dismissReview` to succeed; `contents: read` is
-the least-privilege default for the rest of the job.
+`pull-requests: write` and `issues: write` are required only by the
+`ai-review` job (for `createReview`/`addLabels`/`dismissReview`), so they're
+scoped there rather than at workflow level — `review-gate` and `build` need
+no repo permissions at all.
 
 ## Self-test
 
