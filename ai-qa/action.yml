@@ -192,7 +192,7 @@ runs:
       shell: bash
       env:
         BASE_URL: ${{ inputs.anthropic-base-url }}
-      run: |
+      run: | # zizmor: ignore[github-env] BASE_URL is this action's own anthropic-base-url input (caller-supplied static config), never attacker-influenceable event data — see ADR-0010's env-binding rule
         echo "ANTHROPIC_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
 
     # Workaround for anthropics/claude-code-action#1294: the action
