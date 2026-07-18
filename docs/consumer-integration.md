@@ -21,7 +21,7 @@ through to the `with:` inputs shown in section 2.
 | --- | --- | --- |
 | Secret: App private key (e.g. `APP_PRIVATE_KEY`) | Pairs with an App ID to author reviews and labels under your own GitHub App's identity instead of `github-actions[bot]`. Purely cosmetic — see ADR 0001 (b). | Optional |
 | Variable: App ID (e.g. `APP_ID`) | Paired with the private key above. | Optional, required if using the private key |
-| Secret: Anthropic credential (`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, depending on which your endpoint expects) | Authenticates the model calls the review/QA actions make. | Required |
+| Secret: Anthropic credential (`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, depending on which your endpoint expects) | Authenticates the model calls the review/QA actions make. | Required for `ai-review`; optional for `ai-qa` (only gates its failure-triage summary — the health/test signal and report post regardless) |
 | Variable: custom base URL (e.g. `ANTHROPIC_BASE_URL`) | Only needed if you route through a gateway or proxy instead of the standard Anthropic API endpoint. | Optional |
 | Variable: runner label (e.g. `RUNNER_LABEL`) | Overrides the default `ubuntu-latest` runner if your org uses self-hosted or labeled runners. | Optional |
 
@@ -139,6 +139,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   ai-qa:
@@ -155,7 +156,13 @@ jobs:
 
 `health-url` and `test-command` are inherently per-repo and have no
 sensible generic default — you must set both to real values for your
-deployment.
+deployment. Unlike `ai-review`, the report `ai-qa` posts is a plain PR
+comment (the PR is already merged and closed by the time this runs, so a
+formal `pulls.createReview` isn't applicable) plus a `✓`/`✗ /ai-qa` label —
+both go through the Issues API, hence `issues: write` above in addition to
+`pull-requests: write`. The Anthropic credential is optional here (see
+section 1) — omit it and `ai-qa` still reports the health/test signal, just
+without a Claude-written triage summary on failure.
 
 ## 3. Cutting over from an old identity-pinned check
 
