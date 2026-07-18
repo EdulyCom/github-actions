@@ -15,6 +15,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 concurrency:
   group: ai-review-${{ inputs.pr_number || github.event.pull_request.number }}
@@ -37,8 +38,8 @@ jobs:
         uses: ./ai-review
         with:
           pr-number: ${{ inputs.pr_number }}
-          app-id: ${{ vars.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ vars.MTM_BOT_APP_ID }}
+          private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
 
   gated-demo:
     needs: [review]

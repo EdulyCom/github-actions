@@ -88,6 +88,7 @@ optional; Anthropic credentials are wired up in a later phase):
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 concurrency:
   group: ci-pr-${{ github.event.pull_request.number || github.ref }}
