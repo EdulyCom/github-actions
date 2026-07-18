@@ -4,8 +4,8 @@ Shared GitHub Actions for CI-native AI-assisted PR review, post-merge QA,
 and PR auto-assignment — packaged as composite actions any organization can
 consume from a thin caller workflow in its own repos.
 
-This repo is being built out to provide three composite actions, landing
-across the tasks tracked in `docs/plan.md`:
+This repository is being built out to provide three composite actions,
+landing across the tasks tracked in `docs/plan.md`:
 
 - **`ai-review`** — runs an AI code review against a PR's diff and exposes a
   `verdict` job output (plus `confidence`, `merge_risk`, and a review
