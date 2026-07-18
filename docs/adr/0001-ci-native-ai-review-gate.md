@@ -158,8 +158,10 @@ rule: **nothing organization-specific ships as a default.** Concretely:
   and — for `ai-qa` — `health-url` / `test-command`, which are inherently
   per-repo.
 - **Caller-supplied, generic fallback default:** `confidence-threshold`
-  (defaults to 90), `runner-label` (defaults to `ubuntu-latest`),
-  the pass/fail label text, `anthropic-base-url` (omitted → the standard
+  (defaults to 90), `runner-label` (defaults to `ubuntu-latest`; realized as
+  a job-level `runs-on:` expression in the caller's own workflow, not an
+  action `with:` input, since a composite action cannot set its own job's
+  `runs-on:`), the pass/fail label text, `anthropic-base-url` (omitted → the standard
   Anthropic API endpoint), model IDs (generic defaults, repo-variable
   overridable for gateway aliasing), `github-token` (defaults to
   `${{ github.token }}`), and `ai-qa`'s deploy timeout.

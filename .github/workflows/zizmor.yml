@@ -29,3 +29,8 @@ jobs:
 
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
+        # advanced-security mode never fails the build (findings only go to
+        # the Security tab's SARIF upload); disable it so this job is a hard
+        # self-CI gate that fails directly on zizmor's own exit code.
+        with:
+          advanced-security: false
