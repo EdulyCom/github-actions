@@ -45,6 +45,16 @@ inputs:
       its exit code is the test pass/fail signal. Required — there is no
       sensible generic default test command.
     required: true
+  node-version:
+    description: >-
+      Node.js version to provision (via actions/setup-node) before
+      `test-command` runs. Optional — leave unset to skip Node setup
+      entirely (e.g. a non-JS test command, or a runner that already has
+      Node preinstalled such as a GitHub-hosted image). Callers whose
+      `test-command` invokes npm/yarn/corepack on a bare self-hosted
+      runner must set this, since composite actions cannot assume any
+      language toolchain is present on the runner they execute on.
+    required: false
   pass-label:
     description: >-
       Label applied to the merged PR when the overall QA signal (health
@@ -182,6 +192,12 @@ runs:
         if [ "${STATUS}" != "healthy" ]; then
           echo "::warning::${HEALTH_URL} did not become healthy within ${DEPLOY_TIMEOUT}s"
         fi
+
+    - name: Set up Node
+      if: steps.merge.outputs.skip != 'true' && inputs.node-version != ''
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        node-version: ${{ inputs.node-version }}
 
     - name: Run test command
       id: test
