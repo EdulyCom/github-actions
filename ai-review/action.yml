@@ -68,6 +68,24 @@ inputs:
       stubbed harness — the real review pipeline (a later phase) reads it.
     required: false
     default: "90"
+  sonnet-model:
+    description: >
+      Model ID used by the diff-size routing step for small diffs (≤15
+      files and ≤400 changed lines). Declared now as part of this action's
+      interface and consumed by this phase's routing step; the routed
+      model itself is consumed by the review stage (a later phase).
+      Override when a gateway aliases model names.
+    required: false
+    default: "claude-sonnet-5"
+  opus-model:
+    description: >
+      Model ID used by the diff-size routing step for large diffs (>15
+      files or >400 changed lines). Declared now as part of this action's
+      interface and consumed by this phase's routing step; the routed
+      model itself is consumed by the review stage (a later phase).
+      Override when a gateway aliases model names.
+    required: false
+    default: "claude-opus-4-8"
 
 outputs:
   verdict:
@@ -199,15 +217,90 @@ runs:
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        STATE_JSON="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json isDraft,state)"
+        STATE_JSON="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json isDraft,state,baseRefName,headRefOid)"
         IS_DRAFT="$(echo "${STATE_JSON}" | jq -r '.isDraft')"
         STATE="$(echo "${STATE_JSON}" | jq -r '.state')"
+        BASE_REF="$(echo "${STATE_JSON}" | jq -r '.baseRefName')"
+        HEAD_SHA="$(echo "${STATE_JSON}" | jq -r '.headRefOid')"
+        {
+          echo "base-ref=${BASE_REF}"
+          echo "head-sha=${HEAD_SHA}"
+        } >> "${GITHUB_OUTPUT}"
         if [ "${IS_DRAFT}" = "true" ] || [ "${STATE}" = "CLOSED" ] || [ "${STATE}" = "MERGED" ]; then
           echo "::notice::skipped — PR is draft or closed"
           echo "skip=true" >> "${GITHUB_OUTPUT}"
         else
           echo "skip=false" >> "${GITHUB_OUTPUT}"
         fi
+
+    - name: Check out PR head
+      id: checkout
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        ref: ${{ steps.pr-state.outputs.head-sha }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Compute diff stats and route model
+      id: route
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
+        SONNET: ${{ inputs.sonnet-model }}
+        OPUS: ${{ inputs.opus-model }}
+      run: |
+        set -euo pipefail
+        NUMSTAT="$(git diff --numstat "origin/${BASE_REF}...HEAD")"
+        if [ -z "${NUMSTAT}" ]; then
+          FILES=0
+          CHURN=0
+        else
+          FILES="$(printf '%s\n' "${NUMSTAT}" | wc -l | tr -d ' ')"
+          CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
+        fi
+        if [ "${FILES}" -le 15 ] && [ "${CHURN}" -le 400 ]; then
+          MODEL="${SONNET:-claude-sonnet-5}"
+        else
+          MODEL="${OPUS:-claude-opus-4-8}"
+        fi
+        {
+          echo "files=${FILES}"
+          echo "churn=${CHURN}"
+          echo "model=${MODEL}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: CI signal (re-review only)
+      id: ci-signal
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        EVENT_NAME: ${{ github.event_name }}
+        REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr-state.outputs.head-sha }}
+      run: |
+        # Best-effort only — this step must never hard-fail the job, so it
+        # deliberately omits `set -e`. A normal pull_request run is the
+        # *first* CI job: no required check has a completed conclusion yet,
+        # so a real CI signal only exists on a manual workflow_dispatch
+        # re-review, after CI has already run once.
+        set -uo pipefail
+        SIGNAL="no_ci"
+        if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+          CONCLUSIONS="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '[.check_runs[] | select(.status == "completed") | .conclusion]' 2>/dev/null)"
+          if [ -n "${CONCLUSIONS}" ] && [ "${CONCLUSIONS}" != "[]" ]; then
+            if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
+              SIGNAL="timeout"
+            elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
+              SIGNAL="fail"
+            elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
+              SIGNAL="pass"
+            fi
+          fi
+        fi
+        echo "signal=${SIGNAL}" >> "${GITHUB_OUTPUT}"
 
     - name: Reset prior review and labels
       id: reset
