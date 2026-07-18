@@ -86,6 +86,30 @@ inputs:
       Override when a gateway aliases model names.
     required: false
     default: "claude-opus-4-8"
+  haiku-model:
+    description: >
+      Model ID used by the context stage (this phase) to read the diff and changed
+      files and write context.md for the review stage to consume. Override when a
+      gateway aliases model names.
+    required: false
+    default: "claude-haiku-4-5-20251001"
+  anthropic-api-key:
+    description: >
+      Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
+      `anthropic-auth-token` — supply exactly one. Required for the context stage (this
+      phase) and the future review stage (a later phase) to call the Anthropic API.
+    required: false
+  anthropic-auth-token:
+    description: >
+      Anthropic bearer token (`Authorization: Bearer …`), for gateways that
+      authenticate this way instead of an API key. Mutually exclusive with
+      `anthropic-api-key` — supply exactly one.
+    required: false
+  anthropic-base-url:
+    description: >
+      Optional override for the Anthropic API base URL (e.g. a caller's custom
+      gateway). When omitted, the standard Anthropic endpoint is used.
+    required: false
 
 outputs:
   verdict:
@@ -276,6 +300,36 @@ runs:
           echo "churn=${CHURN}"
           echo "model=${MODEL}"
         } >> "${GITHUB_OUTPUT}"
+
+    - name: Context stage (Haiku)
+      id: context
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic-auth-token }}
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        github_token: ${{ steps.identity.outputs.author-token }}
+        claude_args: --model ${{ inputs.haiku-model }}
+        prompt: |
+          Read the PR diff (the working tree is already checked out at the PR head
+          commit; diff it against the merge-base with the repository's default
+          branch — discover the default branch yourself, e.g. via `git remote show
+          origin` or `git symbolic-ref refs/remotes/origin/HEAD`, if you need it) and
+          the full contents of every changed file. Grep the repository for callers,
+          callees, and helper functions related to the changed code, so a reviewer
+          has the surrounding context without re-deriving it.
+
+          Write a concise summary to `context.md` at the repository root covering:
+          - what changed, in plain language
+          - which files/functions call into or are called by the changed code
+          - any related helpers, shared utilities, or patterns the changed code
+            reuses or should have reused
+
+          Do NOT review the change. Do NOT judge correctness, quality, or security.
+          Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
+          output is the factual context.md summary — a later stage does the review.
 
     - name: CI signal (re-review only)
       id: ci-signal
