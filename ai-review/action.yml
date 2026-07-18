@@ -174,6 +174,7 @@ runs:
       env:
         INPUT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        INPUT_CONFIDENCE_THRESHOLD: ${{ inputs.confidence-threshold }}
       run: |
         set -euo pipefail
         PR_NUMBER="${INPUT_PR_NUMBER:-${EVENT_PR_NUMBER}}"
@@ -182,6 +183,12 @@ runs:
           exit 1
         fi
         echo "pr-number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+        # inputs.confidence-threshold's declared default ("90") only applies when the
+        # caller omits the key entirely. Callers that unconditionally forward
+        # github.event.inputs.confidence_threshold (empty outside workflow_dispatch)
+        # pass an explicit empty string, which overrides the default — and
+        # Number('') is 0 in JS, silently disabling the threshold. Fall back here.
+        echo "confidence-threshold=${INPUT_CONFIDENCE_THRESHOLD:-90}" >> "${GITHUB_OUTPUT}"
 
     - name: Fork guard
       id: fork-guard
@@ -577,7 +584,7 @@ runs:
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         PASS_LABEL: ${{ inputs.pass-label }}
         FAIL_LABEL: ${{ inputs.fail-label }}
-        CONFIDENCE_THRESHOLD: ${{ inputs.confidence-threshold }}
+        CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
       with:
