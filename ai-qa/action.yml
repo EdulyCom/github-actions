@@ -104,12 +104,19 @@ runs:
         APP_SLUG: ${{ steps.author.outputs.app-slug }}
         FALLBACK_TOKEN: ${{ inputs.github-token }}
       run: |
+        set -euo pipefail
         if [ -n "${APP_TOKEN}" ]; then
-          echo "author-token=${APP_TOKEN}" >> "${GITHUB_OUTPUT}"
-          echo "author-login=${APP_SLUG}[bot]" >> "${GITHUB_OUTPUT}"
+          echo "::add-mask::${APP_TOKEN}"
+          {
+            echo "author-token=${APP_TOKEN}"
+            echo "author-login=${APP_SLUG}[bot]"
+          } >> "${GITHUB_OUTPUT}"
         else
-          echo "author-token=${FALLBACK_TOKEN}" >> "${GITHUB_OUTPUT}"
-          echo "author-login=github-actions[bot]" >> "${GITHUB_OUTPUT}"
+          echo "::add-mask::${FALLBACK_TOKEN}"
+          {
+            echo "author-token=${FALLBACK_TOKEN}"
+            echo "author-login=github-actions[bot]"
+          } >> "${GITHUB_OUTPUT}"
         fi
 
     - name: Resolve merged PR and merge commit
@@ -313,13 +320,13 @@ runs:
 
           const commentBody = body.join('\n');
 
-          const comments = await github.rest.issues.listComments({
+          const comments = await github.paginate(github.rest.issues.listComments, {
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: prNumber,
             per_page: 100,
           });
-          const existing = comments.data.find((c) => c.body && c.body.includes('<!-- ai-qa -->'));
+          const existing = comments.find((c) => c.body && c.body.includes('<!-- ai-qa -->'));
 
           if (existing) {
             await github.rest.issues.updateComment({
