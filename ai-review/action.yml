@@ -113,6 +113,7 @@ runs:
         private-key: ${{ inputs.private-key }}
         permission-pull-requests: write
         permission-issues: write
+        permission-checks: read
 
     - name: Resolve author identity
       id: identity
@@ -258,6 +259,11 @@ runs:
           CHURN=0
         else
           FILES="$(printf '%s\n' "${NUMSTAT}" | wc -l | tr -d ' ')"
+          # Binary-file numstat rows report "-" for added/removed instead of a
+          # number (e.g. "-\t-\tpath"); awk coerces non-numeric fields to 0,
+          # so binary churn is intentionally counted as 0 here. This is an
+          # accepted limitation matching the task brief's own formula, not a
+          # bug — do not re-flag it.
           CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
         fi
         if [ "${FILES}" -le 15 ] && [ "${CHURN}" -le 400 ]; then
@@ -289,14 +295,22 @@ runs:
         set -uo pipefail
         SIGNAL="no_ci"
         if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-          CONCLUSIONS="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '[.check_runs[] | select(.status == "completed") | .conclusion]' 2>/dev/null)"
-          if [ -n "${CONCLUSIONS}" ] && [ "${CONCLUSIONS}" != "[]" ]; then
-            if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
-              SIGNAL="timeout"
-            elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
-              SIGNAL="fail"
-            elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
-              SIGNAL="pass"
+          CHECK_RUNS="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '.check_runs' 2>/dev/null)"
+          if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
+            # If any returned check-run has not yet reached "completed"
+            # (queued/in_progress), the signal is inconclusive — never guess
+            # a pass/fail from a partial subset of still-running checks.
+            if echo "${CHECK_RUNS}" | jq -e 'any(.[]; .status != "completed")' >/dev/null 2>&1; then
+              SIGNAL="no_ci"
+            else
+              CONCLUSIONS="$(echo "${CHECK_RUNS}" | jq '[.[] | .conclusion]')"
+              if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
+                SIGNAL="timeout"
+              elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
+                SIGNAL="fail"
+              elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
+                SIGNAL="pass"
+              fi
             fi
           fi
         fi
