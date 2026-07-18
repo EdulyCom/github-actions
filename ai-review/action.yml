@@ -103,7 +103,9 @@ inputs:
     description: >
       Anthropic bearer token (`Authorization: Bearer …`), for gateways that
       authenticate this way instead of an API key. Mutually exclusive with
-      `anthropic-api-key` — supply exactly one.
+      `anthropic-api-key` — supply exactly one. Internally, this value is also passed
+      as a fallback `anthropic_api_key` to the context stage due to an upstream
+      validation gap (anthropics/claude-code-action#1294).
     required: false
   anthropic-base-url:
     description: >
@@ -305,11 +307,14 @@ runs:
       id: context
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
+      # so the bearer token also fills anthropic_api_key to pass validation, while
+      # ANTHROPIC_CUSTOM_HEADERS carries the real bearer credential used on the wire.
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
-        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic-auth-token }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ steps.identity.outputs.author-token }}
         claude_args: --model ${{ inputs.haiku-model }}
         prompt: |
