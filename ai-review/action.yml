@@ -485,7 +485,12 @@ runs:
           is coverage on critical paths below target
           (`coverage_below_threshold_on_critical_paths`), and are any tests
           failing (`tests_failing`)? Report these as three booleans; omit any
-          you cannot assess rather than guessing.
+          you cannot assess rather than guessing. Per the rubric's exemption:
+          if this diff is Docs/Config-only per §12's test requirement matrix
+          (CI/workflow YAML, composite action wiring, markdown, prompt text,
+          or other config with no unit-testable logic — nothing a test could
+          exercise), report `no_tests_for_changed_logic: false` — that row
+          requires no tests, so none missing is not a defect.
 
           Write a complete review as `comment_markdown`: findings grouped by
           severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
