@@ -29,7 +29,9 @@ inputs:
       Fallback token used to call the GitHub REST API when `app-id` /
       `private-key` are not set. Defaults to the calling workflow's own
       GITHUB_TOKEN; override only if the caller needs a different identity
-      or scope.
+      or scope. Also used directly (regardless of whether `app-id` /
+      `private-key` are set) by the read-only Context stage, which never
+      needs the App-minted write-scoped identity.
     required: false
     default: ${{ github.token }}
   pr-number:
@@ -315,7 +317,12 @@ runs:
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
-        github_token: ${{ steps.identity.outputs.author-token }}
+        # Deliberately NOT steps.identity.outputs.author-token: this stage only
+        # reads the local working tree and writes context.md, so it gets the
+        # unprivileged fallback token rather than the App-minted
+        # pull-requests/issues/checks-scoped identity used by the publishing
+        # steps later in this action.
+        github_token: ${{ inputs.github-token }}
         claude_args: --model ${{ inputs.haiku-model }}
         prompt: |
           Read the PR diff (the working tree is already checked out at the PR head
