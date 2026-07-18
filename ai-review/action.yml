@@ -482,10 +482,10 @@ runs:
 
           Write a complete review as `comment_markdown`: findings grouped by
           severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
-          state "_None._" for empty sections), strengths, and a leading bold
-          verdict token literally `**✅ PASS**` or `**❌ FAIL**` matching your
-          own `verdict` field. Do not include any HTML marker comment in
-          `comment_markdown` — the caller adds one separately.
+          state "_None._" for empty sections), and strengths. Do not include
+          a leading verdict token, a confidence/merge-risk line, or any HTML
+          marker comment in `comment_markdown` — the caller deterministically
+          recomputes the verdict and prepends its own banner separately.
 
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
