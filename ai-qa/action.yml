@@ -182,6 +182,19 @@ runs:
         echo "--- test-command output (tail) ---"
         tail -n 200 test-output.log || true
 
+    # Only set ANTHROPIC_BASE_URL when the caller actually supplied one —
+    # setting it to an empty string in the triage step's own `env:` would
+    # override claude-code-action's/the Anthropic SDK's own default endpoint
+    # fallback with `''` instead of leaving the variable absent.
+    - name: Set Anthropic base URL (if provided)
+      id: anthropic-base-url
+      if: inputs.anthropic-base-url != ''
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.anthropic-base-url }}
+      run: |
+        echo "ANTHROPIC_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
+
     # Workaround for anthropics/claude-code-action#1294: the action
     # requires *some* value in `anthropic_api_key` even when authenticating
     # to a custom gateway via a bearer token, so fall back to the auth
@@ -194,7 +207,6 @@ runs:
         (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       env:
-        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
@@ -343,7 +355,7 @@ runs:
               name: removeLabel,
             });
           } catch (err) {
-            if (err.status !== 404) {
+            if (err.status !== 404 && err.status !== 422) {
               throw err;
             }
           }
