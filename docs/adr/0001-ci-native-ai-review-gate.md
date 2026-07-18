@@ -221,6 +221,20 @@ references in this repo, and the difference is intentional:
   would just make every routine internal change a two-PR dance with no
   corresponding security benefit.
 
+**Accepted risk, called out explicitly:** the `ai-review` action itself will
+flag `EdulyCom/github-actions/<action>@main` refs in a consumer's caller
+workflow as a P1 (unpinned action carrying secrets) — its rubric has no way
+to distinguish "unpinned because nobody bothered" from "floating by design,
+CODEOWNERS-guarded" (D8, above). This is expected and by design, not a
+finding that should trigger a reactive SHA-pin. When it appears on a PR,
+resolve it via ordinary human PR-review judgment (approve past the P1 with a
+comment referencing this ADR), not by pinning against D8 or by suppressing
+the finding in `ai-review` itself. A consumer repo that wants this
+particular P1 silenced going forward may add a caller-side
+`.claude/review-profile.md` exception scoped to
+`EdulyCom/github-actions/*@main` specifically — third-party refs inside the
+same caller remain flagged normally.
+
 Beyond pinning, the actions built in this project (in later tasks) follow a
 least-privilege posture that this ADR records so later work is held to it:
 an App token, when used, is minted with per-permission scope (only the
