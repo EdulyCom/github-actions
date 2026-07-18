@@ -357,6 +357,25 @@ runs:
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
           output is the factual context.md summary — a later stage does the review.
 
+    - name: Verify context.md handoff
+      id: context-verify
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Durable regression check for the Task 2.4 fix-round finding that the
+        # Context stage's Write tool calls were silently denied (see the
+        # --allowedTools comment on the Context stage step above). This makes
+        # the handoff's health visible in every run's plain step log instead of
+        # requiring a permission_denials_count archaeology dig.
+        if [ ! -s context.md ]; then
+          echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          exit 0
+        fi
+        echo "context.md present: $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        echo "--- context.md preview (first 20 lines) ---"
+        head -n 20 context.md
+
     - name: CI signal (re-review only)
       id: ci-signal
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -420,7 +439,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --allowedTools "Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
