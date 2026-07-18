@@ -30,4 +30,5 @@ jobs:
           # repo does: a non-zero exit fails the job, and the job's status
           # is the required context.
           reporter: local
+          filter_mode: nofilter
           fail_level: error

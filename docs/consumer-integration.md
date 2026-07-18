@@ -70,16 +70,18 @@ jobs:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
           app-id: ${{ vars.APP_ID }}
-          app-private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
   review-gate:
     runs-on: ubuntu-latest
     needs: [ai-review]
     steps:
       - name: Require a passing AI review verdict
+        env:
+          VERDICT: ${{ needs.ai-review.outputs.verdict }}
         run: |
-          if [ "${{ needs.ai-review.outputs.verdict }}" != "pass" ]; then
-            echo "AI review verdict was '${{ needs.ai-review.outputs.verdict }}', not 'pass'." >&2
+          if [ "$VERDICT" != "pass" ]; then
+            echo "AI review verdict was '$VERDICT', not 'pass'." >&2
             exit 1
           fi
 
