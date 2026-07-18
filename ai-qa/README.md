@@ -48,16 +48,20 @@ caller-supplied configuration, not PR-author-controlled content.)
 5. **Wait for deploy health** — polls `health-url` with `curl --fail` every
    five seconds until it succeeds or `deploy-timeout` elapses. Unreachable
    at the deadline is treated as an unhealthy deploy (fail signal).
-6. **Run test command** — runs `test-command` via `bash -c`, capturing its
+6. **Set up Node** (optional) — if `node-version` is set, provisions that
+   Node.js version via `actions/setup-node` before `test-command` runs.
+   Skipped entirely when `node-version` is left unset — this action makes
+   no assumption about what toolchain, if any, the runner already has.
+7. **Run test command** — runs `test-command` via `bash -c`, capturing its
    exit code and full output (`test-output.log`) regardless of the health
    check's outcome, since a failing deploy and a failing test are distinct,
    independently useful signals.
-7. **Triage failing logs (Haiku)** — only runs when the health check or
+8. **Triage failing logs (Haiku)** — only runs when the health check or
    test command failed **and** an Anthropic credential is configured.
    Reads `test-output.log` and writes a short, schema-validated
    plain-language summary (what failed, likely root cause, one next step).
    Summary only — it never attempts a fix or a code-quality judgment.
-8. **Publish report** — posts (or updates, via a hidden `<!-- ai-qa -->`
+9. **Publish report** — posts (or updates, via a hidden `<!-- ai-qa -->`
    anchor, so re-runs don't stack duplicate comments) a report comment
    showing the health/test signals, the triage summary if one was
    produced, and a tail of the test output, then reconciles `pass-label`/
@@ -73,6 +77,7 @@ caller-supplied configuration, not PR-author-controlled content.)
 | `health-url` | URL polled with `curl --fail` until healthy or `deploy-timeout` elapses. No sensible generic default exists. | **Yes** | — |
 | `deploy-timeout` | Seconds to keep polling `health-url` before giving up. | No | `180` |
 | `test-command` | Shell command run via `bash -c` against the checked-out merge commit; its exit code is the test pass/fail signal. No sensible generic default exists. | **Yes** | — |
+| `node-version` | Node.js version to provision (via `actions/setup-node`) before `test-command` runs. Leave unset to skip Node setup entirely — e.g. a non-JS `test-command`, or a runner that already has Node preinstalled. Callers whose `test-command` invokes npm/yarn/corepack on a bare self-hosted runner must set this. | No | — |
 | `pass-label` | Label applied when the overall QA signal (health + test) passes. | No | `✓ /ai-qa` |
 | `fail-label` | Label applied when the overall QA signal fails. | No | `✗ /ai-qa` |
 | `haiku-model` | Model used by the optional triage step. Only ever invoked on failure, and only with a credential configured. | No | `claude-haiku-4-5-20251001` |
