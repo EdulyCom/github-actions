@@ -58,8 +58,8 @@ decision is deliberately deferred. Under GitHub's default terms, a public
 repo without a license file grants no reuse rights beyond viewing the
 source; external reuse of the actions in this repo cannot begin until a
 license is chosen. This does not affect EdulyCom's own internal use of this
-repo, since EdulyCom already holds the necessary rights as the repo's
-owning organization.
+repository, since EdulyCom already holds the necessary rights as the
+repository's owning organization.
 
 ## Further reading
 
