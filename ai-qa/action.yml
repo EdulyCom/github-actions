@@ -1,0 +1,378 @@
+name: ai-qa
+description: >-
+  Post-merge, non-blocking QA signal. Runs after a push to the default
+  branch: resolves the pull request that was just merged, polls a
+  caller-supplied deploy health endpoint until it is healthy or a timeout
+  elapses, runs a caller-supplied test command against the merged commit,
+  optionally has Claude triage a failing log into a short summary, then
+  posts a report comment and a pass/fail label on the merged PR. This
+  action is informational only — it has no `outputs:` block, never calls
+  the Checks API, and gates nothing in the calling workflow.
+
+inputs:
+  app-id:
+    description: >-
+      GitHub App ID. Optional — with `private-key`, the report comment and
+      label are authored as `<app-slug>[bot]` instead of
+      `github-actions[bot]`. Cosmetic only; see ADR 0001 (b).
+    required: false
+  private-key:
+    description: GitHub App private key, paired with `app-id`.
+    required: false
+  github-token:
+    description: >-
+      Fallback token used when `app-id`/`private-key` are not set, and the
+      token the (unprivileged, read-only) triage step always uses
+      regardless of whether an App is configured.
+    required: false
+    default: ${{ github.token }}
+  health-url:
+    description: >-
+      URL polled with `curl --fail` once every few seconds until it
+      responds successfully or `deploy-timeout` elapses. Required — there
+      is no sensible generic default for a deployed environment's health
+      endpoint.
+    required: true
+  deploy-timeout:
+    description: >-
+      Seconds to keep polling `health-url` before giving up. Unreachable at
+      the deadline counts as an unhealthy deploy (fail signal).
+    required: false
+    default: "180"
+  test-command:
+    description: >-
+      Shell command run via `bash -c` against the checked-out merge commit;
+      its exit code is the test pass/fail signal. Required — there is no
+      sensible generic default test command.
+    required: true
+  pass-label:
+    description: >-
+      Label applied to the merged PR when the overall QA signal (health
+      check and test command) passes.
+    required: false
+    default: "✓ /ai-qa"
+  fail-label:
+    description: >-
+      Label applied to the merged PR when the overall QA signal fails.
+    required: false
+    default: "✗ /ai-qa"
+  haiku-model:
+    description: >-
+      Model used by the optional triage step to summarize a failing
+      health-check/test-command outcome. Only ever invoked on failure, and
+      only when an Anthropic credential is configured.
+    required: false
+    default: claude-haiku-4-5-20251001
+  anthropic-api-key:
+    description: >-
+      Anthropic API key used by the triage step. Optional — without a
+      credential the triage step quietly no-ops and the report comment is
+      still published from the health/test signals alone. Exactly one of
+      `anthropic-api-key`/`anthropic-auth-token` should be supplied when
+      triage is wanted.
+    required: false
+  anthropic-auth-token:
+    description: >-
+      Bearer token for a custom Anthropic-compatible gateway, used instead
+      of `anthropic-api-key`. See the `#1294` workaround comment on the
+      triage step below.
+    required: false
+  anthropic-base-url:
+    description: >-
+      Optional custom Anthropic-compatible API base URL (e.g. a corporate
+      gateway). Leave unset to use Anthropic's default endpoint.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Author token
+      id: author
+      if: inputs.app-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        permission-pull-requests: write
+        permission-issues: write
+
+    - name: Resolve author identity
+      id: identity
+      shell: bash
+      env:
+        APP_TOKEN: ${{ steps.author.outputs.token }}
+        APP_SLUG: ${{ steps.author.outputs.app-slug }}
+        FALLBACK_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -n "${APP_TOKEN}" ]; then
+          echo "::add-mask::${APP_TOKEN}"
+          {
+            echo "author-token=${APP_TOKEN}"
+            echo "author-login=${APP_SLUG}[bot]"
+          } >> "${GITHUB_OUTPUT}"
+        else
+          echo "::add-mask::${FALLBACK_TOKEN}"
+          {
+            echo "author-token=${FALLBACK_TOKEN}"
+            echo "author-login=github-actions[bot]"
+          } >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Resolve merged PR and merge commit
+      id: merge
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+        MERGE_SHA: ${{ github.sha }}
+      run: |
+        set -uo pipefail
+        PR_NUMBER=""
+        for attempt in 1 2 3 4 5; do
+          PR_JSON="$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls" 2>/dev/null || echo '[]')"
+          PR_NUMBER="$(echo "${PR_JSON}" | jq -r '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty')"
+          if [ -n "${PR_NUMBER}" ]; then
+            break
+          fi
+          if [ "${attempt}" -lt 5 ]; then
+            sleep 3
+          fi
+        done
+        if [ -z "${PR_NUMBER}" ]; then
+          echo "::notice::ai-qa skipped — no merged pull request is associated with commit ${MERGE_SHA} after 5 attempts (a direct push to the default branch, or GitHub has not yet indexed the association)"
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+          echo "pr-number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "merge-sha=${MERGE_SHA}" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Check out merge commit
+      if: steps.merge.outputs.skip != 'true'
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        ref: ${{ steps.merge.outputs.merge-sha }}
+        persist-credentials: false
+
+    - name: Wait for deploy health
+      id: health
+      if: steps.merge.outputs.skip != 'true'
+      shell: bash
+      env:
+        HEALTH_URL: ${{ inputs.health-url }}
+        DEPLOY_TIMEOUT: ${{ inputs.deploy-timeout }}
+      run: |
+        set -uo pipefail
+        START="$(date +%s)"
+        STATUS="timeout"
+        while :; do
+          if curl --fail --silent --show-error --max-time 10 "${HEALTH_URL}" >/dev/null 2>&1; then
+            STATUS="healthy"
+            break
+          fi
+          NOW="$(date +%s)"
+          ELAPSED="$(( NOW - START ))"
+          if [ "${ELAPSED}" -ge "${DEPLOY_TIMEOUT}" ]; then
+            break
+          fi
+          sleep 5
+        done
+        echo "status=${STATUS}" >> "${GITHUB_OUTPUT}"
+        if [ "${STATUS}" != "healthy" ]; then
+          echo "::warning::${HEALTH_URL} did not become healthy within ${DEPLOY_TIMEOUT}s"
+        fi
+
+    - name: Run test command
+      id: test
+      if: steps.merge.outputs.skip != 'true'
+      shell: bash
+      env:
+        TEST_COMMAND: ${{ inputs.test-command }}
+      run: |
+        set +e
+        bash -c "${TEST_COMMAND}" > test-output.log 2>&1
+        EXIT_CODE=$?
+        set -e
+        echo "exit-code=${EXIT_CODE}" >> "${GITHUB_OUTPUT}"
+        echo "--- test-command output (tail) ---"
+        tail -n 200 test-output.log || true
+
+    # Only set ANTHROPIC_BASE_URL when the caller actually supplied one —
+    # setting it to an empty string in the triage step's own `env:` would
+    # override claude-code-action's/the Anthropic SDK's own default endpoint
+    # fallback with `''` instead of leaving the variable absent.
+    - name: Set Anthropic base URL (if provided)
+      id: anthropic-base-url
+      if: inputs.anthropic-base-url != ''
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.anthropic-base-url }}
+      run: | # zizmor: ignore[github-env] BASE_URL is this action's own anthropic-base-url input (caller-supplied static config), never attacker-influenceable event data — see ADR-0010's env-binding rule
+        echo "ANTHROPIC_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
+
+    # Workaround for anthropics/claude-code-action#1294: the action
+    # requires *some* value in `anthropic_api_key` even when authenticating
+    # to a custom gateway via a bearer token, so fall back to the auth
+    # token itself and carry the real bearer via a custom header instead.
+    - name: Triage failing logs (Haiku)
+      id: triage
+      continue-on-error: true
+      if: >-
+        steps.merge.outputs.skip != 'true' &&
+        (steps.health.outputs.status != 'healthy' || steps.test.outputs.exit-code != '0') &&
+        (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      env:
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        github_token: ${{ inputs.github-token }}
+        claude_args: |
+          --model ${{ inputs.haiku-model }}
+          --allowedTools "Read,Grep,Glob,Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}'
+        prompt: |
+          A post-merge QA run just failed: either the deploy health check
+          at ${{ inputs.health-url }} did not become healthy within
+          ${{ inputs.deploy-timeout }}s, the test command failed, or both.
+
+          Read `test-output.log` at the repository root (the captured
+          stdout/stderr of the test command) if it exists, and any other
+          checked-out source needed to explain the failure.
+
+          Write a short (3-8 sentence) plain-language triage summary:
+          what failed, the most likely root cause visible in the log, and
+          one concrete next step for a human to investigate. Do not
+          attempt to fix anything, do not run any commands beyond
+          inspecting the log, and do not judge code quality — this is a
+          failure-log summary only, not a code review.
+
+          Return your summary via the required structured output schema.
+
+    - name: Publish report
+      id: publish
+      if: always() && steps.merge.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
+        PR_NUMBER: ${{ steps.merge.outputs.pr-number }}
+        MERGE_SHA: ${{ steps.merge.outputs.merge-sha }}
+        HEALTH_STATUS: ${{ steps.health.outputs.status }}
+        HEALTH_URL: ${{ inputs.health-url }}
+        DEPLOY_TIMEOUT: ${{ inputs.deploy-timeout }}
+        TEST_EXIT_CODE: ${{ steps.test.outputs.exit-code }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        TRIAGE_OUTPUT: ${{ steps.triage.outputs.structured_output }}
+        PASS_LABEL: ${{ inputs.pass-label }}
+        FAIL_LABEL: ${{ inputs.fail-label }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      with:
+        github-token: ${{ steps.identity.outputs.author-token }}
+        script: |
+          const fs = require('fs');
+
+          const prNumber = Number(process.env.PR_NUMBER);
+          const healthOk = process.env.HEALTH_STATUS === 'healthy';
+          const testOk = process.env.TEST_EXIT_CODE === '0';
+          const overallPass = healthOk && testOk;
+
+          let triageSummary = '';
+          try {
+            const parsed = JSON.parse(process.env.TRIAGE_OUTPUT || '{}');
+            if (parsed && typeof parsed.summary === 'string') {
+              triageSummary = parsed.summary;
+            }
+          } catch (err) {
+            core.warning(`could not parse triage structured output: ${err.message}`);
+          }
+
+          let logTail = '';
+          try {
+            const full = fs.readFileSync('test-output.log', 'utf8');
+            const tailLines = full.split('\n').slice(-80).join('\n');
+            logTail = tailLines.slice(-4000);
+          } catch (err) {
+            // no log file (e.g. the test-command step didn't run) — omit it.
+          }
+
+          const body = [];
+          body.push('<!-- ai-qa -->');
+          body.push(overallPass ? '### ✅ ai-qa: PASS' : '### ❌ ai-qa: FAIL');
+          body.push('');
+          body.push(`Merge commit \`${process.env.MERGE_SHA.slice(0, 12)}\``);
+          body.push('');
+          body.push('| Signal | Result |');
+          body.push('| --- | --- |');
+          body.push(`| Deploy health (\`${process.env.HEALTH_URL}\`) | ${healthOk ? '✅ healthy' : `⏱️ not healthy within ${process.env.DEPLOY_TIMEOUT}s`} |`);
+          body.push(`| Test command (\`${process.env.TEST_COMMAND}\`) | ${testOk ? '✅ passed' : `❌ failed (exit ${process.env.TEST_EXIT_CODE})`} |`);
+
+          if (triageSummary) {
+            body.push('');
+            body.push('**Triage summary:**');
+            body.push('');
+            body.push(triageSummary);
+          }
+
+          if (logTail) {
+            body.push('');
+            body.push('<details><summary>Test command output (tail)</summary>');
+            body.push('');
+            body.push('```');
+            body.push(logTail);
+            body.push('```');
+            body.push('');
+            body.push('</details>');
+          }
+
+          body.push('');
+          body.push(`_Posted by \`${process.env.AUTHOR_LOGIN}\` · [workflow run](${process.env.RUN_URL})_`);
+
+          const commentBody = body.join('\n');
+
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            per_page: 100,
+          });
+          const existing = comments.find((c) => c.body && c.body.includes('<!-- ai-qa -->'));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body: commentBody,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody,
+            });
+          }
+
+          const addLabel = overallPass ? process.env.PASS_LABEL : process.env.FAIL_LABEL;
+          const removeLabel = overallPass ? process.env.FAIL_LABEL : process.env.PASS_LABEL;
+
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            labels: [addLabel],
+          });
+
+          try {
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              name: removeLabel,
+            });
+          } catch (err) {
+            if (err.status !== 404 && err.status !== 422) {
+              throw err;
+            }
+          }
