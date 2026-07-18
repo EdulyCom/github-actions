@@ -454,7 +454,7 @@ runs:
           installed successfully; if it is unavailable, proceed without it —
           do not fail or block on a missing plugin.
 
-          Read `ai-review/rubric.md` at the repository root. This is the
+          Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
           first, then line-by-line diff, removed-behavior audit, cross-file
           tracing, reuse, simplification, efficiency, altitude), a severity
