@@ -305,7 +305,7 @@ runs:
           // credential was configured or the review step errored out.
           let qa = null;
           try {
-            const parsed = JSON.parse(process.env.QA_OUTPUT || '');
+            const parsed = JSON.parse(process.env.QA_OUTPUT || '{}');
             if (parsed && typeof parsed === 'object') qa = parsed;
           } catch (err) {
             core.warning(`could not parse QA structured output: ${err.message}`);
@@ -347,7 +347,7 @@ runs:
           body.push(`| Deploy health (\`${process.env.HEALTH_URL}\`) | ${healthOk ? '✅ healthy' : `⏱️ not healthy within ${process.env.DEPLOY_TIMEOUT}s`} |`);
           if (qaRan) {
             body.push(`| QA review | ${confidence}% confidence · merge risk ${mergeRisk} |`);
-            body.push(`| Findings | P0 ${counts.p0} · P1 ${counts.p1} · P2 ${counts.p2} · P3 ${counts.p3} |`);
+            body.push(`| Code findings | P0 ${counts.p0} · P1 ${counts.p1} · P2 ${counts.p2} · P3 ${counts.p3} |`);
           } else {
             body.push(`| QA review | ⚠️ did not run — reporting deploy-health signal only |`);
           }
