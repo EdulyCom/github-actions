@@ -424,6 +424,11 @@ runs:
 
     - name: Review stage (Sonnet/Opus)
       id: review
+      # continue-on-error: claude-code-action intermittently finishes the
+      # session successfully but without emitting structured_output and then
+      # exits 1 (upstream flakiness). Don't crash the job — the retry step
+      # below re-attempts, and Publish degrades gracefully if both miss.
+      continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       # Same anthropics/claude-code-action#1294 workaround as the Context stage above:
@@ -504,6 +509,53 @@ runs:
           recomputes the actual pass/fail decision from `counts` alone and
           does not trust your `verdict` field; report it anyway as your own
           best assessment.
+
+    # Retry of the Review stage — runs only if the first attempt failed or
+    # returned no structured_output (the intermittent claude-code-action miss).
+    # Same model/tools/schema/credentials; a condensed prompt that re-runs the
+    # full review and stresses that emitting structured output is mandatory.
+    # Keep the model/tools/schema in sync with the Review stage step above.
+    - name: Review stage (Sonnet/Opus) — retry
+      id: review_retry
+      continue-on-error: true
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '')
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        github_token: ${{ inputs.github-token }}
+        plugins: superpowers@superpowers-marketplace
+        plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
+        claude_args: |
+          --model ${{ steps.route.outputs.model }}
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
+        prompt: |
+          This is a RETRY of an automated code review whose previous attempt
+          ended without returning the required structured output. Emitting the
+          structured output as your FINAL action is mandatory this time.
+
+          Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
+          scan + P0-P3 severities + checklist) and `context.md` at the repo root
+          if present. The PR number is in the `PR_NUMBER` environment variable;
+          the PR head is already checked out. Run
+          `gh pr view "$PR_NUMBER" --json title,body,url,number` and `git diff`
+          against the merge base to get the change under review.
+
+          Perform the full review per the rubric, then write `comment_markdown`
+          (findings grouped by severity P0-P3 with "_None._" for empty sections,
+          plus strengths; no leading verdict token / confidence line / HTML
+          marker — the caller prepends its own banner). `counts` must be
+          accurate; a deterministic step recomputes the pass/fail decision.
+
+          Return your assessment via the required structured output schema. Do
+          NOT end your turn without emitting the structured output.
 
     - name: Reset prior review and labels
       id: reset
@@ -621,7 +673,7 @@ runs:
         FAIL_LABEL: ${{ inputs.fail-label }}
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
-        REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
+        REVIEW_JSON: ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output || steps.review.outputs.structured_output }}
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
@@ -635,7 +687,49 @@ runs:
           try {
             review = JSON.parse(process.env.REVIEW_JSON);
           } catch (err) {
-            core.setFailed(`Review stage did not return valid structured output: ${err.message}`);
+            // Both the review stage and its retry ended without valid
+            // structured output (the intermittent claude-code-action miss).
+            // Degrade gracefully rather than crashing the job: post an explicit
+            // "inconclusive — re-run" review, fail the gate (safe — a review
+            // that didn't complete must not read as pass), and set outputs so
+            // review-gate sees a non-pass verdict. A re-run usually succeeds.
+            core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
+            const inconclusiveBody = [
+              "<!-- ai-review -->",
+              "### ⚠️ AI Review — inconclusive (re-run required)",
+              "",
+              "The review model did not return a structured result after two",
+              "attempts (a known intermittent `anthropics/claude-code-action`",
+              "issue). This is **not** a code-quality judgment — the review did",
+              "not complete.",
+              "",
+              "**Re-run the `ai-review` job** to get a verdict.",
+            ].join("\n");
+            try {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                event: "REQUEST_CHANGES",
+                body: inconclusiveBody,
+              });
+            } catch (e) {
+              core.warning(`Could not post inconclusive review: ${e.message}`);
+            }
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [failLabel],
+              });
+            } catch (e) {
+              if (![404, 422].includes(e.status)) core.warning(e.message);
+            }
+            core.setOutput("verdict", "fail");
+            core.setOutput("confidence", "0");
+            core.setOutput("merge_risk", "high");
+            core.setOutput("review_event", "REQUEST_CHANGES");
             return;
           }
 
