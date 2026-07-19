@@ -127,7 +127,11 @@ jobs:
 
 Runs after a merge, as a non-blocking signal against your deployed
 environment — it does not gate anything and does not need a `review-gate`
-style job:
+style job. Post-merge, Claude performs an agentic QA review: it smoke-tests
+the deployed app, reviews the merged diff for integration/runtime risks, and
+(only at its discretion) may run your build/tests to confirm a suspected
+regression. Provision any toolchain that review might need *before* the
+action — it ships none of its own:
 
 ```yaml
 name: ai-qa
@@ -144,25 +148,32 @@ permissions:
 jobs:
   ai-qa:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
+      # The action provisions no toolchain of its own — set up whatever the
+      # QA review might need to run build/tests, before invoking it.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - uses: EdulyCom/github-actions/ai-qa@main
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
           health-url: https://your-deployed-environment.example.com/health
-          test-command: "npm run smoke-test"
+          test-hint: "npm run build && npm test"
 ```
 
-`health-url` and `test-command` are inherently per-repo and have no
-sensible generic default — you must set both to real values for your
-deployment. Unlike `ai-review`, the report `ai-qa` posts is a plain PR
+`health-url` is inherently per-repo and has no sensible generic default — you
+must set it to a real value for your deployment. `test-hint` is optional
+free-text guidance describing how to build/test this repo; the review runs it
+only if it decides to (it is not a mechanical command), so it need not be
+exhaustive. Unlike `ai-review`, the report `ai-qa` posts is a plain PR
 comment (the PR is already merged and closed by the time this runs, so a
 formal `pulls.createReview` isn't applicable) plus a `✓`/`✗ /ai-qa` label —
 both go through the Issues API, hence `issues: write` above in addition to
 `pull-requests: write`. The Anthropic credential is optional here (see
-section 1) — omit it and `ai-qa` still reports the health/test signal, just
-without a Claude-written triage summary on failure.
+section 1) — omit it and `ai-qa` still reports the deploy-health signal, just
+without the agentic review.
 
 ## 3. Cutting over from an old identity-pinned check
 
