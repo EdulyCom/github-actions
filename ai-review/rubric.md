@@ -341,7 +341,13 @@ Clamp to [0, 100].
 - Tests present AND passing AND coverage ≥ targets: no adjustment (or +3 at discretion).
 - Tests failing: −10 minimum.
 - Coverage < 60% on critical paths: −5.
-- No tests at all for changed logic: −15.
+- No tests at all for changed logic: −15. **Exemption:** this penalty applies only
+  when §12's test requirement matrix expects tests for the change type (Feature, Bug
+  Fix, Refactor, Security Fix, Performance). A **Docs/Config**-only diff (the matrix's
+  `—`/`—`/`—` row — CI/workflow YAML, composite action wiring, markdown, prompt text,
+  other non-unit-testable config) has no test-eligible surface and is exempt: report
+  `no_tests_for_changed_logic = false` for it, not `true`. Don't conflate "no tests
+  exist because none are needed" with "no tests exist because they were skipped."
 
 | Confidence | Label |
 |---|---|
