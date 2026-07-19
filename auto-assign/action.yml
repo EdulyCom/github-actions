@@ -1,29 +1,50 @@
 name: auto-assign
 description: >
-  Assigns a pull request's author as its own assignee when the PR is opened
-  or marked ready for review. Skips PRs authored by a bot account and PRs
-  that already have an assignee.
+  Assigns a pull request's author as its own assignee. Skips PRs authored by a
+  bot account and PRs that already have an assignee, and no-ops when there is
+  no pull_request context in the event (e.g. a workflow_dispatch run). Can be
+  used as a standalone workflow (on: pull_request) or — preferred — inlined as
+  a step inside another job (e.g. the first step of the ai-review job, before
+  the review runs).
 
 inputs:
+  app-id:
+    description: >
+      GitHub App ID. Optional — with private-key, the assignment is authored
+      under the App's own identity (<app-slug>[bot]) instead of
+      github-actions[bot]. Cosmetic only.
+    required: false
+  private-key:
+    description: GitHub App private key, paired with app-id.
+    required: false
   github-token:
     description: >
-      Token used to call the GitHub REST API to add the assignee. Defaults
-      to the calling workflow's own GITHUB_TOKEN; override only if the
-      caller needs a different identity or scope (e.g. an App
-      installation token).
+      Fallback token used when app-id/private-key are not set. Defaults to the
+      calling workflow's own GITHUB_TOKEN; override only if the caller needs a
+      different identity or scope.
     required: false
     default: ${{ github.token }}
 
 runs:
   using: composite
   steps:
+    - name: Author token
+      id: author
+      if: inputs.app-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        permission-pull-requests: write
+        permission-issues: write
+
     - name: Assign PR author
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       with:
-        github-token: ${{ inputs.github-token }}
+        github-token: ${{ steps.author.outputs.token || inputs.github-token }}
         script: |
           const author = process.env.PR_AUTHOR;
           const prNumber = Number(process.env.PR_NUMBER);

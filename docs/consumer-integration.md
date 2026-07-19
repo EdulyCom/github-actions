@@ -103,25 +103,38 @@ nothing will ever post to again. Add the new required context first,
 confirm it's green on a real PR, and only then remove the old one, so there
 is never a window where neither gate is enforced.
 
-### 2b. `auto-assign.yml`
+### 2b. Auto-assign — inline it in the `ai-review` job
+
+**Preferred:** add `auto-assign` as the first step of the `ai-review` job
+(before the review step), rather than as a separate workflow file. It needs one
+fewer file, and passing the same `app-id`/`private-key` authors the assignment
+under the App identity. The action no-ops on the `workflow_dispatch` path (no
+`pull_request` context), so no extra event guard is needed:
 
 ```yaml
-name: auto-assign
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  auto-assign:
-    runs-on: ubuntu-latest
+  ai-review:
+    name: 🤖 AI Review
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
     steps:
-      - uses: EdulyCom/github-actions/auto-assign@main
+      - name: Auto-assign PR author
+        uses: EdulyCom/github-actions/auto-assign@main
+        with:
+          app-id: ${{ vars.MTM_BOT_APP_ID }}
+          private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
+      - id: review
+        uses: EdulyCom/github-actions/ai-review@main
+        with:
+          # ...ai-review inputs (section 2a)...
 ```
+
+A standalone `on: pull_request` `auto-assign.yml` still works if you prefer to
+keep it decoupled — see [`auto-assign/README.md`](../auto-assign/README.md).
 
 ### 2c. `ai-qa.yml`
 
