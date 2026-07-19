@@ -63,7 +63,14 @@ injection-safety rule.
 10. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
     diff and returns a schema-validated structured result (verdict,
     confidence, merge risk, intent alignment, P0-P3 counts, test-quality
-    signals, and the review markdown body).
+    signals, and the review markdown body). `claude-code-action`
+    intermittently ends a successful session without emitting the structured
+    output and exits 1; the stage is `continue-on-error` and a **retry stage**
+    re-runs the review only when the first attempt failed or returned no
+    structured output. If *both* attempts miss, Publish (below) degrades
+    gracefully — it posts an explicit "inconclusive — re-run required" review
+    and a `fail` verdict rather than crashing the job, so a required
+    `review-gate` fails safe (never a false pass) and a re-run recovers it.
 11. **Reset prior review and labels** — dismisses this action's own prior
     `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
     can't be dismissed via the API and is left alone), **collapses every prior
