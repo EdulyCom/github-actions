@@ -65,11 +65,18 @@ runs:
             return;
           }
 
-          await github.rest.issues.addAssignees({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: prNumber,
-            assignees: [author],
-          });
-
-          core.info(`Assigned '${author}' to PR #${prNumber}.`);
+          // Non-fatal: assignment is a nicety, not a gate. addAssignees is an
+          // Issues-API call needing issues: write — if the token lacks it (a
+          // 403) or the call otherwise fails, warn and continue rather than
+          // failing the job this step may be inlined into (e.g. ai-review).
+          try {
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              assignees: [author],
+            });
+            core.info(`Assigned '${author}' to PR #${prNumber}.`);
+          } catch (err) {
+            core.warning(`Could not assign '${author}' to PR #${prNumber}: ${err.message}. Continuing.`);
+          }
