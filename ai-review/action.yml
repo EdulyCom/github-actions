@@ -556,6 +556,36 @@ runs:
             }
           }
 
+          // Hide (collapse as OUTDATED) every prior ai-review review by this
+          // bot so stale reviews don't pile up when a fresh one is posted.
+          // Uses the GraphQL minimizeComment mutation — PullRequestReview
+          // implements Minimizable. Marker-scoped (`<!-- ai-review -->`), so
+          // human reviews and other bots' reviews are never touched; non-fatal
+          // on error (already minimized, or the token lacks minimize perms).
+          const staleReviews = reviews.filter(
+            (review) =>
+              review.user?.login === authorLogin &&
+              typeof review.body === "string" &&
+              review.body.includes("<!-- ai-review -->") &&
+              review.node_id,
+          );
+
+          for (const review of staleReviews) {
+            try {
+              await github.graphql(
+                `mutation ($id: ID!) {
+                  minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
+                    minimizedComment { isMinimized }
+                  }
+                }`,
+                { id: review.node_id },
+              );
+              core.info(`Minimized prior ai-review review #${review.id} as outdated.`);
+            } catch (err) {
+              core.info(`Could not minimize review #${review.id}: ${err.message}`);
+            }
+          }
+
           const labels = [
             process.env.PASS_LABEL,
             process.env.FAIL_LABEL,

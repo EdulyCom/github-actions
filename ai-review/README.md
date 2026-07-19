@@ -66,8 +66,12 @@ injection-safety rule.
     signals, and the review markdown body).
 11. **Reset prior review and labels** — dismisses this action's own prior
     `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
-    can't be dismissed via the API and is left alone) and removes all four
-    labels, so a re-run supersedes cleanly instead of stacking reviews.
+    can't be dismissed via the API and is left alone), **collapses every prior
+    ai-review review by this bot as `OUTDATED`** (GraphQL `minimizeComment`,
+    scoped by the `<!-- ai-review -->` marker so human reviews are never
+    touched — non-fatal if the token can't minimize), and removes all four
+    labels, so a re-run supersedes cleanly and stale reviews are hidden instead
+    of stacking up visibly.
 12. **Publish review** — deterministically recomputes the verdict from the
     review stage's structured output and posts it as a native PR review and
     the corresponding pass/fail label, then sets the four job outputs.
