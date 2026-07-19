@@ -155,8 +155,7 @@ rule: **nothing organization-specific ships as a default.** Concretely:
 - **Caller-supplied, no default (required or org-specific when used):**
   `app-id` / `private-key` (optional pair, for (b)'s App-authored identity),
   an Anthropic credential (`anthropic-api-key` or `anthropic-auth-token`),
-  and — for `ai-qa` — `health-url` / `test-command`, which are inherently
-  per-repo.
+  and — for `ai-qa` — `health-url`, which is inherently per-repo.
 - **Caller-supplied, generic fallback default:** `confidence-threshold`
   (defaults to 90), `runner-label` (defaults to `ubuntu-latest`; realized as
   a job-level `runs-on:` expression in the caller's own workflow, not an
@@ -164,7 +163,9 @@ rule: **nothing organization-specific ships as a default.** Concretely:
   `runs-on:`), the pass/fail label text, `anthropic-base-url` (omitted → the standard
   Anthropic API endpoint), model IDs (generic defaults, repo-variable
   overridable for gateway aliasing), `github-token` (defaults to
-  `${{ github.token }}`), and `ai-qa`'s deploy timeout.
+  `${{ github.token }}`), and `ai-qa`'s deploy timeout and optional
+  `test-hint` (build/test guidance the post-merge review runs at its
+  discretion, never mechanically).
 - **Not parameterized at all — hardcoded, repo-agnostic behavior:** the gate
   mechanism itself (the job-output contract from (a)), the
   label-is-a-badge-never-a-trigger rule from (b), the injection-safety rule

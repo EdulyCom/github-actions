@@ -27,5 +27,8 @@ jobs:
         with:
           app-id: ${{ vars.MTM_BOT_APP_ID }}
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
+          # No Anthropic credential passed → the agentic QA review no-ops and
+          # the report publishes from the (always-healthy) deploy signal alone.
+          # This keeps the self-test cheap and deterministic; it proves the
+          # resolve-PR → health-poll → publish-comment/label pipeline end to end.
           health-url: https://raw.githubusercontent.com/EdulyCom/github-actions/main/README.md
-          test-command: "true"
