@@ -412,7 +412,6 @@ runs:
             counts.p3 = Number(qa.counts.p3) || 0;
             reportMd = typeof qa.report_markdown === 'string' ? qa.report_markdown : '';
             modelSummary = typeof qa.summary === 'string' ? qa.summary : '';
-            mergeRisk = typeof qa.merge_risk === 'string' ? qa.merge_risk : 'low';
           }
 
           // Deterministic test-plan enforcement (feature: evaluate PR test plan).
@@ -437,6 +436,18 @@ runs:
           const overallPass = p0 === 0 && p1 === 0 && p2 === 0;
           let confidence = 100 - 30 * p0 - 15 * p1 - 10 * p2;
           confidence = Math.max(0, Math.min(100, confidence));
+
+          // Deterministic merge-risk — mirror ai-review's derivation; never
+          // trust the model's self-reported merge_risk. Post-merge, an unhealthy
+          // deploy dominates, and a P2 is a fail-level severity here so it earns
+          // at least medium risk.
+          if (!healthOk || p0 > 0 || p1 > 2) {
+            mergeRisk = 'high';
+          } else if (p1 >= 1 || p2 >= 1 || confidence < 70) {
+            mergeRisk = 'medium';
+          } else {
+            mergeRisk = 'low';
+          }
 
           const body = [];
           body.push('<!-- ai-qa -->');

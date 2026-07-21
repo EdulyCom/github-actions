@@ -1054,11 +1054,17 @@ runs:
                   .replace(/\s+/g, " ")
                   .replace(/[.:;,\s]+$/, "")
                   .trim();
-              const verifiedNorms = new Set(
-                review.checklist
-                  .filter((i) => i && i.status === "verified" && i.text)
-                  .map((i) => norm(i.text))
-              );
+              // Count verified items per normalized text, so we tick AT MOST as
+              // many boxes as there were verified items with that text. This
+              // stops one verified item from ticking several distinct boxes that
+              // happen to normalize identically (over-tick collision).
+              const verifiedCounts = new Map();
+              for (const i of review.checklist) {
+                if (i && i.status === "verified" && i.text) {
+                  const k = norm(i.text);
+                  verifiedCounts.set(k, (verifiedCounts.get(k) || 0) + 1);
+                }
+              }
 
               // Tick matching UNCHECKED boxes only; never untick a human's box.
               const checkboxRe = /^(\s*[-*]\s*)\[ \](\s*)(.+)$/;
@@ -1067,9 +1073,14 @@ runs:
                 .split("\n")
                 .map((line) => {
                   const m = line.match(checkboxRe);
-                  if (m && verifiedNorms.has(norm(m[3]))) {
-                    ticks += 1;
-                    return `${m[1]}[x]${m[2]}${m[3]}`;
+                  if (m) {
+                    const k = norm(m[3]);
+                    const remaining = verifiedCounts.get(k) || 0;
+                    if (remaining > 0) {
+                      verifiedCounts.set(k, remaining - 1);
+                      ticks += 1;
+                      return `${m[1]}[x]${m[2]}${m[3]}`;
+                    }
                   }
                   return line;
                 })

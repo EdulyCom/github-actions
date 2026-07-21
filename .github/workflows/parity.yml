@@ -1,0 +1,45 @@
+name: Parity
+
+# The linked-issue resolver (GraphQL query + jq transform) is duplicated inline
+# in ai-review/action.yml and ai-qa/action.yml because this repo has no shared
+# module mechanism (see ADR 0003). This guard fails if the two copies drift, so
+# a change to one must be mirrored in the other.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  duplicated-snippets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Assert the shared linked-issue resolver stays in sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Canonical shared snippets — must appear verbatim in BOTH actions.
+          GQL='closingIssuesReferences(first:20){nodes{number title body state url labels(first:20){nodes{name}}}}'
+          JQ='[.data.repository.pullRequest.closingIssuesReferences.nodes[] | {number, title, body, state, url, labels: [.labels.nodes[].name]}]'
+          fail=0
+          for f in ai-review/action.yml ai-qa/action.yml; do
+            if ! grep -qF "${GQL}" "${f}"; then
+              echo "::error file=${f}::linked-issue GraphQL query is missing or has drifted; keep it identical to the other action."
+              fail=1
+            fi
+            if ! grep -qF "${JQ}" "${f}"; then
+              echo "::error file=${f}::linked-issue jq transform is missing or has drifted; keep it identical to the other action."
+              fail=1
+            fi
+          done
+          if [ "${fail}" -eq 0 ]; then
+            echo "Shared linked-issue resolver snippets are in sync across ai-review and ai-qa."
+          fi
+          exit "${fail}"
