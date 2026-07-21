@@ -415,6 +415,19 @@ runs:
             mergeRisk = typeof qa.merge_risk === 'string' ? qa.merge_risk : 'low';
           }
 
+          // Deterministic test-plan enforcement (feature: evaluate PR test plan).
+          // The model returns a per-item test_plan verdict; fold any FAILED item
+          // into the P2 floor so a failed acceptance check deterministically
+          // fails ai-qa (P2 = fail per the rubric), independent of whether the
+          // model remembered to bump counts.p2 itself. Rendered into the report
+          // below so the per-item verdicts are visible, not just counted.
+          const testPlan = qaRan && qa.test_plan && typeof qa.test_plan === 'object' ? qa.test_plan : null;
+          const testPlanItems = testPlan && Array.isArray(testPlan.items) ? testPlan.items : [];
+          const testPlanFailed = testPlanItems.filter((i) => i && i.status === 'failed').length;
+          if (testPlanFailed > 0) {
+            counts.p2 = Math.max(counts.p2, testPlanFailed);
+          }
+
           // Deterministic recompute — never trust the model's own verdict.
           // A non-healthy deploy is an automatic P0 on top of the model's counts.
           const deployP0 = healthOk ? 0 : 1;
@@ -437,6 +450,13 @@ runs:
           if (qaRan) {
             body.push(`| QA review | ${confidence}% confidence · merge risk ${mergeRisk} |`);
             body.push(`| Code findings | P0 ${counts.p0} · P1 ${counts.p1} · P2 ${counts.p2} · P3 ${counts.p3} |`);
+            if (testPlan && testPlan.present) {
+              const tpPassed = testPlanItems.filter((i) => i && i.status === 'passed').length;
+              const tpUnver = testPlanItems.filter((i) => i && i.status === 'unverifiable').length;
+              body.push(`| Test plan | ✅ ${tpPassed} · ❌ ${testPlanFailed} · ❔ ${tpUnver} (of ${testPlanItems.length}) |`);
+            } else if (testPlan) {
+              body.push('| Test plan | — none in PR |');
+            }
           } else {
             body.push(`| QA review | ⚠️ did not run — reporting deploy-health signal only |`);
           }
@@ -451,6 +471,19 @@ runs:
             body.push('<details><summary>Full QA report</summary>');
             body.push('');
             body.push(reportMd);
+            body.push('');
+            body.push('</details>');
+          }
+
+          if (testPlanItems.length > 0) {
+            const tpIcon = (s) => (s === 'passed' ? '✅' : s === 'failed' ? '❌' : '❔');
+            body.push('');
+            body.push('<details><summary>Test plan verification</summary>');
+            body.push('');
+            for (const it of testPlanItems) {
+              if (!it || !it.text) continue;
+              body.push(`- ${tpIcon(it.status)} ${it.text}${it.evidence ? ` — ${it.evidence}` : ''}`);
+            }
             body.push('');
             body.push('</details>');
           }
