@@ -410,6 +410,14 @@ runs:
     - name: Context stage (Haiku)
       id: context
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      # continue-on-error: context.md is a non-essential optimization — the
+      # Review stage reads it only "if present" and works without it. A flaky
+      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
+      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
+      # stall); that must NOT sink the whole review. Composite-action steps
+      # cannot set timeout-minutes, so graceful degradation here + the caller's
+      # job-level timeout backstop is how we bound this failure mode.
+      continue-on-error: true
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
       # so the bearer token also fills anthropic_api_key to pass validation, while
@@ -1054,11 +1062,17 @@ runs:
                   .replace(/\s+/g, " ")
                   .replace(/[.:;,\s]+$/, "")
                   .trim();
-              const verifiedNorms = new Set(
-                review.checklist
-                  .filter((i) => i && i.status === "verified" && i.text)
-                  .map((i) => norm(i.text))
-              );
+              // Count verified items per normalized text, so we tick AT MOST as
+              // many boxes as there were verified items with that text. This
+              // stops one verified item from ticking several distinct boxes that
+              // happen to normalize identically (over-tick collision).
+              const verifiedCounts = new Map();
+              for (const i of review.checklist) {
+                if (i && i.status === "verified" && i.text) {
+                  const k = norm(i.text);
+                  verifiedCounts.set(k, (verifiedCounts.get(k) || 0) + 1);
+                }
+              }
 
               // Tick matching UNCHECKED boxes only; never untick a human's box.
               const checkboxRe = /^(\s*[-*]\s*)\[ \](\s*)(.+)$/;
@@ -1067,9 +1081,14 @@ runs:
                 .split("\n")
                 .map((line) => {
                   const m = line.match(checkboxRe);
-                  if (m && verifiedNorms.has(norm(m[3]))) {
-                    ticks += 1;
-                    return `${m[1]}[x]${m[2]}${m[3]}`;
+                  if (m) {
+                    const k = norm(m[3]);
+                    const remaining = verifiedCounts.get(k) || 0;
+                    if (remaining > 0) {
+                      verifiedCounts.set(k, remaining - 1);
+                      ticks += 1;
+                      return `${m[1]}[x]${m[2]}${m[3]}`;
+                    }
                   }
                   return line;
                 })

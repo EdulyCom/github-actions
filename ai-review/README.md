@@ -64,7 +64,12 @@ injection-safety rule.
    post-merge job).
 9. **Context stage (Haiku)** — summarizes the diff and its
    callers/callees/related helpers into `context.md` for the review stage
-   to read.
+   to read. This stage is **best-effort** (`continue-on-error`): `context.md`
+   is a non-essential optimization the review reads only "if present", so a
+   flaky Anthropic gateway or plugin-marketplace load that hangs/errors this
+   cheap Haiku call degrades gracefully instead of sinking the whole review.
+   (Composite-action steps cannot set `timeout-minutes`; the caller job's
+   `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
 10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
     reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
     `no_ci`) so the Publish step can treat a failing/timed-out required

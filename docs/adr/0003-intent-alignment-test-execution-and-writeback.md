@@ -95,3 +95,12 @@ churn). Full file contents are always read — never diff hunks alone.
   execution costs more tokens and wall-clock than static Sonnet review. Tiny
   diffs still take the cheap Sonnet path, and test execution is best-effort
   (skips cleanly when the caller provisions no toolchain).
+- **Context stage is non-fatal.** The Haiku context stage (`context.md`) is a
+  best-effort optimization the review reads only "if present", so it now runs
+  `continue-on-error`: a flaky Anthropic gateway or plugin-marketplace load
+  that hangs/errors that cheap call degrades gracefully instead of sinking the
+  whole review. Composite-action steps cannot set `timeout-minutes`, so the
+  wall-clock bound on any stage hang is the **caller job's `timeout-minutes`**
+  (25 min recommended; the self-test uses 30) — documented in the consumer
+  guide. The review + retry stages were already `continue-on-error` with a
+  deterministic fail-safe verdict.

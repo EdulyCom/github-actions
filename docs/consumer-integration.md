@@ -61,7 +61,13 @@ concurrency:
 jobs:
   ai-review:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    # Wall-clock backstop. Composite-action steps can't set timeout-minutes,
+    # so this job-level cap is the only bound on a hung Anthropic gateway /
+    # plugin-marketplace load. Give it headroom for an Opus review that reads
+    # full files and runs your tests, but keep it tight enough to fail fast on
+    # a stall (the internal Haiku context stage is best-effort and won't sink
+    # the review on its own).
+    timeout-minutes: 25
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
@@ -134,6 +140,7 @@ under the App identity. The action no-ops on the `workflow_dispatch` path (no
     name: 🤖 AI Review
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 25   # wall-clock backstop (see the note in §2a)
     permissions:
       contents: read
       pull-requests: write
