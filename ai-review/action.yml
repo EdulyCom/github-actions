@@ -410,6 +410,14 @@ runs:
     - name: Context stage (Haiku)
       id: context
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      # continue-on-error: context.md is a non-essential optimization — the
+      # Review stage reads it only "if present" and works without it. A flaky
+      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
+      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
+      # stall); that must NOT sink the whole review. Composite-action steps
+      # cannot set timeout-minutes, so graceful degradation here + the caller's
+      # job-level timeout backstop is how we bound this failure mode.
+      continue-on-error: true
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
       # so the bearer token also fills anthropic_api_key to pass validation, while
