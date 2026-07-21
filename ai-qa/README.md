@@ -37,8 +37,12 @@ review step's `prompt:` is a `with:` value fed to the model as prompt text,
 not an executable body; the values interpolated into it — `health-url`,
 `deploy-timeout`, `test-hint`, and the merge SHA — are trusted
 caller-supplied configuration and the trusted `github.sha`, not
-PR-author-controlled content. The attacker-influenceable merged diff is read
-by the model **as a file via git**, never interpolated into the prompt.)
+PR-author-controlled content. The attacker-influenceable merged diff — and,
+new in this version, the PR body, its Test Plan section, and linked-issue
+bodies — are all read by the model **as files** (`.ai-qa/pr-meta.json`,
+`.ai-qa/test-plan.md`, `.ai-qa/linked-issues.json`, staged by a bash step
+that binds only trusted values via `env:`), never interpolated into the
+prompt.)
 
 ## What each run does
 
@@ -59,32 +63,46 @@ by the model **as a file via git**, never interpolated into the prompt.)
 4. **Check out merge commit** — checks out the resolved commit (with
    `fetch-depth: 2`, so the review can diff it against its first parent —
    the change that just merged) with `persist-credentials: false`.
-5. **Wait for deploy health** — polls `health-url` with `curl --fail` every
+5. **Resolve PR context and linked issues** — writes the merged PR's
+   metadata (`.ai-qa/pr-meta.json`), its extracted **Test Plan** section
+   (`.ai-qa/test-plan.md`, empty when the PR had none), and the issues the
+   PR closed (`.ai-qa/linked-issues.json`, resolved via closing keywords
+   *and* GitHub's linked-issue graph) into the workspace for the review and
+   publish steps. Best-effort — any lookup failure degrades to an empty
+   artifact.
+6. **Wait for deploy health** — polls `health-url` with `curl --fail` every
    five seconds until it succeeds or `deploy-timeout` elapses. Unreachable
    at the deadline is treated as an unhealthy deploy (auto-P0 fail signal).
    The result is handed to the review as its starting deployment signal.
-6. **Stage QA rubric** — copies the action's own `rubric.md` into the
+7. **Stage QA rubric** — copies the action's own `rubric.md` into the
    workspace so the review can read it with a stable path.
-7. **Post-merge QA review (agentic)** — only runs when an Anthropic
+8. **Post-merge QA review (agentic)** — only runs when an Anthropic
    credential is configured. Claude (`qa-model`, Sonnet by default) reads the
    rubric, inspects the merged diff via `git`, **smoke-tests the deployed app
-   over HTTP** (the health URL plus any routes the diff touches), and — only
+   over HTTP** (the health URL plus any routes the diff touches), **evaluates
+   the PR's Test Plan** if one is present (running each item it can against
+   the deployed app and returning a per-item `test_plan` verdict), and — only
    if it suspects a build/runtime regression inspection can't settle — MAY run
    the repo's build/tests using `test-hint` as guidance. It returns a
    schema-validated structured verdict: per-severity counts (P0–P3),
-   confidence, merge risk, a summary, and a full report body. The action
-   provisions **no language toolchain of its own** — callers whose review may
-   run build/tests must set up Node/etc. in their own workflow *before* this
-   action runs.
-8. **Publish report** — a deterministic step **recomputes** the pass/fail
+   confidence, merge risk, a summary, the `test_plan` object, and a full
+   report body. The action provisions **no language toolchain of its own** —
+   callers whose review may run build/tests must set up Node/etc. in their own
+   workflow *before* this action runs.
+9. **Publish report** — a deterministic step **recomputes** the pass/fail
    decision from the review's severity counts and the deploy-health signal
    (a non-healthy deploy is an automatic P0; PASS iff deploy healthy AND
    P0=P1=P2=0), never trusting the model's own `verdict`. It posts (or
    updates, via a hidden `<!-- ai-qa -->` anchor, so re-runs don't stack
    duplicate comments) a report comment with the signals, the review summary,
    and the full QA report, then reconciles `pass-label`/`fail-label` on the
-   PR. If no Anthropic credential is configured, the review is skipped and the
-   report is published from the deploy-health signal alone.
+   PR. When `update-linked-issues` is `true` it posts a sticky QA-status
+   comment on each linked issue and — on a FAIL — **reopens** a linked issue
+   the merge auto-closed and applies `fail-label` (on a PASS it applies
+   `pass-label`). When `update-pr-body` is `true` it maintains a managed
+   `<!-- ai-qa-status -->` block in the merged PR's description. If no
+   Anthropic credential is configured, the review is skipped and the report
+   is published from the deploy-health signal alone.
 
 ## Inputs
 
@@ -98,8 +116,10 @@ by the model **as a file via git**, never interpolated into the prompt.)
 | `test-hint` | Optional free-text describing how to build/test this repo. Handed to the review as context — Claude MAY run it at its discretion to confirm a suspected regression, never mechanically. Consumer must provision the toolchain first. | No | `""` |
 | `qa-model` | Model used for the agentic QA review. | No | `claude-sonnet-5` |
 | `allowed-tools` | Tool allowlist passed to the review's `--allowedTools` (read/grep the code, `curl` the deploy, `git` the diff, optionally run a JS/TS build/test). Override to widen or narrow. | No | *(read/grep/glob + curl/git + node/npm/npx/yarn/pnpm/corepack)* |
-| `pass-label` | Label applied when the overall QA signal (health + review) passes. | No | `✓ /ai-qa` |
-| `fail-label` | Label applied when the overall QA signal fails. | No | `✗ /ai-qa` |
+| `pass-label` | Label applied when the overall QA signal (health + review) passes. Also applied to linked issues when `update-linked-issues` is on. | No | `✓ /ai-qa` |
+| `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues (and the merge-auto-closed issue is reopened) when `update-linked-issues` is on. | No | `✗ /ai-qa` |
+| `update-pr-body` | When `true`, the Publish step maintains a managed `<!-- ai-qa-status -->` block in the merged PR's description reflecting the latest QA status. | No | `true` |
+| `update-linked-issues` | When `true`, the Publish step posts a sticky QA-status comment on each linked issue; on a FAIL it reopens a closed linked issue and applies `fail-label`, on a PASS it applies `pass-label`. | No | `true` |
 | `anthropic-api-key` | Anthropic API key for the review step. Optional — without it, the review quietly no-ops and the report still publishes from the deploy-health signal alone. | No | — |
 | `anthropic-auth-token` | Bearer token for a custom Anthropic-compatible gateway, used instead of `anthropic-api-key`. | No | — |
 | `anthropic-base-url` | Optional custom Anthropic-compatible API base URL. | No | — |

@@ -51,19 +51,36 @@ injection-safety rule.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
 7. **Checkout / compute diff stats and route model** — checks out the PR
-   head commit and picks `sonnet-model` or `opus-model` based on diff size
-   (file count and churn).
-8. **Context stage (Haiku)** — summarizes the diff and its
+   head commit and routes the review to **Opus by default**, dropping to
+   the cheaper `sonnet-model` only for trivially tiny diffs (at or under
+   both `sonnet-files-threshold` and `sonnet-churn-threshold`). Every
+   larger diff gets `opus-model` for its stronger reasoning.
+8. **Resolve linked issues** — deterministically resolves every issue the
+   PR closes (closing keywords *and* GitHub's linked-issue graph, via the
+   PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
+   The review stage uses each linked issue's acceptance criteria as the
+   primary intent contract for the rubric's Angle H. ai-review only
+   **reads** linked issues; it never mutates issue state (that is `ai-qa`'s
+   post-merge job).
+9. **Context stage (Haiku)** — summarizes the diff and its
    callers/callees/related helpers into `context.md` for the review stage
    to read.
-9. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
-   reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
-   `no_ci`) so the Publish step can treat a failing/timed-out required
-   check as an automatic fail.
-10. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
+10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
+    reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
+    `no_ci`) so the Publish step can treat a failing/timed-out required
+    check as an automatic fail.
+11. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
     diff and returns a schema-validated structured result (verdict,
     confidence, merge risk, intent alignment, P0-P3 counts, test-quality
-    signals, and the review markdown body). `claude-code-action`
+    signals, the review markdown body, and — new — a per-item `checklist`
+    verdict, `verification_evidence`, and a `test_execution` outcome). It
+    reads **complete file contents** (never just diff hunks), evaluates the
+    diff against the linked issues' acceptance criteria, and — best-effort —
+    **runs the project's tests** (see `test-command`/`test-hint`; the caller
+    must install the toolchain first). It loads the live
+    `/requesting-code-review` and `/verification-before-completion` skills
+    from the superpowers plugin: no `pass`/verified claim is accepted
+    without cited command output ("evidence before claims"). `claude-code-action`
     intermittently ends a successful session without emitting the structured
     output and exits 1; the stage is `continue-on-error` and a **retry stage**
     re-runs the review only when the first attempt failed or returned no
@@ -71,7 +88,7 @@ injection-safety rule.
     gracefully — it posts an explicit "inconclusive — re-run required" review
     and a `fail` verdict rather than crashing the job, so a required
     `review-gate` fails safe (never a false pass) and a re-run recovers it.
-11. **Reset prior review and labels** — dismisses this action's own prior
+12. **Reset prior review and labels** — dismisses this action's own prior
     `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
     can't be dismissed via the API and is left alone), **collapses every prior
     ai-review review by this bot as `OUTDATED`** (GraphQL `minimizeComment`,
@@ -79,9 +96,17 @@ injection-safety rule.
     touched — non-fatal if the token can't minimize), and removes all four
     labels, so a re-run supersedes cleanly and stale reviews are hidden instead
     of stacking up visibly.
-12. **Publish review** — deterministically recomputes the verdict from the
-    review stage's structured output and posts it as a native PR review and
-    the corresponding pass/fail label, then sets the four job outputs.
+13. **Publish review** — deterministically recomputes the verdict from the
+    review stage's structured output (a `pass` claiming green tests without
+    any `verification_evidence` is penalized, not trusted) and posts it as a
+    native PR review and the corresponding pass/fail label, then sets the
+    four job outputs. When `update-pr-body` is `true` it also **ticks the
+    PR description's checklist boxes** that the review verified (`- [ ]` →
+    `- [x]`, never unchecking a human's box) and maintains a managed
+    `<!-- ai-review-status -->` block with the per-item verification
+    evidence. Editing the body is safe against the default trigger set
+    (which excludes `edited`); do **not** add `pull_request: [edited]` to
+    the caller or the review will loop on its own body edits.
 
 ## Inputs
 
@@ -96,6 +121,12 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum confidence (0-100) required for a pass. Consumed by the Publish review step, which recomputes confidence from the review stage's reported P0-P3 counts and test-quality signals and compares it against this threshold. | No | `90` |
+| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `3` |
+| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `60` |
+| `test-command` | Explicit command the Review stage runs to execute the project's tests (e.g. `npm test`). **The caller must install the toolchain/deps before this action.** Empty ⇒ the model may auto-detect a command and skips gracefully when no toolchain is present. | No | — |
+| `test-hint` | Free-text build/run/verify guidance passed to the Review stage (setup steps, which suites matter, known-flaky areas). | No | — |
+| `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
+| `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
 
 ## Outputs
 
