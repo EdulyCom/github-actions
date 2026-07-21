@@ -76,20 +76,37 @@ inputs:
     default: "90"
   sonnet-model:
     description: >
-      Model ID used by the diff-size routing step for small diffs (≤15
-      files and ≤400 changed lines). Consumed by the routing step, whose
-      output feeds the Review stage (Sonnet/Opus) as the model to run.
-      Override when a gateway aliases model names.
+      Model ID used by the diff-size routing step ONLY for tiny diffs
+      (≤`sonnet-files-threshold` files AND ≤`sonnet-churn-threshold`
+      changed lines). Every larger diff routes to `opus-model`. Consumed
+      by the routing step, whose output feeds the Review stage as the
+      model to run. Override when a gateway aliases model names.
     required: false
     default: "claude-sonnet-5"
   opus-model:
     description: >
-      Model ID used by the diff-size routing step for large diffs (>15
-      files or >400 changed lines). Consumed by the routing step, whose
-      output feeds the Review stage (Sonnet/Opus) as the model to run.
-      Override when a gateway aliases model names.
+      Model ID used by the diff-size routing step for all non-tiny diffs
+      (the default — the review stage prefers Opus, dropping to
+      `sonnet-model` only for trivially small changes). Consumed by the
+      routing step, whose output feeds the Review stage as the model to
+      run. Override when a gateway aliases model names.
     required: false
     default: "claude-opus-4-8"
+  sonnet-files-threshold:
+    description: >
+      Max changed-file count for a diff to still be considered "tiny" and
+      routed to `sonnet-model`. A diff qualifies for Sonnet only when it
+      is at or under BOTH this and `sonnet-churn-threshold`; anything
+      larger routes to `opus-model`.
+    required: false
+    default: "3"
+  sonnet-churn-threshold:
+    description: >
+      Max changed-line count (additions + deletions) for a diff to still
+      be considered "tiny" and routed to `sonnet-model`. Applied together
+      with `sonnet-files-threshold` (both must hold for Sonnet).
+    required: false
+    default: "60"
   haiku-model:
     description: >
       Model ID used by the context stage (this phase) to read the diff and changed
@@ -116,6 +133,40 @@ inputs:
       Optional override for the Anthropic API base URL (e.g. a caller's custom
       gateway). When omitted, the standard Anthropic endpoint is used.
     required: false
+  test-command:
+    description: >
+      Optional explicit command the Review stage runs to execute the
+      project's tests (e.g. `npm test`, `pytest -q`). Best-effort: the
+      caller workflow must install the toolchain/dependencies BEFORE this
+      action so the command can run. When empty, the model may still
+      auto-detect and run an obvious test command, and skips gracefully
+      (reporting `test_execution: skipped`) when no toolchain is present.
+    required: false
+  test-hint:
+    description: >
+      Optional free-text guidance passed to the Review stage about how to
+      build/run/verify this project (setup steps, which suites matter,
+      known-flaky areas). Interpolated into the review prompt alongside
+      `test-command`.
+    required: false
+  update-pr-body:
+    description: >
+      When 'true' (default), the Publish step ticks verified checklist
+      boxes (`- [ ]` → `- [x]`) in the PR description in place and
+      maintains a managed `<!-- ai-review-status -->` block with per-item
+      verification evidence. It never unchecks a human-checked box. Set to
+      'false' to leave the PR body untouched.
+    required: false
+    default: "true"
+  update-linked-issues:
+    description: >
+      Reserved for parity with `ai-qa`. When 'true' (default), the Review
+      stage resolves issues the PR closes (closing keywords + GitHub's
+      linked-issue graph) and evaluates the diff against their acceptance
+      criteria. ai-review only READS linked issues; it never mutates issue
+      state (that is ai-qa's post-merge job).
+    required: false
+    default: "true"
 
 outputs:
   verdict:
@@ -288,6 +339,8 @@ runs:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
         SONNET: ${{ inputs.sonnet-model }}
         OPUS: ${{ inputs.opus-model }}
+        FILES_MAX: ${{ inputs.sonnet-files-threshold }}
+        CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
       run: |
         set -euo pipefail
         NUMSTAT="$(git diff --numstat "origin/${BASE_REF}...HEAD")"
@@ -303,7 +356,12 @@ runs:
           # bug — do not re-flag it.
           CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
         fi
-        if [ "${FILES}" -le 15 ] && [ "${CHURN}" -le 400 ]; then
+        # Opus-by-default routing: the review stage prefers Opus for its
+        # stronger reasoning, dropping to Sonnet ONLY for trivially tiny
+        # diffs (at or under BOTH thresholds). Everything else → Opus.
+        FILES_MAX="${FILES_MAX:-3}"
+        CHURN_MAX="${CHURN_MAX:-60}"
+        if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
           MODEL="${SONNET:-claude-sonnet-5}"
         else
           MODEL="${OPUS:-claude-opus-4-8}"
@@ -313,6 +371,41 @@ runs:
           echo "churn=${CHURN}"
           echo "model=${MODEL}"
         } >> "${GITHUB_OUTPUT}"
+
+    - name: Resolve linked issues
+      id: linked-issues
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.update-linked-issues == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+      run: |
+        set -euo pipefail
+        # Deterministically resolve every issue this PR closes — via closing
+        # keywords (Closes/Fixes/Resolves #N) AND the GitHub "linked issues"
+        # UI — using the PR's closingIssuesReferences graph. Writes an array
+        # of {number,title,body,state,url,labels} to .ai-review/linked-issues.json
+        # for the Review stage's Angle H (intent alignment). Best-effort: any
+        # failure degrades to an empty array (the model falls back to the PR
+        # body). NOTE: this resolver + schema is intentionally mirrored in
+        # ai-qa/action.yml (post-merge issue updates) — keep the two in sync.
+        mkdir -p .ai-review
+        OUT=".ai-review/linked-issues.json"
+        echo '[]' > "${OUT}"
+        if [ -n "${PR_NUMBER}" ]; then
+          OWNER="${REPO%%/*}"
+          NAME="${REPO##*/}"
+          RESP="$(gh api graphql \
+            -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){closingIssuesReferences(first:20){nodes{number title body state url labels(first:20){nodes{name}}}}}}}' \
+            -F owner="${OWNER}" -F repo="${NAME}" -F pr="${PR_NUMBER}" 2>/dev/null || echo '')"
+          if [ -n "${RESP}" ]; then
+            printf '%s' "${RESP}" | jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[] | {number, title, body, state, url, labels: [.labels.nodes[].name]}]' > "${OUT}" 2>/dev/null || echo '[]' > "${OUT}"
+          fi
+        fi
+        COUNT="$(jq 'length' "${OUT}" 2>/dev/null || echo 0)"
+        echo "count=${COUNT}" >> "${GITHUB_OUTPUT}"
+        echo "Resolved ${COUNT} linked issue(s) for PR #${PR_NUMBER:-?}."
 
     - name: Context stage (Haiku)
       id: context
@@ -439,6 +532,8 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        TEST_HINT: ${{ inputs.test-hint }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token, for the same
@@ -451,13 +546,17 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
-          live `/requesting-code-review` skill if the superpowers plugin
-          installed successfully; if it is unavailable, proceed without it —
-          do not fail or block on a missing plugin.
+          live `/requesting-code-review` and `/verification-before-completion`
+          skills if the superpowers plugin installed successfully; if either
+          is unavailable, proceed without it — do not fail or block on a
+          missing plugin. Apply `/verification-before-completion` throughout:
+          treat NO pass/verified claim as valid without fresh evidence — the
+          command you ran and its actual output/exit code. If you assert a
+          check passed, you must have run it and read the result this session.
 
           Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
@@ -466,11 +565,19 @@ runs:
           scale (P0-P3), and a full review checklist. Follow it.
 
           The PR number is available in the `PR_NUMBER` environment variable.
-          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` (and
-          follow any linked issue reference in the body) to establish the
-          stated goal for the rubric's Angle H (Intent alignment) — do this
-          before analyzing the diff, per the rubric's Angle H methodology
-          (frame-setting must happen before code analysis, not after).
+          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` to read
+          the PR's stated goal. A deterministic earlier step has already
+          resolved every issue this PR closes (via closing keywords AND
+          GitHub's linked-issue graph) into `.ai-review/linked-issues.json`
+          at the repository root — read that file. For each linked issue it
+          lists, treat the issue's title/body/acceptance-criteria as the
+          PRIMARY intent contract for the rubric's Angle H (Intent
+          alignment); `gh issue view <n> --json title,body,state,labels` is
+          available if you need more detail. Establish this stated goal
+          BEFORE analyzing the diff, per the rubric's Angle H methodology
+          (frame-setting must happen before code analysis, not after). If
+          `.ai-review/linked-issues.json` is absent or empty, fall back to
+          the PR title/body as the intent source.
 
           Read `context.md` at the repository root (written by an earlier
           context-gathering stage) for a summary of what changed and its
@@ -479,23 +586,56 @@ runs:
           Read the PR diff yourself: the working tree is already checked out
           at the PR head commit; diff it against the merge-base with the
           repository's default branch (discover the default branch yourself,
-          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`).
+          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`). Read the
+          COMPLETE contents of every changed file (and any caller/callee you
+          need to judge correctness) with `Read` — never sample, truncate, or
+          reason from the diff hunks alone. There is no size cap; large files
+          are why this diff was routed to the stronger model.
 
           Perform the full 8-angle scan from the rubric against the diff.
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
           the rubric's severity definitions, and count them.
 
+          Run the tests, best-effort. The caller is expected to have
+          installed the project's toolchain/dependencies before this action.
+          If `TEST_COMMAND` (env) is set, run exactly that; otherwise
+          auto-detect an obvious command (e.g. `npm test`/`npm run test`,
+          `pytest -q`, `make test`) from the repo's manifests. Consider
+          `TEST_HINT` (env) for setup/guidance. Set `test_execution` to:
+          `passed` (command ran, exit 0), `failed` (command ran, non-zero),
+          `skipped` (no toolchain/deps available, or command errored on
+          environment — not a real test failure), or `not_run` (no test
+          command exists / diff is not testable). NEVER report `passed`
+          without having actually run the command and read its output this
+          session (`/verification-before-completion`). When you run tests,
+          record the command and its key output line(s) in
+          `verification_evidence`.
+
           Also assess test quality per the rubric's Testing section: are
           there tests for the changed logic (`no_tests_for_changed_logic`),
           is coverage on critical paths below target
           (`coverage_below_threshold_on_critical_paths`), and are any tests
-          failing (`tests_failing`)? Report these as three booleans; omit any
+          failing (`tests_failing`)? Set `tests_failing: true` if
+          `test_execution` is `failed`. Report these as booleans; omit any
           you cannot assess rather than guessing. Per the rubric's exemption:
           if this diff is Docs/Config-only per §12's test requirement matrix
           (CI/workflow YAML, composite action wiring, markdown, prompt text,
           or other config with no unit-testable logic — nothing a test could
           exercise), report `no_tests_for_changed_logic: false` — that row
           requires no tests, so none missing is not a defect.
+
+          Evaluate the PR description's checklist. If the PR body (or a
+          linked issue) contains `- [ ]`/`- [x]` checklist items, return a
+          `checklist` array: one entry per item with its `text` copied
+          verbatim (without the `- [ ]`/`- [x]` prefix), a `status` of
+          `verified` (you confirmed it is satisfied — cite how in
+          `evidence`), `failed` (you confirmed it is NOT satisfied), or
+          `unverifiable` (cannot be checked from code/tests, e.g. a manual
+          or post-merge step). Only mark `verified` with real evidence per
+          `/verification-before-completion`. A later deterministic step uses
+          this to tick verified boxes in the PR body; do not edit the PR body
+          yourself. Per the rubric, checklist status is a P2 reminder at
+          most — do not fail the review solely on incomplete checklist items.
 
           Write a complete review as `comment_markdown`: findings grouped by
           severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
@@ -534,8 +674,8 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"}}}'
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
           ended without returning the required structured output. Emitting the
@@ -546,7 +686,17 @@ runs:
           if present. The PR number is in the `PR_NUMBER` environment variable;
           the PR head is already checked out. Run
           `gh pr view "$PR_NUMBER" --json title,body,url,number` and `git diff`
-          against the merge base to get the change under review.
+          against the merge base to get the change under review. Read
+          `.ai-review/linked-issues.json` (repo root) if present and use each
+          linked issue's acceptance criteria as the intent contract for Angle
+          H. Attempt to load `/verification-before-completion` and
+          `/requesting-code-review` (best-effort). Read complete file contents,
+          never just the diff hunks. If a `TEST_COMMAND` env var is set (or an
+          obvious test command exists) and the toolchain is available, run it
+          and set `test_execution` accordingly — never claim `passed` without
+          running it. You MAY populate the optional `checklist`,
+          `verification_evidence`, and `test_execution` fields; omit them if
+          you cannot assess them.
 
           Perform the full review per the rubric, then write `comment_markdown`
           (findings grouped by severity P0-P3 with "_None._" for empty sections,
@@ -673,6 +823,7 @@ runs:
         FAIL_LABEL: ${{ inputs.fail-label }}
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
+        UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
         REVIEW_JSON: ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output || steps.review.outputs.structured_output }}
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
@@ -751,7 +902,21 @@ runs:
           } else if (review.coverage_below_threshold_on_critical_paths) {
             confidence -= 5;
           }
-          if (review.tests_failing) {
+          // Real test execution (test_execution) supersedes the static
+          // tests_failing guess: a command that actually exited non-zero is a
+          // definitive failure. And a "passed" claim with no cited
+          // command+output in verification_evidence is unverified per
+          // /verification-before-completion, so it earns the same penalty as a
+          // failing suite rather than a free pass ("evidence before claims").
+          const testExecution = review.test_execution || "";
+          const verificationEvidence = Array.isArray(review.verification_evidence)
+            ? review.verification_evidence
+            : [];
+          const testsFailing = review.tests_failing === true || testExecution === "failed";
+          if (testsFailing) {
+            confidence -= 10;
+          }
+          if (testExecution === "passed" && verificationEvidence.length === 0) {
             confidence -= 10;
           }
 
@@ -859,6 +1024,108 @@ runs:
               core.info(`Label '${loserLabel}' not present; skipping.`);
             } else {
               throw err;
+            }
+          }
+
+          // --- PR-body checklist verification (feature: update PR body) ------
+          // Reflect verified checklist items back into the PR description: tick
+          // boxes the model VERIFIED (with evidence) in place, and maintain a
+          // managed <!-- ai-review-status --> block with per-item status +
+          // evidence. Never unticks a human-checked box; never fails the job on
+          // error. Gated by the update-pr-body input. The PR body is re-fetched
+          // immediately before writing to minimize races with human edits.
+          if (
+            process.env.UPDATE_PR_BODY === "true" &&
+            Array.isArray(review.checklist) &&
+            review.checklist.length > 0
+          ) {
+            try {
+              const { data: prData } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const originalBody = prData.body || "";
+
+              const norm = (s) =>
+                (s || "")
+                  .toLowerCase()
+                  .replace(/[`*_~]/g, "")
+                  .replace(/\s+/g, " ")
+                  .replace(/[.:;,\s]+$/, "")
+                  .trim();
+              const verifiedNorms = new Set(
+                review.checklist
+                  .filter((i) => i && i.status === "verified" && i.text)
+                  .map((i) => norm(i.text))
+              );
+
+              // Tick matching UNCHECKED boxes only; never untick a human's box.
+              const checkboxRe = /^(\s*[-*]\s*)\[ \](\s*)(.+)$/;
+              let ticks = 0;
+              let newBody = originalBody
+                .split("\n")
+                .map((line) => {
+                  const m = line.match(checkboxRe);
+                  if (m && verifiedNorms.has(norm(m[3]))) {
+                    ticks += 1;
+                    return `${m[1]}[x]${m[2]}${m[3]}`;
+                  }
+                  return line;
+                })
+                .join("\n");
+
+              // Build/refresh the managed status block.
+              const icon = (s) =>
+                s === "verified" ? "✅" : s === "failed" ? "❌" : "❔";
+              const itemLines = review.checklist
+                .filter((i) => i && i.text)
+                .map(
+                  (i) =>
+                    `- ${icon(i.status)} ${i.text}${i.evidence ? ` — ${i.evidence}` : ""}`
+                );
+              const evLines = verificationEvidence
+                .filter((e) => e && e.command)
+                .map((e) => `- \`${e.command}\`${e.result ? ` → ${e.result}` : ""}`);
+              const START = "<!-- ai-review-status -->";
+              const END = "<!-- /ai-review-status -->";
+              const blockParts = [
+                START,
+                "#### 🤖 AI Review — checklist verification",
+                ...itemLines,
+              ];
+              if (evLines.length) {
+                blockParts.push("", "_Verification evidence:_", ...evLines);
+              }
+              blockParts.push(
+                "",
+                `_Last updated by ai-review · verdict: ${verdict}._`,
+                END
+              );
+              const block = blockParts.join("\n");
+
+              const blockRe = new RegExp(`${START}[\\s\\S]*?${END}`);
+              if (blockRe.test(newBody)) {
+                newBody = newBody.replace(blockRe, block);
+              } else {
+                newBody = `${newBody.replace(/\s*$/, "")}\n\n${block}\n`;
+              }
+
+              if (newBody !== originalBody) {
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  body: newBody,
+                });
+                core.info(
+                  `Updated PR body (ticked ${ticks} checkbox(es), refreshed status block).`
+                );
+              } else {
+                core.info("PR body already current; no change.");
+              }
+            } catch (err) {
+              core.warning(`Could not update PR body: ${err.message}`);
             }
           }
 

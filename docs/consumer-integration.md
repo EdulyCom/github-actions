@@ -51,7 +51,8 @@ lives inside your own CI's job graph and shares its concurrency group:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: write   # post the review; tick PR-body checkboxes
+  issues: read           # resolve + read the issues this PR closes
 
 concurrency:
   group: ci-pr-${{ github.event.pull_request.number || github.ref }}
@@ -64,6 +65,14 @@ jobs:
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
+      # OPTIONAL: to let the review actually RUN your tests (best-effort),
+      # install the toolchain/deps BEFORE the action and pass `test-command`.
+      # ai-review ships no toolchain of its own. Omit this and it reviews
+      # statically, as before.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci
       - uses: EdulyCom/github-actions/ai-review@main
         id: review
         with:
@@ -71,6 +80,7 @@ jobs:
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # test-command: npm test   # optional; empty ⇒ auto-detect / skip
 
   review-gate:
     runs-on: ubuntu-latest
@@ -92,6 +102,14 @@ jobs:
     steps:
       - run: echo "build steps go here"
 ```
+
+This version of `ai-review` also **reads the issues your PR closes** (to
+judge intent against their acceptance criteria — hence `issues: read`) and,
+when `update-pr-body` is left on, **ticks verified checklist boxes** in the
+PR description and maintains a managed `<!-- ai-review-status -->` block. It
+never unchecks a human's box. Keep your `on: pull_request` trigger at its
+default event types — do **not** add `edited`, or the body edits it makes
+would re-trigger the review in a loop.
 
 Then, in branch protection, require the `review-gate` job's status (and
 your terminal CI job, e.g. `build`) as required status checks. If this repo
@@ -119,6 +137,7 @@ under the App identity. The action no-ops on the `workflow_dispatch` path (no
     permissions:
       contents: read
       pull-requests: write
+      issues: read
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
@@ -184,9 +203,14 @@ exhaustive. Unlike `ai-review`, the report `ai-qa` posts is a plain PR
 comment (the PR is already merged and closed by the time this runs, so a
 formal `pulls.createReview` isn't applicable) plus a `✓`/`✗ /ai-qa` label —
 both go through the Issues API, hence `issues: write` above in addition to
-`pull-requests: write`. The Anthropic credential is optional here (see
-section 1) — omit it and `ai-qa` still reports the deploy-health signal, just
-without the agentic review.
+`pull-requests: write`. That same `issues: write` also covers this version's
+new behavior: `ai-qa` **evaluates the PR's Test Plan** (if the body has one)
+against the deployed app, and — with `update-linked-issues`/`update-pr-body`
+left on — posts a sticky QA-status comment on each issue the PR closed
+(reopening a merge-closed issue and labeling it on a FAIL) and refreshes a
+managed status block in the PR body. The Anthropic credential is optional
+here (see section 1) — omit it and `ai-qa` still reports the deploy-health
+signal, just without the agentic review.
 
 ## 3. Cutting over from an old identity-pinned check
 

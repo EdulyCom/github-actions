@@ -69,6 +69,20 @@ provisioned by the consumer). This is **optional and at your discretion**; do no
 run build/test as a mechanical default — pre-merge CI already ran them on the
 diff, so only re-run to confirm a specific suspicion.
 
+**4. Test-plan verification (when present).**
+Read `.ai-qa/test-plan.md` — the "Test Plan" section extracted from the merged
+PR's body (empty if the PR had none). When it is non-empty, treat each item as an
+acceptance check to run against the **deployed** app: exercise what you can over
+`curl` (and the allowlisted build/test tools for anything code-level), then return
+a `test_plan` object with `present: true` and an `items` array, each item marked
+`passed` (verified — cite the evidence), `failed`, or `unverifiable` (needs a
+manual/QA step you cannot perform here). **A test-plan item you verify as `failed`
+is at least a P2** (which fails ai-qa). Only mark an item `passed` if you actually
+exercised it — never assert a step passed without evidence. Also sanity-check the
+deployed change against the acceptance criteria of any issue in
+`.ai-qa/linked-issues.json`. When the PR has no test plan, return
+`test_plan: { present: false }` and carry on with the other angles.
+
 Never fabricate results. If you could not reach an endpoint or run a command,
 say so in the report and reflect the uncertainty in your confidence.
 
@@ -105,6 +119,8 @@ Return the full human-readable QA report as `report_markdown`. Structure it as:
 - **P3 — Nits** — omit if empty.
 - **Smoke tests run** — each endpoint you curled and its result.
 - **Commands run** — any build/test you chose to run, and the outcome (omit if none).
+- **Test plan** — each item from the PR's test plan and its verdict
+  (`passed`/`failed`/`unverifiable`) with evidence; omit if the PR had no plan.
 
 Keep each finding to a concrete `file:line` or `URL → status`, a one-line
 description, and the failure it represents. This body is posted verbatim into the

@@ -97,6 +97,22 @@ inputs:
       Optional custom Anthropic-compatible API base URL (e.g. a corporate
       gateway). Leave unset to use Anthropic's default endpoint.
     required: false
+  update-pr-body:
+    description: >-
+      When 'true' (default), the Publish step maintains a managed
+      `<!-- ai-qa-status -->` block in the merged PR's description reflecting
+      the latest QA status. Set to 'false' to leave the PR body untouched.
+    required: false
+    default: "true"
+  update-linked-issues:
+    description: >-
+      When 'true' (default), the Publish step resolves the issues the merged
+      PR closed and posts a sticky QA-status comment on each. On a FAIL it
+      also reopens a closed linked issue and applies `fail-label`; on a PASS
+      it applies `pass-label` and removes `fail-label`. Set to 'false' to
+      leave linked issues untouched.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -173,6 +189,57 @@ runs:
         fetch-depth: 2
         persist-credentials: false
 
+    - name: Resolve PR context and linked issues
+      id: prcontext
+      if: steps.merge.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.merge.outputs.pr-number }}
+      run: |
+        set -uo pipefail
+        # Stage the merged PR's metadata for the QA review + Publish steps:
+        #  - .ai-qa/pr-meta.json    → {number,title,body,url} of the merged PR
+        #  - .ai-qa/test-plan.md    → the PR body's "Test Plan" section, if any
+        #  - .ai-qa/linked-issues.json → issues the PR closed (keywords + graph)
+        # Best-effort: every failure degrades to an empty/absent artifact. This
+        # resolver + JSON shape is intentionally mirrored from ai-review — keep
+        # the two in sync.
+        mkdir -p .ai-qa
+        printf '{}' > .ai-qa/pr-meta.json
+        : > .ai-qa/test-plan.md
+        echo '[]' > .ai-qa/linked-issues.json
+        if [ -n "${PR_NUMBER}" ]; then
+          gh pr view "${PR_NUMBER}" --repo "${REPO}" --json number,title,body,url \
+            > .ai-qa/pr-meta.json 2>/dev/null || printf '{}' > .ai-qa/pr-meta.json
+          # Extract the "Test Plan" section: from a "# … Test Plan" heading up to
+          # the next markdown heading. `#+` (not `#{1,6}`) for mawk portability.
+          BODY="$(jq -r '.body // ""' .ai-qa/pr-meta.json 2>/dev/null || echo '')"
+          printf '%s\n' "${BODY}" | awk '
+            BEGIN { grab = 0 }
+            /^[[:space:]]*#+[[:space:]]*[Tt]est[[:space:]]*[Pp]lan/ { grab = 1; next }
+            grab == 1 && /^[[:space:]]*#+[[:space:]]/ { grab = 0 }
+            grab == 1 { print }
+          ' > .ai-qa/test-plan.md
+          OWNER="${REPO%%/*}"
+          NAME="${REPO##*/}"
+          RESP="$(gh api graphql \
+            -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){closingIssuesReferences(first:20){nodes{number title body state url labels(first:20){nodes{name}}}}}}}' \
+            -F owner="${OWNER}" -F repo="${NAME}" -F pr="${PR_NUMBER}" 2>/dev/null || echo '')"
+          if [ -n "${RESP}" ]; then
+            printf '%s' "${RESP}" | jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[] | {number, title, body, state, url, labels: [.labels.nodes[].name]}]' > .ai-qa/linked-issues.json 2>/dev/null || echo '[]' > .ai-qa/linked-issues.json
+          fi
+        fi
+        TP_PRESENT=false
+        [ -s .ai-qa/test-plan.md ] && TP_PRESENT=true
+        ISSUE_COUNT="$(jq 'length' .ai-qa/linked-issues.json 2>/dev/null || echo 0)"
+        {
+          echo "test-plan-present=${TP_PRESENT}"
+          echo "issue-count=${ISSUE_COUNT}"
+        } >> "${GITHUB_OUTPUT}"
+        echo "Test plan present: ${TP_PRESENT}; linked issues: ${ISSUE_COUNT}."
+
     - name: Wait for deploy health
       id: health
       if: steps.merge.outputs.skip != 'true'
@@ -244,7 +311,7 @@ runs:
         claude_args: |
           --model ${{ inputs.qa-model }}
           --allowedTools "${{ inputs.allowed-tools }}"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","deploy_status","counts","summary","report_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","medium","high"]},"deploy_status":{"type":"string","enum":["healthy","unhealthy","unknown"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"summary":{"type":"string"},"report_markdown":{"type":"string"}}}'
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","deploy_status","counts","summary","report_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","medium","high"]},"deploy_status":{"type":"string","enum":["healthy","unhealthy","unknown"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"summary":{"type":"string"},"report_markdown":{"type":"string"},"test_plan":{"type":"object","additionalProperties":false,"required":["present"],"properties":{"present":{"type":"boolean"},"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["passed","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}}}'
         prompt: |
           You are performing a POST-MERGE QA review of a change that just merged
           to the default branch and deployed. Pre-merge CI already reviewed and
@@ -266,18 +333,38 @@ runs:
           - Build/test guidance for this repo (may be empty — run only at your
             discretion to confirm a suspected regression, never as a default):
             ${{ inputs.test-hint }}
+          - Merged PR metadata: `.ai-qa/pr-meta.json` ({number,title,body,url}).
+          - The PR's "Test Plan" section (may be empty): `.ai-qa/test-plan.md`.
+          - Issues this PR closed: `.ai-qa/linked-issues.json` (array of
+            {number,title,body,state,url,labels}) — the acceptance criteria the
+            deployed change is expected to satisfy.
 
           Smoke-test the deployed app over HTTP with `curl` (the health URL and
           any routes the diff touches — the base URL is the health URL minus its
           path). A non-healthy deploy, or any touched route returning 5xx /
           refusing connection, is a P0.
 
+          Evaluate the PR's test plan. Read `.ai-qa/test-plan.md`. If it is
+          non-empty, execute/verify each item you can against the DEPLOYED app
+          (via `curl`) and the merged code (the allowlisted build/test tools are
+          available), then return a `test_plan` object: `present: true` and an
+          `items` array where each entry has the item `text`, a `status` of
+          `passed` (you verified it holds — cite how in `evidence`), `failed`
+          (you verified it does NOT hold), or `unverifiable` (needs manual/QA
+          steps you cannot perform here), plus optional `evidence`. Only mark
+          `passed` with real evidence — never assert a step passed without
+          actually exercising it. A failed test-plan item is at least a P2 (see
+          the rubric). If `.ai-qa/test-plan.md` is empty, return
+          `test_plan: { present: false }`. Also sanity-check the deployed change
+          against any linked issue's acceptance criteria.
+
           Return your findings via the required structured-output schema:
           `verdict`, `confidence`, `merge_risk`, `deploy_status`, per-severity
-          `counts`, a one-paragraph `summary`, and `report_markdown` (the full
+          `counts`, a one-paragraph `summary`, `report_markdown` (the full
           human-readable report body, findings grouped by severity, the smoke
-          tests you ran, and any commands you chose to run). Do not fabricate —
-          if you could not reach an endpoint or run a command, say so.
+          tests you ran, and any commands you chose to run), and the `test_plan`
+          object described above. Do not fabricate — if you could not reach an
+          endpoint or run a command, say so.
 
     - name: Publish report
       id: publish
@@ -294,6 +381,8 @@ runs:
         REVIEW_OUTCOME: ${{ steps.review.outcome }}
         PASS_LABEL: ${{ inputs.pass-label }}
         FAIL_LABEL: ${{ inputs.fail-label }}
+        UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
+        UPDATE_LINKED_ISSUES: ${{ inputs.update-linked-issues }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
@@ -420,5 +509,141 @@ runs:
           } catch (err) {
             if (err.status !== 404 && err.status !== 422) {
               throw err;
+            }
+          }
+
+          // --- Feature: update linked issues + PR body by last QA status -----
+          // Reflect the final QA verdict onto the issues this PR closed and into
+          // the merged PR's description. All writes are best-effort and never
+          // fail the job. Gated by update-linked-issues / update-pr-body.
+          const overallStatus = overallPass ? 'PASS' : 'FAIL';
+          const statusIcon = overallPass ? '✅' : '❌';
+
+          const issueMarker = '<!-- ai-qa-issue -->';
+          const issueStatusBody = [
+            issueMarker,
+            `${statusIcon} **ai-qa: ${overallStatus}** for merged PR #${prNumber} (\`${process.env.MERGE_SHA.slice(0, 12)}\`)`,
+            '',
+            modelSummary || (healthOk ? 'Post-merge QA completed.' : 'Deploy did not become healthy within the timeout.'),
+            '',
+            `_Deploy health: ${healthOk ? 'healthy' : 'not healthy'} · [QA run](${process.env.RUN_URL})_`,
+          ].join('\n');
+
+          let linkedIssues = [];
+          try {
+            const fs = require('fs');
+            const parsedIssues = JSON.parse(fs.readFileSync('.ai-qa/linked-issues.json', 'utf8'));
+            if (Array.isArray(parsedIssues)) linkedIssues = parsedIssues;
+          } catch (err) {
+            core.info(`No linked-issues file to read: ${err.message}`);
+          }
+
+          if (process.env.UPDATE_LINKED_ISSUES === 'true' && linkedIssues.length > 0) {
+            for (const issue of linkedIssues) {
+              const num = Number(issue && issue.number);
+              if (!num) continue;
+              try {
+                const iComments = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  per_page: 100,
+                });
+                const iExisting = iComments.find((c) => c.body && c.body.includes(issueMarker));
+                if (iExisting) {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: iExisting.id,
+                    body: issueStatusBody,
+                  });
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: num,
+                    body: issueStatusBody,
+                  });
+                }
+
+                // On FAIL, reopen a linked issue the merge auto-closed.
+                if (!overallPass && String(issue.state || '').toLowerCase() === 'closed') {
+                  try {
+                    await github.rest.issues.update({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: num,
+                      state: 'open',
+                    });
+                    core.info(`Reopened linked issue #${num} (QA failed).`);
+                  } catch (e) {
+                    core.warning(`Could not reopen #${num}: ${e.message}`);
+                  }
+                }
+
+                const iAdd = overallPass ? process.env.PASS_LABEL : process.env.FAIL_LABEL;
+                const iRemove = overallPass ? process.env.FAIL_LABEL : process.env.PASS_LABEL;
+                try {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: num,
+                    labels: [iAdd],
+                  });
+                } catch (e) {
+                  if (e.status !== 404 && e.status !== 422) core.warning(`label add on #${num}: ${e.message}`);
+                }
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: num,
+                    name: iRemove,
+                  });
+                } catch (e) {
+                  if (e.status !== 404 && e.status !== 422) core.warning(`label remove on #${num}: ${e.message}`);
+                }
+              } catch (err) {
+                core.warning(`Could not update linked issue #${num}: ${err.message}`);
+              }
+            }
+          }
+
+          if (process.env.UPDATE_PR_BODY === 'true') {
+            try {
+              const { data: prData } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const originalBody = prData.body || '';
+              const START = '<!-- ai-qa-status -->';
+              const END = '<!-- /ai-qa-status -->';
+              const block = [
+                START,
+                `#### ${statusIcon} ai-qa: ${overallStatus}`,
+                `Deploy health: ${healthOk ? 'healthy' : 'not healthy'} · findings P0 ${counts.p0} · P1 ${counts.p1} · P2 ${counts.p2} · P3 ${counts.p3}`,
+                modelSummary ? `\n${modelSummary}` : '',
+                `\n_Last updated by ai-qa · [QA run](${process.env.RUN_URL})_`,
+                END,
+              ].filter((l) => l !== '').join('\n');
+              const blockRe = new RegExp(`${START}[\\s\\S]*?${END}`);
+              let newBody;
+              if (blockRe.test(originalBody)) {
+                newBody = originalBody.replace(blockRe, block);
+              } else {
+                newBody = `${originalBody.replace(/\s*$/, '')}\n\n${block}\n`;
+              }
+              if (newBody !== originalBody) {
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  body: newBody,
+                });
+                core.info('Updated PR body ai-qa status block.');
+              }
+            } catch (err) {
+              core.warning(`Could not update PR body: ${err.message}`);
             }
           }

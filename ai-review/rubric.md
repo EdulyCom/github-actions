@@ -19,11 +19,16 @@ before they reach the verify step.
 
 **H — Intent alignment** *(run first — sets the frame for all subsequent angles)*
 
-Load `/tmp/main-issue.json` and the PR body from `/tmp/pr-meta.json`. Establish the
-**stated goal**: what was this change supposed to do?
+Read `.ai-review/linked-issues.json` (repository root) — a deterministic
+earlier step resolved every issue this PR closes (closing keywords AND GitHub's
+linked-issue graph) into an array of `{number,title,body,state,url,labels}`. Read
+the PR body via `gh pr view "$PR_NUMBER" --json title,body,url,number`. Together
+these establish the **stated goal**: what was this change supposed to do? (If
+`.ai-review/linked-issues.json` is absent or `[]`, use the PR title/body alone;
+`gh issue view <n>` is available if you need more detail on a linked issue.)
 
 Extract acceptance criteria in this priority order:
-1. Explicit checklist items (`- [ ]` / `- [x]`) in issue or PR body
+1. Explicit checklist items (`- [ ]` / `- [x]`) in a linked issue or the PR body
 2. Numbered requirements or "must/should" statements
 3. Inferred intent from title + description narrative
 
@@ -37,7 +42,7 @@ Compare against the diff:
 | PR body and linked issue together are too thin to establish intent (present but vague) | Note `"intent alignment: insufficient spec context"` | No finding |
 
 **Skip conditions — two hard triggers only (no finding):**
-- `main-issue.json` is `{}` AND PR body and title together are under 50 words → `"intent alignment skipped — insufficient context"`
+- `.ai-review/linked-issues.json` is `[]` AND PR body and title together are under 50 words → `"intent alignment skipped — insufficient context"`
 - PR title starts with `chore:`, `docs:`, or `style:` AND diff contains no functional code changes → `"intent alignment skipped — non-functional PR type"`
 
 Everything else: run Angle H, even if intent must be inferred from narrative.
@@ -165,9 +170,15 @@ Examples: formatting preference, typo in comment, minor refactoring opportunity.
 - [ ] Description explains the WHY, not just the WHAT.
 - [ ] Breaking changes called out explicitly.
 - [ ] `Closes #NNN` link present when the PR closes an issue.
-- [ ] If PR description has a checklist, count completed vs. incomplete; report ratio
-  as P2 reminder for unchecked items (do NOT fail the review on checklist status —
-  checklists often track post-merge activities).
+- [ ] If a linked issue or the PR description has a checklist, evaluate each item
+  and return it in the structured `checklist` array with a `status` of `verified`
+  (confirmed satisfied — cite how in `evidence`), `failed` (confirmed NOT
+  satisfied), or `unverifiable` (a manual/post-merge step you cannot check from
+  code or tests). Only mark `verified` with real evidence — a later deterministic
+  step ticks verified boxes in the PR body, so an unfounded `verified` writes a
+  false claim into the description. Still report the completed-vs-incomplete ratio
+  as a P2 reminder; do NOT fail the review on checklist status alone (checklists
+  often track post-merge activities).
 
 ### 2. Merge Conflict Handling
 
@@ -299,10 +310,18 @@ Flag as P0 (breaks feature) or P1 (incorrect behavior).
 | Performance | ⚠️ Benchmark if possible | ✅ If query-heavy | ⚠️ If UX-impacting |
 | Docs/Config | — | — | — |
 
-**Test execution:** auto-detect the command (e.g. Nx affected, turbo, plain `npm test`,
-pytest, etc.). If `${user_config.TEST_COMMAND}` is set, use that. If nothing detected and
-no override, report as P3 ("tests skipped — no command detected or configured") and
-continue.
+**Test execution:** you can and should RUN the tests (the review session allowlists
+`npm`/`npx`/`pnpm`/`yarn`/`pytest`/`make`/`node`; the caller installs deps first). If
+the `TEST_COMMAND` env var is set, run exactly that; otherwise auto-detect (e.g. Nx
+affected, turbo, plain `npm test`, `pytest -q`, `make test`). Consider the `TEST_HINT`
+env var for setup guidance. Record the outcome in `test_execution`
+(`passed`/`failed`/`skipped`/`not_run`) and, whenever you run anything, capture the
+command and its key output in `verification_evidence`. Apply
+`/verification-before-completion`: NEVER report `passed` (or claim any check is green)
+without having run it and read the output this session — an unverified "passed" is
+treated as unverified and penalized. If no command is detected and none is configured,
+report `test_execution: not_run` and P3 ("tests skipped — no command detected or
+configured") and continue.
 
 **Test gap identification (from the diff):**
 
