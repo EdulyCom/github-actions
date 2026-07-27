@@ -37,6 +37,23 @@ inputs:
       needs the App-minted write-scoped identity.
     required: false
     default: ${{ github.token }}
+  allowed-bots:
+    description: >
+      Comma-separated list of bot actor usernames allowed to trigger the
+      Context/Review stages, or '*' to allow all bots. Passed straight
+      through to the underlying `claude-code-action`'s own `allowed_bots`
+      input on all three stage invocations (Context, Review, Review
+      retry). Empty (default) allows no bots — every stage rejects a
+      Bot-type actor (e.g. `dependabot[bot]`) with "Workflow initiated by
+      non-human actor", so the Context stage never writes context.md and
+      the Review stage never emits structured output; the gate then
+      publishes an inconclusive/fail verdict instead of a real review, on
+      every PR from that bot. Set explicitly (e.g. `dependabot[bot]`) to
+      let a trusted dependency-bump bot through the gate. WARNING: on a
+      public repo, `'*'` lets any App invoke the review with prompts it
+      controls — scope this to named bots, not `'*'`.
+    required: false
+    default: ""
   pr-number:
     description: >
       Pull request number to review. Optional — defaults to the
@@ -433,6 +450,7 @@ runs:
         # pull-requests/issues/checks-scoped identity used by the publishing
         # steps later in this action.
         github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
         # Root cause of the context.md handoff failure (Task 2.4 fix round): this
         # step ran with NO --allowedTools at all, so claude-code-action's headless
         # permission model silently denied every Write and most Bash tool calls
@@ -550,6 +568,7 @@ runs:
         # never calls the GitHub API to post anything. The App-minted identity
         # is reserved for the deterministic Publish review step below.
         github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
         plugins: superpowers@superpowers-marketplace
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
@@ -678,6 +697,7 @@ runs:
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
         plugins: superpowers@superpowers-marketplace
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
