@@ -798,6 +798,52 @@ runs:
           Return your assessment via the required structured output schema. Do
           NOT end your turn without emitting the structured output.
 
+    # When every attempt missed the structured output, the model's final prose
+    # is still in claude-code-action's execution log — a completed review that
+    # would otherwise be discarded (observed: 33 turns / $3.76 thrown away).
+    # Extract it so the inconclusive review carries something a human can act
+    # on. Best-effort throughout: never fails the job, and an empty result just
+    # means the inconclusive notice stays as-is.
+    - name: Salvage unstructured review output
+      id: salvage
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        steps.review.outputs.structured_output == '' &&
+        steps.review_repair.outputs.structured_output == '' &&
+        steps.review_retry.outputs.structured_output == ''
+      shell: bash
+      env:
+        REVIEW_EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+        RETRY_EXEC_FILE: ${{ steps.review_retry.outputs.execution_file }}
+      run: |
+        # Best-effort only — must never hard-fail the job, so no `set -e`.
+        set -uo pipefail
+        mkdir -p .ai-review
+        OUT=".ai-review/salvaged.md"
+        : > "${OUT}"
+        for f in "${RETRY_EXEC_FILE:-}" "${REVIEW_EXEC_FILE:-}"; do
+          [ -n "${f}" ] && [ -s "${f}" ] || continue
+          # Preferred shape: a stream of events, assistant messages carrying
+          # content blocks. Fall back to a recursive scan for any text block.
+          jq -r '[.[]? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // empty' \
+            "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
+          if [ ! -s "${OUT}" ]; then
+            jq -r '[.. | objects | select(.type? == "text") | .text?] | map(select(. != null)) | last // empty' \
+              "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
+          fi
+          [ -s "${OUT}" ] && break
+        done
+        # GitHub caps a review body at 65536 characters; leave room for the
+        # notice wrapper around it.
+        if [ -s "${OUT}" ]; then
+          head -c 50000 "${OUT}" > "${OUT}.trunc" && mv "${OUT}.trunc" "${OUT}"
+          echo "Salvaged $(wc -c < "${OUT}") bytes of unstructured model output."
+        else
+          echo "No unstructured model output could be salvaged."
+        fi
+        exit 0
+
     - name: Reset prior review and labels
       id: reset
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -940,16 +986,33 @@ runs:
             // that didn't complete must not read as pass), and set outputs so
             // review-gate sees a non-pass verdict. A re-run usually succeeds.
             core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
+            let salvaged = "";
+            try {
+              salvaged = require("fs").readFileSync(".ai-review/salvaged.md", "utf8").trim();
+            } catch (e) {
+              // No salvage file (step skipped, or nothing recoverable).
+            }
             const inconclusiveBody = [
               "<!-- ai-review -->",
               "### ⚠️ AI Review — inconclusive (re-run required)",
               "",
-              "The review model did not return a structured result after two",
-              "attempts (a known intermittent `anthropics/claude-code-action`",
-              "issue). This is **not** a code-quality judgment — the review did",
-              "not complete.",
+              "The review model did not return a structured result after a",
+              "resume-repair attempt and a full retry (a known intermittent",
+              "`anthropics/claude-code-action` issue). This is **not** a",
+              "code-quality judgment — the review did not complete, so the gate",
+              "fails closed.",
               "",
               "**Re-run the `ai-review` job** to get a verdict.",
+              ...(salvaged
+                ? [
+                    "",
+                    "<details><summary>Unstructured model output recovered from the run (not a verdict)</summary>",
+                    "",
+                    salvaged,
+                    "",
+                    "</details>",
+                  ]
+                : []),
             ].join("\n");
             try {
               await github.rest.pulls.createReview({
