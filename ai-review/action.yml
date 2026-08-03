@@ -677,6 +677,60 @@ runs:
           does not trust your `verdict` field; report it anyway as your own
           best assessment.
 
+    # Cheap structured-output repair. The first attempt frequently completes a
+    # full review (observed: 33 turns, $3.76, 5.5 min) and then ends without
+    # emitting structured_output — claude-code-action reports subtype "success"
+    # with is_error true. Resuming that same session and asking only for the
+    # JSON recovers the work already paid for, instead of re-reviewing from
+    # scratch. Best-effort: no tools are allowlisted (nothing here needs to
+    # re-read the repo), and the full retry below still runs if this misses.
+    - name: Review stage — structured-output repair
+      id: review_repair
+      continue-on-error: true
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        steps.review.outputs.structured_output == '' &&
+        steps.review.outputs.session_id != ''
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
+        claude_args: |
+          --resume ${{ steps.review.outputs.session_id }}
+          --model ${{ steps.route.outputs.model }}
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+        prompt: |
+          Your previous turn in this session finished the review but ended
+          without emitting the required structured output.
+
+          Do NOT re-analyze the diff, re-read files, or revise your findings.
+          Emit the structured output NOW, using the schema, populated from the
+          analysis you already completed in this session. `counts` must match
+          the findings you already wrote up, and `comment_markdown` must be the
+          review body you already composed (findings grouped P0-P3 with
+          "_None._" for empty sections, plus strengths; no leading verdict
+          token, confidence line, or HTML marker).
+
+          Emitting the structured output is your only remaining task.
+
+    # The full retry previously fired ~11s after the first attempt ended and
+    # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
+    # never reached the model. Give a transient upstream/rate-limit condition
+    # time to clear before spending another full review.
+    - name: Back off before the review retry
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
+        steps.review_repair.outputs.structured_output == ''
+      shell: bash
+      run: sleep 45
+
     # Retry of the Review stage — runs only if the first attempt failed or
     # returned no structured_output (the intermittent claude-code-action miss).
     # Same model/tools/schema/credentials; a condensed prompt that re-runs the
@@ -688,7 +742,8 @@ runs:
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
-        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '')
+        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
+        steps.review_repair.outputs.structured_output == ''
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
@@ -852,7 +907,10 @@ runs:
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
-        REVIEW_JSON: ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output || steps.review.outputs.structured_output }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
