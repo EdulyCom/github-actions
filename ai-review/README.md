@@ -87,12 +87,18 @@ injection-safety rule.
     from the superpowers plugin: no `pass`/verified claim is accepted
     without cited command output ("evidence before claims"). `claude-code-action`
     intermittently ends a successful session without emitting the structured
-    output and exits 1; the stage is `continue-on-error` and a **retry stage**
-    re-runs the review only when the first attempt failed or returned no
-    structured output. If *both* attempts miss, Publish (below) degrades
-    gracefully — it posts an explicit "inconclusive — re-run required" review
-    and a `fail` verdict rather than crashing the job, so a required
-    `review-gate` fails safe (never a false pass) and a re-run recovers it.
+    output and exits 1. Three fallbacks recover this, cheapest first: a
+    **structured-output repair** step resumes that same session and asks only
+    for the JSON (the analysis is already done — this is a cheap ask, not a
+    re-review); if that also misses, a 45s back-off then a **retry stage**
+    re-runs the review from scratch; if every attempt misses, a **salvage**
+    step extracts the model's last prose from the execution log so the
+    completed analysis isn't discarded. Publish (below) still degrades
+    gracefully in that final case — it posts an explicit "inconclusive —
+    re-run required" review (with the salvaged prose attached, when
+    available) and a `fail` verdict rather than crashing the job, so a
+    required `review-gate` fails safe (never a false pass) and a re-run
+    recovers it. See ADR 0004 for the full rationale.
 12. **Reset prior review and labels** — dismisses this action's own prior
     `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
     can't be dismissed via the API and is left alone), **collapses every prior
