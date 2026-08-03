@@ -722,6 +722,11 @@ runs:
     # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
     # never reached the model. Give a transient upstream/rate-limit condition
     # time to clear before spending another full review.
+    # This step's `if:` must be kept identical to the retry step's `if:`
+    # below (the "Review stage (Sonnet/Opus) — retry" step) — they gate the
+    # same condition, and if they drift the retry could fire without its
+    # back-off delay, reintroducing the "143ms, $0.00, never reached the
+    # model" bug this step exists to prevent.
     - name: Back off before the review retry
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
@@ -736,6 +741,9 @@ runs:
     # Same model/tools/schema/credentials; a condensed prompt that re-runs the
     # full review and stresses that emitting structured output is mandatory.
     # Keep the model/tools/schema in sync with the Review stage step above.
+    # This step's `if:` must also be kept identical to the "Back off before
+    # the review retry" step's `if:` above, so the retry never fires without
+    # first paying the 45s back-off delay.
     - name: Review stage (Sonnet/Opus) — retry
       id: review_retry
       continue-on-error: true
