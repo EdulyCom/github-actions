@@ -367,6 +367,11 @@ Clamp to [0, 100].
   other non-unit-testable config) has no test-eligible surface and is exempt: report
   `no_tests_for_changed_logic = false` for it, not `true`. Don't conflate "no tests
   exist because none are needed" with "no tests exist because they were skipped."
+- Test execution **skipped** (no toolchain available — this action provisions
+  none, per ADR 0003 §2) or **not run** (nothing testable in the diff): **no
+  adjustment**. The sandbox is not the test oracle; the authoritative signal is
+  the caller's own CI lanes. Do not penalize the review for an environment
+  limitation.
 
 | Confidence | Label |
 |---|---|
@@ -375,8 +380,25 @@ Clamp to [0, 100].
 | 50–69% | Low — P1s requiring fix |
 | < 50% | Very Low — P0s found or major gaps |
 
-**Pass threshold:** `confidence ≥ ${user_config.AI_REVIEW_CONFIDENCE_THRESHOLD}` (default
-**90**) AND `P0_count == 0` AND `P1_count == 0` → PASS; else FAIL.
+**Pass threshold.** The gate compares a **blocking-finding confidence** — the
+same formula with the **P2 term removed** — against
+`${user_config.AI_REVIEW_CONFIDENCE_THRESHOLD}` (default **90**):
+
+```
+gate_confidence = 100 − (P0_count × 30) − (P1_count × 15) + test_adjustment
+pass = gate_confidence ≥ threshold AND P0_count == 0 AND P1_count == 0
+       AND no failing required CI AND intent != deviated
+```
+
+P2 and P3 are **advisory only** and can never flip the verdict — they are
+defined above as "can merge with note" and "optional", so a diff with no P0/P1
+findings passes no matter how many nits are surfaced. They still lower the
+*reported* `confidence` above (which feeds the merge-risk bands), so the number
+in the banner may sit below the threshold on a PASS. That is expected.
+
+Before this split, three P2 nice-to-haves took confidence to 85 and hard-failed
+the gate on an otherwise-clean diff, making the verdict turn on ordinary
+model-run variance. See ADR 0004.
 
 ---
 

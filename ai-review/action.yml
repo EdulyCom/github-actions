@@ -85,10 +85,13 @@ inputs:
     default: "✗ /ai-qa"
   confidence-threshold:
     description: >
-      Minimum confidence (0-100) required for a pass verdict. Consumed by
-      the deterministic Publish review step, which recomputes confidence
-      from the review stage's reported P0-P3 counts and test-quality
-      signals and compares it against this threshold.
+      Minimum blocking-finding confidence (0-100) required for a pass
+      verdict. Consumed by the deterministic Publish review step, which
+      recomputes confidence from the review stage's reported P0/P1 counts
+      and test-quality signals and compares it against this threshold.
+      P2/P3 findings are advisory: they lower the reported confidence (and
+      so the merge-risk band) but never block the gate. See
+      docs/adr/0004-non-blocking-findings-and-structured-output-repair.md.
     required: false
     default: "90"
   sonnet-model:
@@ -677,18 +680,102 @@ runs:
           does not trust your `verdict` field; report it anyway as your own
           best assessment.
 
+    # claude-code-action always writes its execution log to the fixed path
+    # "${RUNNER_TEMP}/claude-execution-output.json" (no per-invocation unique
+    # component — verified against the pinned action's source). Every
+    # claude-code-action step below (repair, retry) writes to that SAME file,
+    # so review's log — the expensive analysis Salvage exists to rescue —
+    # would otherwise be overwritten before Salvage ever runs. Snapshot it now,
+    # while it's still review's own output. Best-effort: never fails the job.
+    - name: Snapshot the review stage's execution log
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+      run: |
+        set -uo pipefail
+        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
+          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
+        fi
+        exit 0
+
+    # Cheap structured-output repair. The first attempt frequently completes a
+    # full review (observed: 33 turns, $3.76, 5.5 min) and then ends without
+    # emitting structured_output — claude-code-action reports subtype "success"
+    # with is_error true. Resuming that same session and asking only for the
+    # JSON recovers the work already paid for, instead of re-reviewing from
+    # scratch. Best-effort: restricted to Read only (this step must not
+    # re-read the repo or use any other tool — it only re-emits output it
+    # already composed), and the full retry below still runs if this misses.
+    - name: Review stage — structured-output repair
+      id: review_repair
+      continue-on-error: true
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        steps.review.outputs.structured_output == '' &&
+        steps.review.outputs.session_id != ''
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
+        claude_args: |
+          --resume ${{ steps.review.outputs.session_id }}
+          --model ${{ steps.route.outputs.model }}
+          --allowedTools "Read"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+        prompt: |
+          Your previous turn in this session finished the review but ended
+          without emitting the required structured output.
+
+          Do NOT re-analyze the diff, re-read files, or revise your findings.
+          Emit the structured output NOW, using the schema, populated from the
+          analysis you already completed in this session. `counts` must match
+          the findings you already wrote up, and `comment_markdown` must be the
+          review body you already composed (findings grouped P0-P3 with
+          "_None._" for empty sections, plus strengths; no leading verdict
+          token, confidence line, or HTML marker).
+
+          Emitting the structured output is your only remaining task.
+
+    # The full retry previously fired ~11s after the first attempt ended and
+    # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
+    # never reached the model. Give a transient upstream/rate-limit condition
+    # time to clear before spending another full review.
+    # This step's `if:` must be kept identical to the retry step's `if:`
+    # below (the "Review stage (Sonnet/Opus) — retry" step) — they gate the
+    # same condition, and if they drift the retry could fire without its
+    # back-off delay, reintroducing the "143ms, $0.00, never reached the
+    # model" bug this step exists to prevent.
+    - name: Back off before the review retry
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
+        steps.review_repair.outputs.structured_output == ''
+      shell: bash
+      run: sleep 45
+
     # Retry of the Review stage — runs only if the first attempt failed or
     # returned no structured_output (the intermittent claude-code-action miss).
     # Same model/tools/schema/credentials; a condensed prompt that re-runs the
     # full review and stresses that emitting structured output is mandatory.
     # Keep the model/tools/schema in sync with the Review stage step above.
+    # This step's `if:` must also be kept identical to the "Back off before
+    # the review retry" step's `if:` above, so the retry never fires without
+    # first paying the 45s back-off delay.
     - name: Review stage (Sonnet/Opus) — retry
       id: review_retry
       continue-on-error: true
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
-        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '')
+        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
+        steps.review_repair.outputs.structured_output == ''
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
@@ -734,6 +821,58 @@ runs:
 
           Return your assessment via the required structured output schema. Do
           NOT end your turn without emitting the structured output.
+
+    # When every attempt missed the structured output, the model's final prose
+    # is still in claude-code-action's execution log — a completed review that
+    # would otherwise be discarded (observed: 33 turns / $3.76 thrown away).
+    # Extract it so the inconclusive review carries something a human can act
+    # on. Best-effort throughout: never fails the job, and an empty result just
+    # means the inconclusive notice stays as-is.
+    - name: Salvage unstructured review output
+      id: salvage
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        steps.review.outputs.structured_output == '' &&
+        steps.review_repair.outputs.structured_output == '' &&
+        steps.review_retry.outputs.structured_output == ''
+      shell: bash
+      env:
+        # A snapshot, not steps.review.outputs.execution_file directly: by
+        # this point in the job that shared path has been overwritten by
+        # review_repair and/or review_retry (see the snapshot step above).
+        REVIEW_EXEC_FILE: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
+        # No snapshot needed here: review_retry is the last claude-code-action
+        # invocation before this step runs, and nothing in between rewrites
+        # the shared execution-log path.
+        RETRY_EXEC_FILE: ${{ steps.review_retry.outputs.execution_file }}
+      run: |
+        # Best-effort only — must never hard-fail the job, so no `set -e`.
+        set -uo pipefail
+        mkdir -p .ai-review
+        OUT=".ai-review/salvaged.md"
+        : > "${OUT}"
+        for f in "${RETRY_EXEC_FILE:-}" "${REVIEW_EXEC_FILE:-}"; do
+          [ -n "${f}" ] && [ -s "${f}" ] || continue
+          # Preferred shape: a stream of events, assistant messages carrying
+          # content blocks. Fall back to a recursive scan for any text block.
+          jq -r '[.[]? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // empty' \
+            "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
+          if [ ! -s "${OUT}" ]; then
+            jq -r '[.. | objects | select(.type? == "text") | .text?] | map(select(. != null)) | last // empty' \
+              "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
+          fi
+          [ -s "${OUT}" ] && break
+        done
+        # GitHub caps a review body at 65536 characters; leave room for the
+        # notice wrapper around it.
+        if [ -s "${OUT}" ]; then
+          head -c 50000 "${OUT}" > "${OUT}.trunc" && mv "${OUT}.trunc" "${OUT}"
+          echo "Salvaged $(wc -c < "${OUT}") bytes of unstructured model output."
+        else
+          echo "No unstructured model output could be salvaged."
+        fi
+        exit 0
 
     - name: Reset prior review and labels
       id: reset
@@ -852,7 +991,11 @@ runs:
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
-        REVIEW_JSON: ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output || steps.review.outputs.structured_output }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
+        RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
@@ -873,16 +1016,33 @@ runs:
             // that didn't complete must not read as pass), and set outputs so
             // review-gate sees a non-pass verdict. A re-run usually succeeds.
             core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
+            let salvaged = "";
+            try {
+              salvaged = require("fs").readFileSync(".ai-review/salvaged.md", "utf8").trim();
+            } catch (e) {
+              // No salvage file (step skipped, or nothing recoverable).
+            }
             const inconclusiveBody = [
               "<!-- ai-review -->",
               "### ⚠️ AI Review — inconclusive (re-run required)",
               "",
-              "The review model did not return a structured result after two",
-              "attempts (a known intermittent `anthropics/claude-code-action`",
-              "issue). This is **not** a code-quality judgment — the review did",
-              "not complete.",
+              "The review model did not return a structured result after a",
+              "resume-repair attempt and a full retry (a known intermittent",
+              "`anthropics/claude-code-action` issue). This is **not** a",
+              "code-quality judgment — the review did not complete, so the gate",
+              "fails closed.",
               "",
               "**Re-run the `ai-review` job** to get a verdict.",
+              ...(salvaged
+                ? [
+                    "",
+                    "<details><summary>Unstructured model output recovered from the run (not a verdict)</summary>",
+                    "",
+                    salvaged,
+                    "",
+                    "</details>",
+                  ]
+                : []),
             ].join("\n");
             try {
               await github.rest.pulls.createReview({
@@ -912,73 +1072,63 @@ runs:
             return;
           }
 
-          const counts = review.counts || {};
-          const p0 = Number(counts.p0) || 0;
-          const p1 = Number(counts.p1) || 0;
-          const p2 = Number(counts.p2) || 0;
-          const p3 = Number(counts.p3) || 0;
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
 
-          let confidence = 100 - 30 * p0 - 15 * p1 - 5 * p2;
-
-          // Test-quality adjustment (rubric.md "Confidence Rate Calculation").
-          // no_tests_for_changed_logic and coverage_below_threshold_on_critical_paths
-          // both describe "tests are inadequate" at different severities, so only the
-          // worse of the two applies; tests_failing is an independent, stackable
-          // penalty (a PR can have adequate but currently-failing tests).
-          if (review.no_tests_for_changed_logic) {
-            confidence -= 15;
-          } else if (review.coverage_below_threshold_on_critical_paths) {
-            confidence -= 5;
-          }
-          // Real test execution (test_execution) supersedes the static
-          // tests_failing guess: a command that actually exited non-zero is a
-          // definitive failure. And a "passed" claim with no cited
-          // command+output in verification_evidence is unverified per
-          // /verification-before-completion, so it earns the same penalty as a
-          // failing suite rather than a free pass ("evidence before claims").
-          const testExecution = review.test_execution || "";
+          // verification_evidence is still needed below by the PR-body status
+          // block, independently of the verdict computation.
           const verificationEvidence = Array.isArray(review.verification_evidence)
             ? review.verification_evidence
             : [];
-          const testsFailing = review.tests_failing === true || testExecution === "failed";
-          if (testsFailing) {
-            confidence -= 10;
-          }
-          if (testExecution === "passed" && verificationEvidence.length === 0) {
-            confidence -= 10;
-          }
 
-          confidence = Math.max(0, Math.min(100, confidence));
+          const result = recompute(review, {
+            confidenceThreshold,
+            ciSignal,
+          });
 
-          // A completed failing/timed-out required-check conclusion (only available on
-          // a workflow_dispatch re-review — see the ci-signal step) is treated as an
-          // automatic fail, matching the rubric's "failing required CI = auto-P0" rule.
-          const ciFailed = ciSignal === "fail" || ciSignal === "timeout";
+          const {
+            verdict,
+            confidence,
+            gateConfidence,
+            mergeRisk,
+            reviewEvent,
+            blockers,
+            counts,
+            intentDeviated,
+          } = result;
 
-          let pass = confidence >= confidenceThreshold && p0 === 0 && p1 === 0 && !ciFailed;
-
-          const intentDeviated = review.intent === "deviated";
-          if (intentDeviated) {
-            pass = false;
-          }
-
-          const verdict = pass ? "pass" : "fail";
-          const reviewEvent = pass ? "APPROVE" : "REQUEST_CHANGES";
-
-          let mergeRisk;
-          if (p0 > 0 || p1 > 2) {
-            mergeRisk = "high";
-          } else if (p1 >= 1 || confidence < 70) {
-            mergeRisk = "medium";
-          } else {
-            mergeRisk = "low";
+          core.info(
+            `Gate: verdict=${verdict} confidence=${confidence} ` +
+              `gateConfidence=${gateConfidence} threshold=${confidenceThreshold} ` +
+              `p0=${counts.p0} p1=${counts.p1} p2=${counts.p2} p3=${counts.p3} ` +
+              `test_execution=${review.test_execution || "(unset)"} ` +
+              `ci_signal=${ciSignal}`
+          );
+          if (blockers.length) {
+            core.info(`Blocking conditions: ${blockers.join("; ")}`);
           }
 
           const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
           const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
+
+          // State the machine reason for every fail. Without this, a
+          // deterministic override reads as unexplained and gets attributed to
+          // whatever the model happened to write about in comment_markdown —
+          // exactly how issue #25 came to be filed as a test-toolchain bug.
+          const reasonNote =
+            verdict === "fail" && blockers.length
+              ? `\n> **Why the gate failed:** ${blockers.join("; ")}.\n`
+              : "";
+
           const mismatchNote =
             review.verdict && review.verdict !== verdict
               ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
+              : "";
+
+          // P2/P3 are advisory and never block (rubric.md §Severity). Say so
+          // on a pass, so a reader does not wonder why nits were tolerated.
+          const advisoryNote =
+            verdict === "pass" && counts.p2 + counts.p3 > 0
+              ? `\n> ${counts.p2} P2 / ${counts.p3} P3 finding(s) noted — non-blocking.\n`
               : "";
 
           // The review-stage prompt instructs the model not to prepend its own
@@ -1016,8 +1166,11 @@ runs:
             "<!-- ai-review -->",
             `${rejectedBanner}${verdictLine}`,
             ...(mismatchNote ? [mismatchNote] : []),
+            ...(reasonNote ? [reasonNote] : []),
+            ...(advisoryNote ? [advisoryNote] : []),
             "",
             `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
+            `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
             "",
             commentBody || "_No review content returned._",
           ].join("\n");

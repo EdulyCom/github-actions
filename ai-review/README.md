@@ -87,12 +87,18 @@ injection-safety rule.
     from the superpowers plugin: no `pass`/verified claim is accepted
     without cited command output ("evidence before claims"). `claude-code-action`
     intermittently ends a successful session without emitting the structured
-    output and exits 1; the stage is `continue-on-error` and a **retry stage**
-    re-runs the review only when the first attempt failed or returned no
-    structured output. If *both* attempts miss, Publish (below) degrades
-    gracefully — it posts an explicit "inconclusive — re-run required" review
-    and a `fail` verdict rather than crashing the job, so a required
-    `review-gate` fails safe (never a false pass) and a re-run recovers it.
+    output and exits 1. Three fallbacks recover this, cheapest first: a
+    **structured-output repair** step resumes that same session and asks only
+    for the JSON (the analysis is already done — this is a cheap ask, not a
+    re-review); if that also misses, a 45s back-off then a **retry stage**
+    re-runs the review from scratch; if every attempt misses, a **salvage**
+    step extracts the model's last prose from the execution log so the
+    completed analysis isn't discarded. Publish (below) still degrades
+    gracefully in that final case — it posts an explicit "inconclusive —
+    re-run required" review (with the salvaged prose attached, when
+    available) and a `fail` verdict rather than crashing the job, so a
+    required `review-gate` fails safe (never a false pass) and a re-run
+    recovers it. See ADR 0004 for the full rationale.
 12. **Reset prior review and labels** — dismisses this action's own prior
     `APPROVED`/`CHANGES_REQUESTED` review on the PR (a `COMMENTED` review
     can't be dismissed via the API and is left alone), **collapses every prior
@@ -125,7 +131,7 @@ injection-safety rule.
 | `fail-label` | Label applied when the verdict is a fail. | No | `✗ /ai-review` |
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
-| `confidence-threshold` | Minimum confidence (0-100) required for a pass. Consumed by the Publish review step, which recomputes confidence from the review stage's reported P0-P3 counts and test-quality signals and compares it against this threshold. | No | `90` |
+| `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
 | `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `3` |
 | `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `60` |
 | `test-command` | Explicit command the Review stage runs to execute the project's tests (e.g. `npm test`). **The caller must install the toolchain/deps before this action.** Empty ⇒ the model may auto-detect a command and skips gracefully when no toolchain is present. | No | — |
@@ -156,7 +162,7 @@ concurrency:
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
       pull-requests: write
