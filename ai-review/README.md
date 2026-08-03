@@ -125,7 +125,7 @@ injection-safety rule.
 | `fail-label` | Label applied when the verdict is a fail. | No | `✗ /ai-review` |
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
-| `confidence-threshold` | Minimum confidence (0-100) required for a pass. Consumed by the Publish review step, which recomputes confidence from the review stage's reported P0-P3 counts and test-quality signals and compares it against this threshold. | No | `90` |
+| `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
 | `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `3` |
 | `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `60` |
 | `test-command` | Explicit command the Review stage runs to execute the project's tests (e.g. `npm test`). **The caller must install the toolchain/deps before this action.** Empty ⇒ the model may auto-detect a command and skips gracefully when no toolchain is present. | No | — |

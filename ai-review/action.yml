@@ -85,10 +85,13 @@ inputs:
     default: "✗ /ai-qa"
   confidence-threshold:
     description: >
-      Minimum confidence (0-100) required for a pass verdict. Consumed by
-      the deterministic Publish review step, which recomputes confidence
-      from the review stage's reported P0-P3 counts and test-quality
-      signals and compares it against this threshold.
+      Minimum blocking-finding confidence (0-100) required for a pass
+      verdict. Consumed by the deterministic Publish review step, which
+      recomputes confidence from the review stage's reported P0/P1 counts
+      and test-quality signals and compares it against this threshold.
+      P2/P3 findings are advisory: they lower the reported confidence (and
+      so the merge-risk band) but never block the gate. See
+      docs/adr/0004-non-blocking-findings-and-structured-output-repair.md.
     required: false
     default: "90"
   sonnet-model:
