@@ -1,0 +1,29 @@
+name: Unit tests
+
+# The deterministic gate arithmetic in ai-review/lib/recompute.js is the one
+# piece of this repo that can be tested without paying for a live model run.
+# Issue #25 (a P2-only diff hard-failing the gate) shipped because that
+# arithmetic lived inline in a github-script block with no test lane.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run node:test
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          node --test ai-review/lib/recompute.test.js
