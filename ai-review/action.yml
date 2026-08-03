@@ -853,6 +853,7 @@ runs:
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
         REVIEW_JSON: ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output || steps.review.outputs.structured_output }}
+        RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
@@ -912,73 +913,63 @@ runs:
             return;
           }
 
-          const counts = review.counts || {};
-          const p0 = Number(counts.p0) || 0;
-          const p1 = Number(counts.p1) || 0;
-          const p2 = Number(counts.p2) || 0;
-          const p3 = Number(counts.p3) || 0;
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
 
-          let confidence = 100 - 30 * p0 - 15 * p1 - 5 * p2;
-
-          // Test-quality adjustment (rubric.md "Confidence Rate Calculation").
-          // no_tests_for_changed_logic and coverage_below_threshold_on_critical_paths
-          // both describe "tests are inadequate" at different severities, so only the
-          // worse of the two applies; tests_failing is an independent, stackable
-          // penalty (a PR can have adequate but currently-failing tests).
-          if (review.no_tests_for_changed_logic) {
-            confidence -= 15;
-          } else if (review.coverage_below_threshold_on_critical_paths) {
-            confidence -= 5;
-          }
-          // Real test execution (test_execution) supersedes the static
-          // tests_failing guess: a command that actually exited non-zero is a
-          // definitive failure. And a "passed" claim with no cited
-          // command+output in verification_evidence is unverified per
-          // /verification-before-completion, so it earns the same penalty as a
-          // failing suite rather than a free pass ("evidence before claims").
-          const testExecution = review.test_execution || "";
+          // verification_evidence is still needed below by the PR-body status
+          // block, independently of the verdict computation.
           const verificationEvidence = Array.isArray(review.verification_evidence)
             ? review.verification_evidence
             : [];
-          const testsFailing = review.tests_failing === true || testExecution === "failed";
-          if (testsFailing) {
-            confidence -= 10;
-          }
-          if (testExecution === "passed" && verificationEvidence.length === 0) {
-            confidence -= 10;
-          }
 
-          confidence = Math.max(0, Math.min(100, confidence));
+          const result = recompute(review, {
+            confidenceThreshold,
+            ciSignal,
+          });
 
-          // A completed failing/timed-out required-check conclusion (only available on
-          // a workflow_dispatch re-review — see the ci-signal step) is treated as an
-          // automatic fail, matching the rubric's "failing required CI = auto-P0" rule.
-          const ciFailed = ciSignal === "fail" || ciSignal === "timeout";
+          const {
+            verdict,
+            confidence,
+            gateConfidence,
+            mergeRisk,
+            reviewEvent,
+            blockers,
+            counts,
+            intentDeviated,
+          } = result;
 
-          let pass = confidence >= confidenceThreshold && p0 === 0 && p1 === 0 && !ciFailed;
-
-          const intentDeviated = review.intent === "deviated";
-          if (intentDeviated) {
-            pass = false;
-          }
-
-          const verdict = pass ? "pass" : "fail";
-          const reviewEvent = pass ? "APPROVE" : "REQUEST_CHANGES";
-
-          let mergeRisk;
-          if (p0 > 0 || p1 > 2) {
-            mergeRisk = "high";
-          } else if (p1 >= 1 || confidence < 70) {
-            mergeRisk = "medium";
-          } else {
-            mergeRisk = "low";
+          core.info(
+            `Gate: verdict=${verdict} confidence=${confidence} ` +
+              `gateConfidence=${gateConfidence} threshold=${confidenceThreshold} ` +
+              `p0=${counts.p0} p1=${counts.p1} p2=${counts.p2} p3=${counts.p3} ` +
+              `test_execution=${review.test_execution || "(unset)"} ` +
+              `ci_signal=${ciSignal}`
+          );
+          if (blockers.length) {
+            core.info(`Blocking conditions: ${blockers.join("; ")}`);
           }
 
           const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
           const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
+
+          // State the machine reason for every fail. Without this, a
+          // deterministic override reads as unexplained and gets attributed to
+          // whatever the model happened to write about in comment_markdown —
+          // exactly how issue #25 came to be filed as a test-toolchain bug.
+          const reasonNote =
+            verdict === "fail" && blockers.length
+              ? `\n> **Why the gate failed:** ${blockers.join("; ")}.\n`
+              : "";
+
           const mismatchNote =
             review.verdict && review.verdict !== verdict
               ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
+              : "";
+
+          // P2/P3 are advisory and never block (rubric.md §Severity). Say so
+          // on a pass, so a reader does not wonder why nits were tolerated.
+          const advisoryNote =
+            verdict === "pass" && counts.p2 + counts.p3 > 0
+              ? `\n> ${counts.p2} P2 / ${counts.p3} P3 finding(s) noted — non-blocking.\n`
               : "";
 
           // The review-stage prompt instructs the model not to prepend its own
@@ -1016,8 +1007,11 @@ runs:
             "<!-- ai-review -->",
             `${rejectedBanner}${verdictLine}`,
             ...(mismatchNote ? [mismatchNote] : []),
+            ...(reasonNote ? [reasonNote] : []),
+            ...(advisoryNote ? [advisoryNote] : []),
             "",
             `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
+            `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
             "",
             commentBody || "_No review content returned._",
           ].join("\n");
