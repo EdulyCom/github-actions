@@ -2,9 +2,10 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-03
-- **Relates to:** ADR 0001 (gate contract), ADR 0003 (test execution is
-  best-effort and caller-provisioned). Both still hold; this ADR corrects the
-  gate arithmetic and the retry path without changing the gate contract.
+- **Relates to:** ADR 0001 (gate contract), ADR 0002 (toolchain provisioning
+  is the caller's responsibility), ADR 0003 (test execution is best-effort
+  and caller-provisioned). All three still hold; this ADR corrects the gate
+  arithmetic and the retry path without changing the gate contract.
 - **Closes:** issue #25
 
 ## Context

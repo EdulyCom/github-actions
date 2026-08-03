@@ -680,13 +680,33 @@ runs:
           does not trust your `verdict` field; report it anyway as your own
           best assessment.
 
+    # claude-code-action always writes its execution log to the fixed path
+    # "${RUNNER_TEMP}/claude-execution-output.json" (no per-invocation unique
+    # component — verified against the pinned action's source). Every
+    # claude-code-action step below (repair, retry) writes to that SAME file,
+    # so review's log — the expensive analysis Salvage exists to rescue —
+    # would otherwise be overwritten before Salvage ever runs. Snapshot it now,
+    # while it's still review's own output. Best-effort: never fails the job.
+    - name: Snapshot the review stage's execution log
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+      run: |
+        set -uo pipefail
+        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
+          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
+        fi
+        exit 0
+
     # Cheap structured-output repair. The first attempt frequently completes a
     # full review (observed: 33 turns, $3.76, 5.5 min) and then ends without
     # emitting structured_output — claude-code-action reports subtype "success"
     # with is_error true. Resuming that same session and asking only for the
     # JSON recovers the work already paid for, instead of re-reviewing from
-    # scratch. Best-effort: no tools are allowlisted (nothing here needs to
-    # re-read the repo), and the full retry below still runs if this misses.
+    # scratch. Best-effort: restricted to Read only (this step must not
+    # re-read the repo or use any other tool — it only re-emits output it
+    # already composed), and the full retry below still runs if this misses.
     - name: Review stage — structured-output repair
       id: review_repair
       continue-on-error: true
@@ -706,6 +726,7 @@ runs:
         claude_args: |
           --resume ${{ steps.review.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
+          --allowedTools "Read"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           Your previous turn in this session finished the review but ended
@@ -817,7 +838,13 @@ runs:
         steps.review_retry.outputs.structured_output == ''
       shell: bash
       env:
-        REVIEW_EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+        # A snapshot, not steps.review.outputs.execution_file directly: by
+        # this point in the job that shared path has been overwritten by
+        # review_repair and/or review_retry (see the snapshot step above).
+        REVIEW_EXEC_FILE: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
+        # No snapshot needed here: review_retry is the last claude-code-action
+        # invocation before this step runs, and nothing in between rewrites
+        # the shared execution-log path.
         RETRY_EXEC_FILE: ${{ steps.review_retry.outputs.execution_file }}
       run: |
         # Best-effort only — must never hard-fail the job, so no `set -e`.
