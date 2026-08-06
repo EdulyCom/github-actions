@@ -1137,6 +1137,9 @@ function createRunner(deps) {
   async function once({ prompt, model, allowedTools, schema, maxTurns }) {
     const log = [];
     let timer = null;
+    // Per-call, never shared: `once` runs twice on the retry path, and ~12
+    // sessions run concurrently. A shared controller would abort the wrong work.
+    const controller = new AbortController();
 
     // MEASURED, NOT ASSUMED (Task 1 spike): structured output completes the
     // turn by calling a tool named `StructuredOutput`. An allowlist that omits
@@ -1149,6 +1152,7 @@ function createRunner(deps) {
     const options = {
       model,
       cwd,
+      abortController: controller,  // the SDK's own cancellation — see the guard below
       settingSources: [],           // attacker-controlled checkout: load nothing from it
       includePartialMessages: false,
       allowedTools: tools,
@@ -1174,11 +1178,18 @@ function createRunner(deps) {
       return { ok: true, data, log, error: null };
     })();
 
+    // Losing the race is not enough: without the abort the SDK subprocess keeps
+    // running after we have given up on it, and `log` — the array we already
+    // handed the caller — keeps growing, so a late `result` can appear in a
+    // stage recorded as timed out. Abort, then hand back a snapshot.
     const guard = new Promise((resolve) => {
-      timer = setTimeout(
-        () => resolve({ ok: false, data: null, log, error: `session timed out after ${timeoutMs}ms` }),
-        timeoutMs
-      );
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({
+          ok: false, data: null, log: [...log],
+          error: `session timed out after ${timeoutMs}ms`,
+        });
+      }, timeoutMs);
     });
 
     try {
@@ -1207,7 +1218,7 @@ module.exports = { createRunner, DEFAULT_TIMEOUT_MS, STRUCTURED_OUTPUT_TOOL };
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test ai-review/orchestrator/session.test.js`
-Expected: PASS, 17 tests.
+Expected: PASS, 20 tests.
 
 - [ ] **Step 5: Add the orchestrator test lane to `unit.yml`**
 
@@ -1823,7 +1834,9 @@ const scanTask = (over) => ({
 });
 
 const workerOut = (over) => ({
-  task_id: "s1", angles: ALL, files_examined: [], findings: [], evidence: [],
+  // files_examined must be non-empty for a scan worker: worker-result.js
+  // treats a scan that read nothing as a dead worker (Task 4 review finding).
+  task_id: "s1", angles: ALL, files_examined: ["a.js"], findings: [], evidence: [],
   sentinel: "complete", ...over,
 });
 
