@@ -82,6 +82,31 @@ test("stamps findings with id, shard, and model for attribution", () => {
   assert.ok(res.result.findings[0].id, "every finding needs a stable id for refutation");
 });
 
+test("a scan worker that examined nothing is dead, even with an empty focus", () => {
+  const res = validateWorkerResult(
+    raw({ files_examined: [] }),
+    task({ kind: "scan", focus: [] })
+  );
+  assert.equal(res.ok, false, "no files read means no angle was actually reviewed");
+  assert.match(res.reason, /examined/i);
+});
+
+test("a scan worker with an empty focus is fine once it examined something", () => {
+  const res = validateWorkerResult(
+    raw({ files_examined: ["a.js"] }),
+    task({ kind: "scan", focus: [] })
+  );
+  assert.equal(res.ok, true, res.reason);
+});
+
+test("a test worker may legitimately examine no files", () => {
+  const res = validateWorkerResult(
+    raw({ task_id: "x1", files_examined: [] }),
+    task({ id: "x1", kind: "test", focus: [] })
+  );
+  assert.equal(res.ok, true, res.reason);
+});
+
 test("coverageGaps reports every floor angle when the only scan worker died", () => {
   const tasks = [task({ id: "t1", angles: ["A", "B", "C", "D", "E", "F", "G"] })];
   assert.deepEqual(coverageGaps(tasks, []), ["A", "B", "C", "D", "E", "F", "G"]);

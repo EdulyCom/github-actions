@@ -8,6 +8,10 @@
 // never "nothing found". That distinction is why silent angle death, which the
 // matrix route would have caught via job status, is caught here instead.
 //
+// Scan workers must examine at least one file — examining nothing means no
+// angle was actually reviewed, even if focus is empty or missing. Test and
+// collect workers have different contracts and are exempt.
+//
 // Known residual (spec section 5): both signals are self-reported, and a
 // scoped short-lived worker is more steerable by hostile diff content than the
 // 138-turn monolith was. Cross-checking `files_examined` against the session
@@ -38,6 +42,11 @@ function validateWorkerResult(raw, task) {
   }
   if (!Array.isArray(raw.findings)) return fail("findings must be an array");
   if (!Array.isArray(raw.files_examined)) return fail("files_examined must be an array");
+
+  // A scan worker that examined nothing is dead — it cannot have reviewed the diff.
+  if (task.kind === "scan" && raw.files_examined.length === 0) {
+    return fail("scan worker examined no files — no angle was actually reviewed");
+  }
 
   const examined = new Set(raw.files_examined);
   const focus = Array.isArray(task.focus) ? task.focus : [];
