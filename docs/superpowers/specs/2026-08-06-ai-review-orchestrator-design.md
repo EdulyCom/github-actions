@@ -320,6 +320,7 @@ Serial then stays as the documented fallback.
 - **429 behaviour is undocumented** in the SDK, with no cross-session coordination. Mixed models help — Opus 5 draws on a separate rate-limit bucket from the Opus 4.x pool, and Sonnet and Haiku have their own, so the fan-out spreads across three buckets where an all-Opus fan-out would concentrate on one. Unproven until measured.
 - **`total_cost_usd` is a client-side estimate** from a bundled price table. Fine for telemetry; not billing.
 - **`merge.js` dedupe key** merges distinct defects that collide on `(file, line-range, defect-class)`. "Never silently drops" is true at the design level and approximate at the margin — inherited from the existing plan, worth a test fixture.
+- **Diffs larger than a worker's context window have no stated handling.** Giving every scan worker the whole diff (§2) makes this reachable where per-file scoping would not have. The plan needs a rule — and whatever it is, silently truncating the diff is not it, because that reintroduces cross-shard blindness invisibly.
 
 ---
 
