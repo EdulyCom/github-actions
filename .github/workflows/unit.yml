@@ -23,6 +23,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install orchestrator dependencies
+        shell: bash
+        working-directory: ai-review/orchestrator
+        run: npm ci
+
       - name: Run node:test
         shell: bash
         run: |
@@ -31,4 +36,4 @@ jobs:
           # Quoted so node expands the glob itself rather than the shell —
           # `node --test <dir>` does NOT scan a directory, it tries to load it
           # as a module entry point and fails with MODULE_NOT_FOUND.
-          node --test "ai-review/lib/**/*.test.js"
+          node --test "ai-review/lib/**/*.test.js" "ai-review/orchestrator/*.test.js"
