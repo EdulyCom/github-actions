@@ -163,6 +163,8 @@ measurement errors in this program both came from grepping it."
 
 **Must not touch:** rubric content, model routing, output-schema *content*, publish semantics, fan-out.
 
+> **The `route` step ([action.yml:354-393](../../../ai-review/action.yml#L354-L393)) must survive Phase 1 untouched.** It looks like dead weight next to the pre-stage — both compute diff stats — but it becomes the Phase 2 **topology router** (tiny → serial, otherwise → matrix). Deleting or folding it here would have to be rebuilt. Nothing else in Phase 1 is model-aware.
+
 **File budget:** ≤ 5 new files.
 
 **Lands:** A1, A3, A5, A6, A7 (scoped), A9 — fix. A8 — document. A2 deferred to Phase 3; it cannot be fixed serially.
@@ -286,8 +288,44 @@ Measured on **≥3 paired PRs** (same PR, before/after) using Phase-0 telemetry:
 - [ ] Per-shard contract: **transport-agnostic** — `angle + intent brief in → findings JSON + completion sentinel out`. This is what lets in-process subagents later replace matrix as a *simplification* if upstream ever fixes both defects.
 - [ ] `ai-review/lib/merge.js` + fixture tests — dedup on `(file, line-range, defect-class)`, rubric-119 priority (correctness A/B/C outranks cleanup D/E/F/G), counts recomputed from the deduped set. **Never invents, never silently drops** — the rubric calls silent dropping "the dominant cause of misses."
 - [ ] Reusable workflow skeleton: `prep (context pack + Angle H) → matrix A–G + verification shard → merge`
-- [ ] **The spike:** ≥5 consecutive runs on a real heavy PR, scratch caller
-- [ ] *Optional labelled arm, no commitment:* Sonnet shards / routed-model merge — adoptable only if Phase 3 recall parity holds
+- [ ] **Role-based model assignment per the table below — a requirement, not an experiment**
+- [ ] **The spike:** two arms, ≥5 consecutive runs on a real heavy PR, scratch caller (see *Spike arms*)
+
+### Model assignment — the role table
+
+This is a **standing user instruction**: *"run opus as the planner and judge, sonnet as the tester, haiku as the fact collector and helper."* It is structurally impossible on the serial path — one `claude-code-action` invocation takes one `--model`, and the review stage is one invocation — and the in-process route that could carry per-agent models is rejected on #1499/#1515. **The matrix is the only approved architecture that can satisfy it at all.**
+
+| Work | Model | Role |
+|---|---|---|
+| Prep pack — SHAs, diff, churn, toolchain probe | **none — deterministic bash** | fact collection that is *code*, not a model |
+| Context / caller-callee semantic map | **Haiku** | collector |
+| Angle H → intent brief | **Opus** | planner |
+| Angles **A, B, C** (line-by-line, removed-behaviour, cross-file) | **Opus** | scanner — correctness |
+| Angles **D, E, F, G** (reuse, simplification, efficiency, altitude) | **Sonnet** | scanner — cleanup |
+| Verification + test shard | **Sonnet** | tester |
+| Merge: dedup, rank, verdict synthesis | **Opus** | judge |
+| Per-shard repair / retry | **same model as its shard** | — |
+
+**Why A/B/C and D/E/F/G split.** The user's four named roles don't cover the 8-angle scan, which is the largest cost centre. All-Opus ignores the cost intent evident in assigning Sonnet and Haiku roles at all; all-Sonnet walks back ADR 0003's deliberate Opus-by-default quality choice on correctness-critical detection with zero evidence. The split's warrant is [rubric.md:119](../../../ai-review/rubric.md#L119) — *"Correctness bugs (A/B/C) always outrank cleanup/altitude (D/E/F/G) when forced to cut."* The angles whose misses are gate-critical keep the stronger model.
+
+**Stated honestly:** D/E/F/G can still emit blocking P1s — an N+1 query is a listed P1 under Angle F. The split carries residual recall risk. That is exactly what Phase 3's per-angle gate measures.
+
+**Repair must never cross models.** It resumes a session via `--resume`; it inherits its shard's model.
+
+**Haiku is the designated default for every future non-judgment auxiliary model task** — the rule exists so nobody reaches for Opus out of habit. Today its only live duty is the collector map.
+
+**Topology router.** Tiny diffs (the existing ≤3-files **and** ≤60-churn thresholds) **do not enter the matrix** — ten jobs of startup overhead for a 6-minute review is absurd, and the time problem lives in heavy diffs. They keep today's serial single-session Sonnet path unchanged. The existing `route` step becomes a *topology* router: tiny → serial, otherwise → matrix with the role table.
+
+**Ratchet rule for changing any assignment later.** Up-model moves are **free and unilateral** — any Sonnet shard showing a missed finding-class against the serial baseline promotes to Opus immediately, no sign-off. Down-model moves require per-angle recall data at **n ≥ 10 paired runs plus user sign-off**. The burden of proof always sits on the cheaper direction.
+
+### Spike arms — hold-then-vary
+
+Changing topology and models together and then measuring once would make a recall failure unattributable — the same sin as designing on inference. But a full sequential double shadow doubles the expensive window. So the two variables separate **in the cheap phase**:
+
+- **Arm T (topology-only):** every shard on the routed model (Opus). Isolates the fan-out delta against the serial baseline.
+- **Arm R (role-based):** the table above. Measures the requirement.
+
+Both run on the **same ≥3 paired PRs**. Every finding artifact carries `{shard, model}` tags so any miss attributes to an angle+model pair.
 
 **Binding design amendments:**
 - Angle H hands forward an **intent brief** (goal, acceptance criteria, in/out of scope) — **never its findings**. H writing "wrong solution, P0" into what A–G read is the cross-steering [rubric.md:14-16](../../../ai-review/rubric.md#L14-L16) forbids.
@@ -303,15 +341,19 @@ Measured on **≥3 paired PRs** (same PR, before/after) using Phase-0 telemetry:
 - [ ] **Zero 429 re-serialization** — 8-9 concurrent sessions carry the same rate-limit exposure as in-process; this is the risk that would erase the entire benefit while still multiplying tokens
 - [ ] Runner queue time recorded
 - [ ] `merge.js` dedup tests green
-- [ ] Recall ⊇ serial on ≥3 paired PRs
+- [ ] Recall ⊇ serial on ≥3 paired PRs — **measured for both Arm T and Arm R**
+- [ ] Findings tagged `{shard, model}`; per-role cost rollup produced
+- [ ] Telemetry carries a `role` field per stage (`planner|judge|tester|collector|scanner`) — delivered with the first shard PR, not a Phase 0 re-spin
 
 ### ▶ USER DECISION POINT 1 — end of Phase 2
 
 Presented **with spike numbers in hand**. Not ours to decide:
 
 1. **Interface migration.** Matrix cannot live inside a composite action. The contract moves from `uses: EdulyCom/github-actions/ai-review@main` to a reusable workflow — a **breaking change to eduly's caller wiring**.
-2. **Cost.** Measured $/review delta (direction genuinely uncertain, bounded ~0.6×–2× of today's ~$20 mean) plus ~2× GitHub job-minutes (~80 vs 35-59 — trivial dollars beside API spend, but stated).
-3. **Authorization** for the Phase-3 shadow-window spend.
+2. **Cost.** Both arms' measured $/review, minutes, and inconclusive counts, side by side. With five of nine model-bearing units on Sonnet at roughly a fifth of Opus rates — and H plus merge being small-context Opus calls — the prior band revises **downward from ~0.6×–2× to roughly ~0.4×–1.2×** of today's ~$20 mean. Framing shifts from *"pay possibly more for speed"* to *"speed with likely cost reduction; residual risk is per-angle recall."* **The band is a prior, not a promise — the numbers presented are spike actuals.** Plus ~2× GitHub job-minutes (trivial dollars beside API spend, but stated).
+3. **Authorization** for the Phase-3 shadow-window spend, revised downward accordingly.
+
+**Arm R is recommended** — it is the user's own standing instruction, not our preference.
 
 **On NO-GO:** Phases 3-4 are cancelled. Phase 0-1 gains stand. Matrix is parked pending upstream fixes plus soak.
 
@@ -326,14 +368,18 @@ Presented **with spike numbers in hand**. Not ours to decide:
 **Scope:**
 - [ ] Harden per the binding amendments: read-only shard tokens, pinned head SHA + `fetch-depth: 1`, artifact pack + intent brief (no shard re-derives the base — this cures the base-archaeology class permanently), per-shard repair/retry, fail-closed on missing/malformed shard
 - [ ] Run matrix **side-by-side on ≥10 real eduly PRs**, with the **serial verdict governing**
+- [ ] **Arm R (role-based) is the primary shadow arm** — it is the requirement, not an experiment. Arm T is the pre-characterised diagnostic: if Arm R fails the recall gate, the Phase-2 spike data already indicates which variable is suspect, and one targeted Arm-T slice isolates it definitively.
 - [ ] Draft the recommended matrix caller timeout (~25 min) for Phase 4
 
 ### Phase 3 gate
 
 - [ ] Review-level inconclusive rate **< 5%**
 - [ ] **Recall parity** — matrix confirmed-findings ⊇ serial's on every paired PR; every miss investigated
+- [ ] **Per-angle recall attribution** — every finding tagged `{shard, model}`, so a miss resolves to an angle+model pair rather than "the matrix"
 - [ ] Wall-clock **p95 ≤ 20 min**
 - [ ] $/review delta within the Decision-1 envelope
+
+> **Ratchet in force from here on.** Any Sonnet shard that misses a finding-class the serial baseline caught promotes to Opus immediately — no sign-off, no ceremony. Quality ratchets up freely; only the cheaper direction is gated.
 
 ---
 
@@ -391,7 +437,9 @@ Rollout sign-off on the Phase-3 comparison table.
 
 ## Explicitly out of scope
 
-In-process subagents (rejected until #1499 **and** #1515 are fixed and soaked) · forking/vendoring the wrapper (cannot recover never-executed shards) · `--max-turns` (banned) · rubric content changes (it is the quality bar, not a variable) · Haiku-stage removal (revisit with post-Phase-3 data only) · model-routing changes outside the labelled Phase-2 arm · `ai-qa` parity (follow-up — note the linked-issues resolver sync comment) · any caller CI restructure beyond the ai-review job.
+In-process subagents (rejected until #1499 **and** #1515 are fixed and soaked) · forking/vendoring the wrapper (cannot recover never-executed shards) · `--max-turns` (banned) · rubric content changes (it is the quality bar, not a variable) · **model assignments outside the role table — changes only via the ratchet rule (up free, down requires n ≥ 10 evidence + user sign-off)** · `ai-qa` parity (follow-up — note the linked-issues resolver sync comment) · any caller CI restructure beyond the ai-review job.
+
+> **Haiku-stage removal is no longer a candidate.** An earlier draft listed it for post-Phase-3 review. The collector role is a standing user requirement — Haiku stays, permanently.
 
 ## Time trajectory, stated honestly
 
