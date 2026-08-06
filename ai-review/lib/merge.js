@@ -9,7 +9,9 @@
 // field removes the failure mode.
 //
 // rubric.md:116-118 calls silent dropping "the dominant cause of misses",
-// so dedupe reports every absorption rather than quietly collapsing.
+// so dedupe reports every absorption rather than quietly collapsing. Every
+// input entry ends up in exactly one of: findings, absorbed, or malformed.
+// No entry is silently dropped.
 //
 // Pure: no I/O, no process.env.
 
@@ -26,15 +28,19 @@ const worst = (a, b) => (rank(a) <= rank(b) ? a : b);
 
 /**
  * @param {object[]} findings
- * @returns {{findings: object[], absorbed: {kept: string, absorbed: string}[]}}
+ * @returns {{findings: object[], absorbed: {kept: string, absorbed: string}[], malformed: any[]}}
  */
 function dedupe(findings) {
   const list = Array.isArray(findings) ? findings : [];
   const kept = [];
   const absorbed = [];
+  const malformed = [];
 
   for (const candidate of list) {
-    if (!candidate || typeof candidate !== "object") continue;
+    if (!candidate || typeof candidate !== "object") {
+      malformed.push(candidate);
+      continue;
+    }
 
     const match = kept.find(
       (k) =>
@@ -54,7 +60,7 @@ function dedupe(findings) {
     kept.push({ ...candidate });
   }
 
-  return { findings: kept, absorbed };
+  return { findings: kept, absorbed, malformed };
 }
 
 /**

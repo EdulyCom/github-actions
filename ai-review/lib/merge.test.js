@@ -93,3 +93,16 @@ test("applyRefutations rejects a refutation with no evidence — it is not appli
   assert.equal(retained.length, 1, "a refutation without evidence_file/line does not remove a finding");
   assert.equal(refuted.length, 0);
 });
+
+test("dedupe records malformed entries rather than dropping them silently", () => {
+  const { findings, absorbed, malformed } = dedupe([f({ id: "1" }), null, "nope"]);
+  assert.equal(findings.length, 1);
+  assert.equal(absorbed.length, 0);
+  assert.deepEqual(malformed, [null, "nope"]);
+});
+
+test("dedupe conserves every input entry across its three outputs", () => {
+  const input = [f({ id: "1", line: 10 }), f({ id: "2", line: 11 }), null];
+  const { findings, absorbed, malformed } = dedupe(input);
+  assert.equal(findings.length + absorbed.length + malformed.length, input.length);
+});
