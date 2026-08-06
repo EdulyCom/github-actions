@@ -75,12 +75,12 @@
   "main": "index.js",
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.1.5"
+    "@anthropic-ai/claude-agent-sdk": "0.3.223"
   }
 }
 ```
 
-Pin the exact version — replace `0.1.5` with whatever `npm view @anthropic-ai/claude-agent-sdk version` reports, with no `^` or `~`. A composite action has no build step; a floating range means a consumer's gate behaviour can change without a commit here.
+Pinned exact, no `^` or `~` — `0.3.223` is what `npm view @anthropic-ai/claude-agent-sdk version` reported on 2026-08-06 and what the Task 1 spike ran against. A composite action has no build step; a floating range means a consumer's gate behaviour can change without a commit here.
 
 - [ ] **Step 2: Install and record the lockfile**
 
@@ -969,7 +969,41 @@ test("defaults to an empty tool allowlist rather than inheriting anything", asyn
   const spy = [];
   const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
   await run({ prompt: "p", model: "haiku" });
-  assert.deepEqual(spy[0].options.allowedTools, []);
+  assert.deepEqual(spy[0].options.allowedTools, [],
+    "with no schema there is nothing to allowlist");
+});
+
+// The Task 1 spike measured this: a schema-constrained session ends its turn by
+// calling `StructuredOutput`. Allowlisting without it makes the session
+// unterminable — it burns turns on other tools and dies at the cap. Every one
+// of these three tests guards a call site the pipeline actually makes.
+test("injects StructuredOutput whenever a schema is passed", async () => {
+  const spy = [];
+  const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
+  await run({ prompt: "p", model: "haiku", schema: { type: "object" } });
+  assert.ok(spy[0].options.allowedTools.includes("StructuredOutput"));
+});
+
+test("injects StructuredOutput alongside an explicit read-only allowlist", async () => {
+  const spy = [];
+  const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
+  await run({ prompt: "p", model: "haiku", allowedTools: ["Read", "Grep"], schema: { type: "object" } });
+  assert.deepEqual(spy[0].options.allowedTools, ["Read", "Grep", "StructuredOutput"]);
+});
+
+test("does not duplicate StructuredOutput if the caller already listed it", async () => {
+  const spy = [];
+  const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
+  await run({ prompt: "p", model: "haiku", allowedTools: ["StructuredOutput"], schema: { type: "object" } });
+  assert.deepEqual(spy[0].options.allowedTools, ["StructuredOutput"]);
+});
+
+test("does not mutate the caller's allowlist array", async () => {
+  const spy = [];
+  const mine = ["Read"];
+  const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
+  await run({ prompt: "p", model: "haiku", allowedTools: mine, schema: { type: "object" } });
+  assert.deepEqual(mine, ["Read"], "READ_ONLY_TOOLS is a shared frozen constant");
 });
 
 test("a result with is_error true is not ok", async () => {
@@ -1086,6 +1120,10 @@ Expected: FAIL with `Cannot find module './session.js'`
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
+// The SDK completes a schema-constrained turn by calling this tool. Denying it
+// makes the session unterminable. See the Task 1 spike finding in the spec.
+const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
+
 /**
  * @param {{query: Function, timeoutMs?: number, maxTurns?: number, cwd?: string}} deps
  * @returns {(opts: object) => Promise<{ok: boolean, data: unknown, log: unknown[], error: string|null}>}
@@ -1100,12 +1138,20 @@ function createRunner(deps) {
     const log = [];
     let timer = null;
 
+    // MEASURED, NOT ASSUMED (Task 1 spike): structured output completes the
+    // turn by calling a tool named `StructuredOutput`. An allowlist that omits
+    // it denies the model the only way to finish — the session burns turns on
+    // unrelated tools and dies at the cap with no output. Injecting it here,
+    // rather than in each caller's constant, makes it impossible to forget.
+    const tools = Array.isArray(allowedTools) ? [...allowedTools] : [];
+    if (schema && !tools.includes(STRUCTURED_OUTPUT_TOOL)) tools.push(STRUCTURED_OUTPUT_TOOL);
+
     const options = {
       model,
       cwd,
       settingSources: [],           // attacker-controlled checkout: load nothing from it
       includePartialMessages: false,
-      allowedTools: Array.isArray(allowedTools) ? allowedTools : [],
+      allowedTools: tools,
       maxTurns: Number(maxTurns) || defaultMaxTurns,
     };
     if (schema) options.outputFormat = { type: "json_schema", schema };
@@ -1155,13 +1201,13 @@ function createRunner(deps) {
   };
 }
 
-module.exports = { createRunner, DEFAULT_TIMEOUT_MS };
+module.exports = { createRunner, DEFAULT_TIMEOUT_MS, STRUCTURED_OUTPUT_TOOL };
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test ai-review/orchestrator/session.test.js`
-Expected: PASS, 13 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Add the orchestrator test lane to `unit.yml`**
 
