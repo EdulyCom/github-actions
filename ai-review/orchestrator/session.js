@@ -48,6 +48,15 @@ function createRunner(deps) {
     const tools = Array.isArray(allowedTools) ? [...allowedTools] : [];
     if (schema && !tools.includes(STRUCTURED_OUTPUT_TOOL)) tools.push(STRUCTURED_OUTPUT_TOOL);
 
+    // The timeout guard below wins the Promise.race by resolving, not by
+    // stopping `run` — a losing promise keeps executing. Without cancellation
+    // that leaves the subprocess and network call running in the background
+    // (cost and resources the caller already gave up on), and `log` is the
+    // same array reference already handed to the caller, so a late `result`
+    // could still land in a stage already recorded as timed out. The SDK's
+    // `abortController` option is what actually stops the query.
+    const controller = new AbortController();
+
     const options = {
       model,
       cwd,
@@ -55,6 +64,7 @@ function createRunner(deps) {
       includePartialMessages: false,
       allowedTools: tools,
       maxTurns: Number(maxTurns) || defaultMaxTurns,
+      abortController: controller,
     };
     if (schema) options.outputFormat = { type: "json_schema", schema };
 
@@ -77,10 +87,13 @@ function createRunner(deps) {
     })();
 
     const guard = new Promise((resolve) => {
-      timer = setTimeout(
-        () => resolve({ ok: false, data: null, log, error: `session timed out after ${timeoutMs}ms` }),
-        timeoutMs
-      );
+      timer = setTimeout(() => {
+        controller.abort();
+        // Snapshot, not the live array: `log` keeps growing until the abort
+        // actually stops the generator, and the caller must never observe
+        // that growth after already receiving a timed-out result.
+        resolve({ ok: false, data: null, log: [...log], error: `session timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
     });
 
     try {

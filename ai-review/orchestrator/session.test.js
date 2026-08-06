@@ -139,6 +139,46 @@ test("a hung session is bounded by timeoutMs rather than running to the job kill
   assert.match(res.error, /timed out/i);
 });
 
+test("aborts the underlying query when the timeout fires", async () => {
+  let aborted = false;
+  const run = createRunner({
+    timeoutMs: 20,
+    query: ({ options }) => {
+      options.abortController.signal.addEventListener("abort", () => { aborted = true; });
+      return (async function* () {
+        await new Promise((r) => setTimeout(r, 5000));
+        yield { type: "result", is_error: false };
+      })();
+    },
+  });
+  await run({ prompt: "p", model: "haiku" });
+  assert.equal(aborted, true, "a timed-out session must not keep running in the background");
+});
+
+test("passes an AbortController to every query", async () => {
+  const spy = [];
+  const run = createRunner({ query: fakeQuery(okMessages({}), spy) });
+  await run({ prompt: "p", model: "haiku" });
+  assert.ok(spy[0].options.abortController instanceof AbortController);
+});
+
+test("the log returned on timeout cannot mutate afterwards", async () => {
+  let push;
+  const run = createRunner({
+    timeoutMs: 20,
+    query: () => (async function* () {
+      await new Promise((r) => { push = r; });
+      yield { type: "result", is_error: false, num_turns: 99 };
+    })(),
+  });
+  const res = await run({ prompt: "p", model: "haiku" });
+  const lengthAtReturn = res.log.length;
+  if (push) push();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(res.log.length, lengthAtReturn,
+    "a late result must not appear in a stage already recorded as timed out");
+});
+
 test("retry: true retries once and succeeds on the second attempt", async () => {
   let calls = 0;
   const run = createRunner({
