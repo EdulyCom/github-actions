@@ -7,11 +7,12 @@ description: >
   reads to gate its heavier build/test/deploy lanes. See
   docs/adr/0001-ci-native-ai-review-gate.md for why the gate is an ordinary
   job output rather than an identity-pinned Check Run, and why the review
-  identity is cosmetic. The verdict is produced by a real two-stage AI
-  review pipeline: a Haiku context stage summarizes the diff, then a
-  diff-size-routed Sonnet/Opus review stage performs the full rubric scan
-  and returns a schema-validated result that a deterministic step
-  recomputes the pass/fail decision from.
+  identity is cosmetic. The verdict is produced by an Opus-orchestrated
+  fan-out pipeline (`orchestrator/index.js`): a deterministic prep step
+  builds a diff/context pack, Opus plans and dispatches Sonnet/Haiku
+  worker tasks across one or more rounds, and an Opus judge produces a
+  schema-validated result that a deterministic step recomputes the
+  pass/fail decision from.
 
 inputs:
   app-id:
@@ -39,19 +40,15 @@ inputs:
     default: ${{ github.token }}
   allowed-bots:
     description: >
-      Comma-separated list of bot actor usernames allowed to trigger the
-      Context/Review stages, or '*' to allow all bots. Passed straight
-      through to the underlying `claude-code-action`'s own `allowed_bots`
-      input on all three stage invocations (Context, Review, Review
-      retry). Empty (default) allows no bots — every stage rejects a
-      Bot-type actor (e.g. `dependabot[bot]`) with "Workflow initiated by
-      non-human actor", so the Context stage never writes context.md and
-      the Review stage never emits structured output; the gate then
-      publishes an inconclusive/fail verdict instead of a real review, on
-      every PR from that bot. Set explicitly (e.g. `dependabot[bot]`) to
-      let a trusted dependency-bump bot through the gate. WARNING: on a
-      public repo, `'*'` lets any App invoke the review with prompts it
-      controls — scope this to named bots, not `'*'`.
+      NOT CURRENTLY ENFORCED. Previously a comma-separated list of bot
+      actor usernames allowed to trigger the Context/Review stages (or '*'
+      for all bots), passed through to `claude-code-action`'s own
+      `allowed_bots` input, which rejected a Bot-type actor outright. The
+      orchestrator that replaced `claude-code-action` (see
+      `orchestrator/index.js`) has no equivalent actor check, so this
+      input is now inert: bot-authored PRs (e.g. `dependabot[bot]`) are
+      reviewed normally regardless of this value. Kept for backward
+      compatibility with existing callers; setting it has no effect.
     required: false
     default: ""
   pr-number:
@@ -96,42 +93,44 @@ inputs:
     default: "90"
   sonnet-model:
     description: >
-      Model ID used by the diff-size routing step ONLY for tiny diffs
-      (≤`sonnet-files-threshold` files AND ≤`sonnet-churn-threshold`
-      changed lines). Every larger diff routes to `opus-model`. Consumed
-      by the routing step, whose output feeds the Review stage as the
-      model to run. Override when a gateway aliases model names.
+      Model ID for Sonnet-tier worker tasks the orchestrator's plan
+      dispatches (most scan/verification work). Consumed as `SONNET_MODEL`
+      by the Review stage and read by `orchestrator/index.js` into
+      `models.sonnet`; the per-round plan picks which tasks run on Sonnet
+      vs. Haiku vs. the pinned `orchestrator-model` (Opus). Override when a
+      gateway aliases model names.
     required: false
     default: "claude-sonnet-5"
   opus-model:
     description: >
-      Model ID used by the diff-size routing step for all non-tiny diffs
-      (the default — the review stage prefers Opus, dropping to
-      `sonnet-model` only for trivially small changes). Consumed by the
-      routing step, whose output feeds the Review stage as the model to
-      run. Override when a gateway aliases model names.
+      Deprecated — no longer used. Superseded by `orchestrator-model`,
+      which is what the orchestrator's own Opus calls (intent brief,
+      planning, judging) are pinned to. Kept only for backward
+      compatibility with existing callers; setting it has no effect.
     required: false
     default: "claude-opus-4-8"
   sonnet-files-threshold:
     description: >
-      Max changed-file count for a diff to still be considered "tiny" and
-      routed to `sonnet-model`. A diff qualifies for Sonnet only when it
-      is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to `opus-model`.
+      Deprecated — no longer used. Was consumed by the diff-size routing
+      step, which the orchestrator's own per-round planning replaced (the
+      plan sizes itself instead of pre-routing on file/churn counts). Kept
+      only for backward compatibility with existing callers; setting it
+      has no effect.
     required: false
     default: "3"
   sonnet-churn-threshold:
     description: >
-      Max changed-line count (additions + deletions) for a diff to still
-      be considered "tiny" and routed to `sonnet-model`. Applied together
-      with `sonnet-files-threshold` (both must hold for Sonnet).
+      Deprecated — no longer used, for the same reason as
+      `sonnet-files-threshold`. Kept only for backward compatibility with
+      existing callers; setting it has no effect.
     required: false
     default: "60"
   haiku-model:
     description: >
-      Model ID used by the context stage (this phase) to read the diff and changed
-      files and write context.md for the review stage to consume. Override when a
-      gateway aliases model names.
+      Model ID for Haiku-tier worker tasks the orchestrator's plan
+      dispatches (cheap/high-volume scan work). Consumed as `HAIKU_MODEL`
+      by the Review stage and read by `orchestrator/index.js` into
+      `models.haiku`. Override when a gateway aliases model names.
     required: false
     default: "claude-haiku-4-5-20251001"
   orchestrator-model:
@@ -158,16 +157,14 @@ inputs:
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
-      `anthropic-auth-token` — supply exactly one. Required for both the Context stage
-      and the Review stage (Sonnet/Opus) to call the Anthropic API.
+      `anthropic-auth-token` — supply exactly one. Required for the Review stage
+      (the orchestrator's Opus/Sonnet/Haiku calls) to call the Anthropic API.
     required: false
   anthropic-auth-token:
     description: >
       Anthropic bearer token (`Authorization: Bearer …`), for gateways that
       authenticate this way instead of an API key. Mutually exclusive with
-      `anthropic-api-key` — supply exactly one. Internally, this value is also passed
-      as a fallback `anthropic_api_key` to the context stage due to an upstream
-      validation gap (anthropics/claude-code-action#1294).
+      `anthropic-api-key` — supply exactly one.
     required: false
   anthropic-base-url:
     description: >
@@ -372,6 +369,74 @@ runs:
         fetch-depth: 0
         persist-credentials: false
 
+    - name: Build diff and context pack
+      id: prep
+      # The orchestrator's two primary inputs (.ai-review/diff.patch and
+      # .ai-review/context-pack.json — see orchestrator/index.js and the
+      # "Prep pack (deterministic — trust these; do not re-derive the base or
+      # probe the toolchain)" comment in orchestrator/prompts.js) have no
+      # other producer now that the old Context stage is gone. Base ref/SHA
+      # resolution happens here, in git, and is never left for a model to
+      # infer — a past incident had a model assert a false premise about the
+      # repo and hand-pick a base ref. continue-on-error degrades the
+      # pipeline to inconclusive (empty diff/pack) rather than failing the
+      # job; same fork/skip guard as the Review stage.
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        mkdir -p .ai-review
+
+        BASE_REF="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json baseRefName -q .baseRefName)"
+        git fetch --quiet origin "${BASE_REF}" || true
+        BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+        HEAD_SHA="$(git rev-parse HEAD)"
+
+        echo "base_sha=${BASE_SHA}"
+        echo "is-shallow-repository=$(git rev-parse --is-shallow-repository)"
+
+        git diff "${BASE_SHA}...HEAD" > .ai-review/diff.patch
+
+        CHANGED_FILES_JSON="$(git diff --name-only "${BASE_SHA}...HEAD" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+        CHURN="$(git diff --numstat "${BASE_SHA}...HEAD" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
+
+        HAS_NODE_MODULES=false
+        [ -d node_modules ] && HAS_NODE_MODULES=true
+        HAS_NPM=false
+        command -v npm >/dev/null 2>&1 && HAS_NPM=true
+        HAS_YARN=false
+        command -v yarn >/dev/null 2>&1 && HAS_YARN=true
+        HAS_PNPM=false
+        command -v pnpm >/dev/null 2>&1 && HAS_PNPM=true
+        HAS_PYTEST=false
+        command -v pytest >/dev/null 2>&1 && HAS_PYTEST=true
+
+        jq -n \
+          --arg head_sha "${HEAD_SHA}" \
+          --arg base_sha "${BASE_SHA}" \
+          --arg default_branch "${DEFAULT_BRANCH}" \
+          --argjson changed_files "${CHANGED_FILES_JSON}" \
+          --argjson churn "${CHURN}" \
+          --argjson node_modules "${HAS_NODE_MODULES}" \
+          --argjson npm "${HAS_NPM}" \
+          --argjson yarn "${HAS_YARN}" \
+          --argjson pnpm "${HAS_PNPM}" \
+          --argjson pytest "${HAS_PYTEST}" \
+          '{
+            head_sha: $head_sha,
+            base_sha: $base_sha,
+            default_branch: $default_branch,
+            changed_files: $changed_files,
+            churn: $churn,
+            toolchain: {node_modules: $node_modules, npm: $npm, yarn: $yarn, pnpm: $pnpm, pytest: $pytest}
+          }' > .ai-review/context-pack.json
+
     - name: Resolve linked issues
       id: linked-issues
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.update-linked-issues == 'true'
@@ -409,7 +474,14 @@ runs:
 
     - name: Resolve PR title and body
       id: pr-details
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.update-linked-issues == 'true'
+      # Guard is fork/skip ONLY — deliberately NOT gated on
+      # inputs.update-linked-issues: that input controls the separate
+      # linked-issues resolver above, but title/body feed the Angle H
+      # intent call directly, and pipeline.js does not fail closed on an
+      # empty brief. Gating this on an unrelated input would silently
+      # starve the intent check for any caller that sets
+      # update-linked-issues: false.
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
