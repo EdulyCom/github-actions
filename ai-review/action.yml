@@ -1035,9 +1035,21 @@ runs:
           || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
           || steps.review.outputs.structured_output) }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
+        PUBLISH_LIB_PATH: ${{ github.action_path }}/lib/publish.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
+          const fs = require("fs");
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
+          const {
+            stripLeadingBannerArtifacts,
+            buildReviewBody,
+            buildInconclusiveBody,
+            tickVerifiedBoxes,
+            buildStatusBlock,
+            upsertStatusBlock,
+          } = require(process.env.PUBLISH_LIB_PATH);
+
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
           const failLabel = process.env.FAIL_LABEL;
@@ -1057,32 +1069,11 @@ runs:
             core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
             let salvaged = "";
             try {
-              salvaged = require("fs").readFileSync(".ai-review/salvaged.md", "utf8").trim();
+              salvaged = fs.readFileSync(".ai-review/salvaged.md", "utf8").trim();
             } catch (e) {
               // No salvage file (step skipped, or nothing recoverable).
             }
-            const inconclusiveBody = [
-              "<!-- ai-review -->",
-              "### ⚠️ AI Review — inconclusive (re-run required)",
-              "",
-              "The review model did not return a structured result after a",
-              "resume-repair attempt and a full retry (a known intermittent",
-              "`anthropics/claude-code-action` issue). This is **not** a",
-              "code-quality judgment — the review did not complete, so the gate",
-              "fails closed.",
-              "",
-              "**Re-run the `ai-review` job** to get a verdict.",
-              ...(salvaged
-                ? [
-                    "",
-                    "<details><summary>Unstructured model output recovered from the run (not a verdict)</summary>",
-                    "",
-                    salvaged,
-                    "",
-                    "</details>",
-                  ]
-                : []),
-            ].join("\n");
+            const inconclusiveBody = buildInconclusiveBody(salvaged);
             try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -1110,8 +1101,6 @@ runs:
             core.setOutput("review_event", "REQUEST_CHANGES");
             return;
           }
-
-          const { recompute } = require(process.env.RECOMPUTE_PATH);
 
           // verification_evidence is still needed below by the PR-body status
           // block, independently of the verdict computation.
@@ -1146,73 +1135,17 @@ runs:
             core.info(`Blocking conditions: ${blockers.join("; ")}`);
           }
 
-          const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
-          const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
-
-          // State the machine reason for every fail. Without this, a
-          // deterministic override reads as unexplained and gets attributed to
-          // whatever the model happened to write about in comment_markdown —
-          // exactly how issue #25 came to be filed as a test-toolchain bug.
-          const reasonNote =
-            verdict === "fail" && blockers.length
-              ? `\n> **Why the gate failed:** ${blockers.join("; ")}.\n`
-              : "";
-
-          const mismatchNote =
-            review.verdict && review.verdict !== verdict
-              ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
-              : "";
-
-          // P2/P3 are advisory and never block (rubric.md §Severity). Say so
-          // on a pass, so a reader does not wonder why nits were tolerated.
-          const advisoryNote =
-            verdict === "pass" && counts.p2 + counts.p3 > 0
-              ? `\n> ${counts.p2} P2 / ${counts.p3} P3 finding(s) noted — non-blocking.\n`
-              : "";
-
-          // The review-stage prompt instructs the model not to prepend its own
-          // verdict token / confidence-merge-risk line / HTML marker to
-          // comment_markdown (this step owns that banner), but model
-          // instruction-following is not guaranteed — strip any leading copy of
-          // those artifacts defensively so a non-compliant response can't
-          // duplicate the banner above it.
-          function stripLeadingBannerArtifacts(markdown) {
-            if (!markdown) return markdown;
-            const verdictTokenRe = /^\*\*(?:✅ PASS|❌ FAIL)\*\*\s*$/;
-            const confidenceLineRe = /^Confidence:\s*\d+\s*·\s*Merge risk:\s*\S+\s*$/i;
-            const htmlCommentRe = /^<!--.*-->\s*$/;
-            const lines = markdown.split("\n");
-            let start = 0;
-            while (start < lines.length) {
-              const line = lines[start];
-              if (
-                line.trim() === "" ||
-                verdictTokenRe.test(line) ||
-                confidenceLineRe.test(line) ||
-                htmlCommentRe.test(line)
-              ) {
-                start += 1;
-                continue;
-              }
-              break;
-            }
-            return lines.slice(start).join("\n");
-          }
-
           const commentBody = stripLeadingBannerArtifacts(review.comment_markdown);
-
-          const body = [
-            "<!-- ai-review -->",
-            `${rejectedBanner}${verdictLine}`,
-            ...(mismatchNote ? [mismatchNote] : []),
-            ...(reasonNote ? [reasonNote] : []),
-            ...(advisoryNote ? [advisoryNote] : []),
-            "",
-            `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
-            `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
-            "",
-            commentBody || "_No review content returned._",
-          ].join("\n");
+          const body = buildReviewBody({
+            verdict,
+            confidence,
+            mergeRisk,
+            counts,
+            intentDeviated,
+            modelVerdict: review.verdict,
+            blockers,
+            commentBody,
+          });
 
           await github.rest.pulls.createReview({
             owner: context.repo.owner,
@@ -1267,80 +1200,9 @@ runs:
               });
               const originalBody = prData.body || "";
 
-              const norm = (s) =>
-                (s || "")
-                  .toLowerCase()
-                  .replace(/[`*_~]/g, "")
-                  .replace(/\s+/g, " ")
-                  .replace(/[.:;,\s]+$/, "")
-                  .trim();
-              // Count verified items per normalized text, so we tick AT MOST as
-              // many boxes as there were verified items with that text. This
-              // stops one verified item from ticking several distinct boxes that
-              // happen to normalize identically (over-tick collision).
-              const verifiedCounts = new Map();
-              for (const i of review.checklist) {
-                if (i && i.status === "verified" && i.text) {
-                  const k = norm(i.text);
-                  verifiedCounts.set(k, (verifiedCounts.get(k) || 0) + 1);
-                }
-              }
-
-              // Tick matching UNCHECKED boxes only; never untick a human's box.
-              const checkboxRe = /^(\s*[-*]\s*)\[ \](\s*)(.+)$/;
-              let ticks = 0;
-              let newBody = originalBody
-                .split("\n")
-                .map((line) => {
-                  const m = line.match(checkboxRe);
-                  if (m) {
-                    const k = norm(m[3]);
-                    const remaining = verifiedCounts.get(k) || 0;
-                    if (remaining > 0) {
-                      verifiedCounts.set(k, remaining - 1);
-                      ticks += 1;
-                      return `${m[1]}[x]${m[2]}${m[3]}`;
-                    }
-                  }
-                  return line;
-                })
-                .join("\n");
-
-              // Build/refresh the managed status block.
-              const icon = (s) =>
-                s === "verified" ? "✅" : s === "failed" ? "❌" : "❔";
-              const itemLines = review.checklist
-                .filter((i) => i && i.text)
-                .map(
-                  (i) =>
-                    `- ${icon(i.status)} ${i.text}${i.evidence ? ` — ${i.evidence}` : ""}`
-                );
-              const evLines = verificationEvidence
-                .filter((e) => e && e.command)
-                .map((e) => `- \`${e.command}\`${e.result ? ` → ${e.result}` : ""}`);
-              const START = "<!-- ai-review-status -->";
-              const END = "<!-- /ai-review-status -->";
-              const blockParts = [
-                START,
-                "#### 🤖 AI Review — checklist verification",
-                ...itemLines,
-              ];
-              if (evLines.length) {
-                blockParts.push("", "_Verification evidence:_", ...evLines);
-              }
-              blockParts.push(
-                "",
-                `_Last updated by ai-review · verdict: ${verdict}._`,
-                END
-              );
-              const block = blockParts.join("\n");
-
-              const blockRe = new RegExp(`${START}[\\s\\S]*?${END}`);
-              if (blockRe.test(newBody)) {
-                newBody = newBody.replace(blockRe, block);
-              } else {
-                newBody = `${newBody.replace(/\s*$/, "")}\n\n${block}\n`;
-              }
+              const { newBody: tickedBody, ticks } = tickVerifiedBoxes(originalBody, review.checklist);
+              const block = buildStatusBlock({ checklist: review.checklist, verificationEvidence, verdict });
+              const newBody = upsertStatusBlock(tickedBody, block);
 
               if (newBody !== originalBody) {
                 await github.rest.pulls.update({
