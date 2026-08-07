@@ -51,10 +51,14 @@ injection-safety rule.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
 7. **Checkout / compute diff stats and route model** — checks out the PR
-   head commit and routes the review to **Opus by default**, dropping to
-   the cheaper `sonnet-model` only for trivially tiny diffs (at or under
-   both `sonnet-files-threshold` and `sonnet-churn-threshold`). Every
-   larger diff gets `opus-model` for its stronger reasoning.
+   head commit and routes ordinary diffs to `sonnet-model`, escalating to
+   `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
+   (15) or `sonnet-churn-threshold` (400). These were briefly 3/60, which
+   sent nearly every real PR to Opus and moved the review stage from
+   ~10-13 min to a 35-min median; 15/400 is a **stopgap** trading some
+   review depth for wall-clock. The intended fix is reviewing in parallel
+   rather than in series — once that lands, Opus-by-default costs no extra
+   wall-clock and the thresholds should come back down.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
@@ -79,10 +83,12 @@ injection-safety rule.
     confidence, merge risk, intent alignment, P0-P3 counts, test-quality
     signals, the review markdown body, and — new — a per-item `checklist`
     verdict, `verification_evidence`, and a `test_execution` outcome). It
-    reads **complete file contents** (never just diff hunks), evaluates the
-    diff against the linked issues' acceptance criteria, and — best-effort —
-    **runs the project's tests** (see `test-command`/`test-hint`; the caller
-    must install the toolchain first). It loads the live
+    reads **complete file contents** (never just diff hunks) and evaluates
+    the diff against the linked issues' acceptance criteria. It does **not**
+    run the project's tests — see
+    [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests);
+    test *quality* is still assessed statically and still blocks the gate.
+    It loads the live
     `/requesting-code-review` and `/verification-before-completion` skills
     from the superpowers plugin: no `pass`/verified claim is accepted
     without cited command output ("evidence before claims"). `claude-code-action`
@@ -132,10 +138,10 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
-| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `3` |
-| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `60` |
-| `test-command` | Explicit command the Review stage runs to execute the project's tests (e.g. `npm test`). **The caller must install the toolchain/deps before this action.** Empty ⇒ the model may auto-detect a command and skips gracefully when no toolchain is present. | No | — |
-| `test-hint` | Free-text build/run/verify guidance passed to the Review stage (setup steps, which suites matter, known-flaky areas). | No | — |
+| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `15` |
+| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `400` |
+| `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
+| `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
 
@@ -147,6 +153,37 @@ injection-safety rule.
 | `confidence` | Confidence score, 0-100. |
 | `merge_risk` | `low`, `medium`, or `high`. |
 | `review_event` | GitHub review event posted: `APPROVE` or `REQUEST_CHANGES`. |
+
+## Why the review no longer runs tests
+
+The Review stage used to be told to run the project's test suite. It no longer is, and
+`test-command` / `test-hint` are accepted but ignored.
+
+**It never actually ran.** No consumer ever set `test-command`, no caller installs a
+toolchain before the action, and this action ships none of its own
+([ADR 0003](../docs/adr/0003-intent-alignment-test-execution-and-writeback.md) §2). Every
+sampled run reported `test_execution: skipped` after probing and failing —
+`node_modules exists: false`, no `npm`/`npx`/`yarn`/`pnpm`/`jest` on `PATH`, `nx` →
+`Cannot find module`. Since
+[ADR 0004](../docs/adr/0004-non-blocking-findings-and-structured-output-repair.md) §2 makes
+`skipped` a **zero** confidence adjustment, those turns never moved a verdict either.
+
+**Supporting it carried real risk.** The Review stage is checked out at the **PR head
+commit**. Allowlisting `npm`/`npx`/`yarn`/`pnpm`/`node`/`make`/`pytest` so it *could*
+run tests meant PR-authored scripts — a modified `package.json` `test` script, say —
+had a permitted path to execute on the runner, which for self-hosted fleets is
+persistent shared infrastructure. Those entries are now removed from `--allowedTools`,
+so this is enforced structurally rather than by prompt instruction.
+
+**Tests still gate your merges.** They run in your own CI lanes, downstream of this
+gate via `needs: [review-gate]` — typically sharded, coverage-merged, and
+threshold-enforced, which is strictly more than a single `npm test` inside a review
+could do. A failing suite blocks the merge there.
+
+**Test *quality* is still reviewed, and still blocks.** `no_tests_for_changed_logic`
+(−15) and `coverage_below_threshold_on_critical_paths` (−5) are static judgments made
+by reading the diff against the repo's existing tests. "You changed auth and added no
+tests" remains an ai-review finding.
 
 ## Usage
 
