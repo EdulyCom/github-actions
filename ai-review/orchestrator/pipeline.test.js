@@ -77,7 +77,9 @@ test("a refutation without evidence does not remove a finding", async () => {
   const res = await runPipeline({
     runner: fakeRunner(happyPath({
       "worker:s1": okRes(workerOut({ findings })),
-      judge: okRes(judgeOut({ refutations: [{ finding_id: "s1#0", reason: "nah" }] })),
+      // Round-scoped id (worker-result.js): the planner reuses task ids across
+      // rounds, so a bare "s1#0" is not unique across a review.
+      judge: okRes(judgeOut({ refutations: [{ finding_id: "s1#r1#0", reason: "nah" }] })),
     })),
     inputs: INPUTS, caps: CAPS, models: MODELS,
   });
@@ -90,13 +92,50 @@ test("a refutation WITH evidence removes the finding and reports it as refuted",
     runner: fakeRunner(happyPath({
       "worker:s1": okRes(workerOut({ findings })),
       judge: okRes(judgeOut({
-        refutations: [{ finding_id: "s1#0", reason: "guarded", evidence_file: "a.js", evidence_line: 4 }],
+        refutations: [{ finding_id: "s1#r1#0", reason: "guarded", evidence_file: "a.js", evidence_line: 4 }],
       })),
     })),
     inputs: INPUTS, caps: CAPS, models: MODELS,
   });
   assert.deepEqual(res.output.counts, { p0: 0, p1: 0, p2: 0, p3: 0 });
   assert.equal(res.refuted.length, 1, "refuted findings stay visible to the PR's humans");
+});
+
+test("a round-2 refutation cannot delete the round-1 finding that shares a task id", async () => {
+  // Opus legitimately reuses "s1" across rounds. Both findings survive dedupe
+  // (different files), so an unscoped id would let ONE refutation drop BOTH —
+  // silently removing a round-1 P0 from `counts`.
+  let judgeCalls = 0;
+  let workerCalls = 0;
+  const res = await runPipeline({
+    runner: fakeRunner(happyPath({
+      "worker:s1": () => {
+        workerCalls += 1;
+        return okRes(workerOut({
+          findings: [{
+            severity: "P0",
+            file: workerCalls === 1 ? "round1.js" : "round2.js",
+            line: 10, defect_class: "d", claim: "c", evidence: "e",
+          }],
+        }));
+      },
+      judge: () => {
+        judgeCalls += 1;
+        return okRes(judgeOut({
+          more_rounds_needed: judgeCalls === 1,
+          refutations: judgeCalls === 2
+            ? [{ finding_id: "s1#r2#0", reason: "guarded", evidence_file: "round2.js", evidence_line: 4 }]
+            : [],
+        }));
+      },
+    })),
+    inputs: INPUTS, caps: CAPS, models: MODELS,
+  });
+  assert.equal(res.ok, true, res.reason);
+  assert.deepEqual(res.output.counts, { p0: 1, p1: 0, p2: 0, p3: 0 },
+    "only the round-2 finding is refuted; the round-1 P0 must still block");
+  assert.equal(res.refuted.length, 1);
+  assert.equal(res.refuted[0].file, "round2.js");
 });
 
 test("an invalid plan is re-prompted once and the second plan is accepted", async () => {

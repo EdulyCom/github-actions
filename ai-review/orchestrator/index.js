@@ -19,6 +19,7 @@ const { query } = require("@anthropic-ai/claude-agent-sdk");
 const { createRunner } = require("./session.js");
 const { runPipeline } = require("./pipeline.js");
 const { isIntentExempt } = require("../lib/diff-class.js");
+const { unusablePrep } = require("../lib/prep-guard.js");
 
 const readJson = (p, fallback) => {
   try {
@@ -56,6 +57,18 @@ const setOutput = (name, value) => {
   fs.appendFileSync(file, `${name}<<${delim}\n${str}\n${delim}\n`);
 };
 
+// The single fail-closed exit. An empty structured_output is exactly what the
+// existing publish step already handles: it posts the inconclusive comment and
+// does not pass the gate. The reason file is what publish quotes back.
+const failClosed = (reason) => {
+  console.error(`ai-review orchestrator failed closed: ${reason}`);
+  setOutput("structured_output", "");
+  setOutput("failed_reason", reason);
+  fs.mkdirSync(".ai-review", { recursive: true });
+  fs.writeFileSync(".ai-review/orchestrator-reason.txt", reason);
+  process.exit(0); // the step succeeds; publish decides the verdict
+};
+
 (async () => {
   const prepPack = readJson(".ai-review/context-pack.json", {});
   const diff = readText(".ai-review/diff.patch");
@@ -67,6 +80,20 @@ const setOutput = (name, value) => {
   // title and body" action.yml step writes this via `gh pr view` redirected
   // straight to a file — never interpolated into a shell command.
   const pr = readJson(".ai-review/pr.json", {});
+
+  // Fail closed BEFORE a runner exists, so not one paid model call is made on
+  // inputs that cannot support a review. lib/prep-guard.js explains why an
+  // unvalidated empty diff produces a confident PASS rather than an error.
+  const prepDefect = unusablePrep(prepPack, diff);
+  if (prepDefect) {
+    failClosed(
+      "the deterministic prep step did not produce a usable diff or context pack " +
+        `(${prepDefect}), so the review could not begin. This is not a code-quality ` +
+        'judgment — check the "Build diff and context pack" step\'s log (it is ' +
+        "continue-on-error, so it can fail red while the job continues) and re-run."
+    );
+    return;
+  }
 
   const caps = {
     maxRounds: Number(process.env.MAX_ROUNDS) || 3,
@@ -96,6 +123,10 @@ const setOutput = (name, value) => {
       linkedIssues,
       diff,
       prepPack,
+      // Caller-supplied test guidance. Only the single `kind: "test"` worker —
+      // the one holding the exec allowlist — is shown these.
+      testCommand: process.env.TEST_COMMAND || "",
+      testHint: process.env.TEST_HINT || "",
     },
   });
 
@@ -113,15 +144,8 @@ const setOutput = (name, value) => {
   );
 
   if (!result.ok) {
-    // Fail closed. An empty structured_output is exactly what the existing
-    // publish step already handles: it posts the inconclusive comment and does
-    // not pass the gate.
-    console.error(`ai-review orchestrator failed closed: ${result.reason}`);
-    setOutput("structured_output", "");
-    setOutput("failed_reason", result.reason);
-    fs.mkdirSync(".ai-review", { recursive: true });
-    fs.writeFileSync(".ai-review/orchestrator-reason.txt", result.reason);
-    process.exit(0); // the step succeeds; publish decides the verdict
+    failClosed(result.reason);
+    return;
   }
 
   // Refuted findings stay visible to the PR's humans rather than vanishing.

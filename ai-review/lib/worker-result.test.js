@@ -82,6 +82,35 @@ test("stamps findings with id, shard, and model for attribution", () => {
   assert.ok(res.result.findings[0].id, "every finding needs a stable id for refutation");
 });
 
+test("the same task id in two rounds yields DIFFERENT finding ids", () => {
+  const r1 = validateWorkerResult(raw({ findings: [finding()] }), task({ round: 1 }));
+  const r2 = validateWorkerResult(raw({ findings: [finding({ file: "b.js" })] }), task({ round: 2 }));
+  assert.notEqual(
+    r1.result.findings[0].id,
+    r2.result.findings[0].id,
+    "colliding ids mean one judge refutation silently deletes both findings"
+  );
+  assert.equal(r1.result.findings[0].id, "t1#r1#0");
+  assert.equal(r2.result.findings[0].id, "t1#r2#0");
+});
+
+test("a finding carries the round it was found in, for attribution", () => {
+  const res = validateWorkerResult(raw({ findings: [finding()] }), task({ round: 2 }));
+  assert.equal(res.result.findings[0].round, 2);
+});
+
+test("a non-numeric round (the collection dispatch) still scopes the id", () => {
+  const res = validateWorkerResult(raw({ findings: [finding()] }), task({ round: "collect" }));
+  assert.equal(res.result.findings[0].id, "t1#rcollect#0");
+  assert.equal(res.result.findings[0].round, "collect");
+});
+
+test("a task with no round falls back to the unscoped id", () => {
+  const res = validateWorkerResult(raw({ findings: [finding()] }), task());
+  assert.equal(res.result.findings[0].id, "t1#0");
+  assert.equal(res.result.findings[0].round, null);
+});
+
 test("a scan worker that examined nothing is dead, even with an empty focus", () => {
   const res = validateWorkerResult(
     raw({ files_examined: [] }),

@@ -31,6 +31,11 @@ const TEST_TOOLS = Object.freeze([
 
 const modelFor = (name, models) => (name === "haiku" ? models.haiku : models.sonnet);
 
+// The collection round has no round number, but its tasks still need a stable,
+// distinct round label: worker-result.js scopes every finding id by it, and two
+// dispatches sharing a label re-open the cross-round id collision.
+const COLLECT_ROUND = "collect";
+
 /**
  * @returns {{ok: false, reason: string, output: null, logs: object[], rounds: object[], refuted: object[]}}
  */
@@ -89,7 +94,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
   }
 
   const facts = [];
-  for (const r of await dispatch("collect", collectPlan.data.tasks)) {
+  for (const r of await dispatch(COLLECT_ROUND, collectPlan.data.tasks)) {
     if (r.ok) facts.push({ task_id: r.result.task_id, findings: r.result.findings, evidence: r.result.evidence });
   }
 
@@ -132,7 +137,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
     }
 
     // --- dispatch
-    const settled = await dispatch(`r${round}`, plan.tasks);
+    const settled = await dispatch(round, plan.tasks);
     const completed = settled.filter((r) => r.ok).map((r) => r.result);
     for (const r of completed) {
       allFindings = allFindings.concat(r.findings);
@@ -153,9 +158,14 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
     // --- judge
     const judgeRes = record(`r${round}:judge`, await runner({
       label: "judge",
+      // intentBrief is NOT optional here. `judged.intent` is what recompute.js
+      // turns into a hard blocker on "deviated", and no worker owns alignment
+      // (the plan schema excludes Angle H and the plan prompt forbids re-running
+      // it). Without the brief the judge would be ruling on intent having never
+      // seen the intent contract.
       prompt: P.judgePrompt({
         findings: merged.findings, evidence: allEvidence, gaps,
-        round, roundsLeft, isFinalRound,
+        round, roundsLeft, isFinalRound, intentBrief,
       }),
       model: models.opus,
       schema: P.SCHEMAS.judge,
@@ -226,18 +236,23 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
    * Fan out one round's tasks. allSettled, never all: a rejected worker must
    * not discard its siblings' completed (and paid-for) results.
    *
-   * `prefix` scopes the log name to the round (or "collect") that produced
-   * it — Opus can legitimately reuse a task id like "s1" across rounds, and
-   * without the prefix a later round's log silently overwrites an earlier
-   * round's telemetry.
+   * `round` scopes BOTH the log name and every finding id to the dispatch that
+   * produced them — Opus can legitimately reuse a task id like "s1" across
+   * rounds. Without the scope a later round's log silently overwrites an
+   * earlier round's telemetry, and (worse) two rounds' findings collide on one
+   * id, so a single judge refutation deletes both. Stamping `round` onto the
+   * task is what worker-result.js reads to build the id.
    */
-  async function dispatch(prefix, tasks) {
+  async function dispatch(round, tasks) {
+    const prefix = round === COLLECT_ROUND ? COLLECT_ROUND : `r${round}`;
     const settled = await Promise.allSettled(
-      (tasks || []).map(async (task) => {
+      (tasks || []).map(async (planned) => {
+        const task = { ...planned, round };
         const res = record(`${prefix}:worker:${task.id}`, await runner({
           label: `worker:${task.id}`,
           prompt: P.workerPrompt({
             task, diff: inputs.diff, prepPack: inputs.prepPack, intentBrief,
+            testCommand: inputs.testCommand, testHint: inputs.testHint,
           }),
           model: modelFor(task.model, models),
           schema: P.SCHEMAS.workerResult,

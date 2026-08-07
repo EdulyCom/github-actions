@@ -55,6 +55,19 @@ function validateWorkerResult(raw, task) {
     return fail(`coverage shortfall — assigned but not examined: ${unexamined.join(", ")}`);
   }
 
+  // The round a task was dispatched in, when the caller supplied one. Opus
+  // legitimately reuses a task id like "s1" across rounds (see pipeline.js's
+  // dispatch), so `${task.id}#${i}` alone is NOT unique across a review: round
+  // 1's s1#0 and round 2's s1#0 are different findings that both survive
+  // dedupe (different files), and applyRefutations matches ids through a Set —
+  // one refutation would silently delete both, dropping a real P0 out of
+  // `counts`. Scoping the id by round is what makes a refutation address
+  // exactly one finding.
+  const round =
+    task && task.round !== undefined && task.round !== null && String(task.round).length > 0
+      ? task.round
+      : null;
+
   const findings = [];
   for (const [i, f] of raw.findings.entries()) {
     if (!f || typeof f !== "object") return fail(`findings[${i}] is not an object`);
@@ -71,11 +84,12 @@ function validateWorkerResult(raw, task) {
     findings.push({
       ...f,
       line: Number(f.line),
-      // Attribution: a miss must resolve to an angle+model pair, not "the
-      // orchestrator". The id is what a judge refutation references.
-      id: `${task.id}#${i}`,
+      // Attribution: a miss must resolve to a shard+model+round triple, not
+      // "the orchestrator". The id is what a judge refutation references.
+      id: round === null ? `${task.id}#${i}` : `${task.id}#r${round}#${i}`,
       shard: task.id,
       model: task.model,
+      round,
     });
   }
 

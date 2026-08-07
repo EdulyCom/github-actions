@@ -52,6 +52,28 @@ test("collect tasks do not count toward angle coverage", () => {
   assert.equal(res.ok, false, "a collect task must not satisfy the scan floor");
 });
 
+const testTask = (over) => ({
+  id: "x1", kind: "test", angles: [], model: "sonnet",
+  focus: [], question: "q", rationale: "r", ...over,
+});
+
+test("accepts a plan with exactly one kind:\"test\" task", () => {
+  const res = validatePlan(plan({ tasks: [scan(), testTask()] }), { maxTasks: 12 });
+  assert.equal(res.ok, true, JSON.stringify(res.violations));
+});
+
+test("rejects more than one kind:\"test\" task, naming the offenders", () => {
+  const res = validatePlan(
+    plan({ tasks: [scan(), testTask({ id: "x1" }), testTask({ id: "x2" })] }),
+    { maxTasks: 12 }
+  );
+  assert.equal(res.ok, false, "only one worker may hold the exec allowlist");
+  assert.ok(
+    res.violations.some((v) => v.includes("x1") && v.includes("x2")),
+    `the violation must name the offending ids, got: ${JSON.stringify(res.violations)}`
+  );
+});
+
 test("rejects an angle outside A-H", () => {
   const res = validatePlan(plan({ tasks: [scan({ angles: [...FLOOR_ANGLES, "Z"] })] }), { maxTasks: 12 });
   assert.equal(res.ok, false);

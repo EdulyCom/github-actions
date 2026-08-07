@@ -11,6 +11,9 @@
 // scanning covers angles. A plan that "covers" Angle C with a Haiku file
 // inventory is not a review.
 //
+// At most ONE `kind: "test"` task is allowed. That is the security boundary,
+// not a style rule: pipeline.js gives every test task the exec allowlist.
+//
 // Pure: no I/O, no process.env.
 
 const FLOOR_ANGLES = Object.freeze(["A", "B", "C", "D", "E", "F", "G"]);
@@ -59,6 +62,13 @@ function validatePlan(plan, options) {
 
   const seenIds = new Set();
   const coveredByScan = new Set();
+  // pipeline.js hands TEST_TOOLS (the exec allowlist) to EVERY kind:"test"
+  // task, so "exactly one worker may execute anything" — spec section 5's
+  // blast-radius claim — only holds if the plan itself is capped at one. The
+  // planner reads an attacker-controlled diff; asking it nicely in the prompt
+  // is not a control, and a diff that talks a planner into twelve test tasks
+  // would get twelve exec-capable workers.
+  const testTaskIds = [];
 
   for (const [i, t] of tasks.entries()) {
     const where = `tasks[${i}]`;
@@ -82,6 +92,8 @@ function validatePlan(plan, options) {
 
     if (!KINDS.includes(t.kind)) {
       violations.push(`${where}.kind '${t.kind}' is not one of ${KINDS.join(", ")}`);
+    } else if (t.kind === "test") {
+      testTaskIds.push(String(t.id));
     }
     if (!MODELS.includes(t.model)) {
       violations.push(
@@ -107,6 +119,13 @@ function validatePlan(plan, options) {
       if (t.angles.length === 0) violations.push(`${where} is a scan task with no angles`);
       for (const a of t.angles) coveredByScan.add(a);
     }
+  }
+
+  if (testTaskIds.length > 1) {
+    violations.push(
+      `plan has ${testTaskIds.length} kind:"test" tasks (${testTaskIds.join(", ")}) — ` +
+        `at most one worker may hold the exec allowlist`
+    );
   }
 
   if (requireFloor) {

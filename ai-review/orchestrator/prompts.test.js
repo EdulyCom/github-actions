@@ -80,6 +80,53 @@ test("judgePrompt requires evidence on every refutation", () => {
   assert.match(p, /evidence_line/);
 });
 
+test("judgePrompt carries the intent brief — the judge authors `intent`, no worker does", () => {
+  const brief = {
+    goal: "rate-limit the signup endpoint",
+    acceptance_criteria: ["returns 429 on the 11th request in a minute"],
+    in_scope: ["signup.js"],
+    out_of_scope: ["login.js"],
+  };
+  const p = judgePrompt({
+    findings: [], evidence: [], gaps: [], round: 1, roundsLeft: 2, isFinalRound: false,
+    intentBrief: brief,
+  });
+  assert.ok(p.includes("rate-limit the signup endpoint"), "the brief's goal must reach the judge");
+  assert.ok(p.includes("returns 429 on the 11th request in a minute"),
+    "the acceptance criteria are the contract intent is ruled against");
+  assert.ok(p.includes("out_of_scope") && p.includes("login.js"));
+  assert.match(p, /aligned/);
+  assert.match(p, /deviated/);
+});
+
+test("judgePrompt surfaces a SKIPPED brief as skipped rather than inviting a guess", () => {
+  const p = judgePrompt({
+    findings: [], evidence: [], gaps: [], round: 1, roundsLeft: 2, isFinalRound: false,
+    intentBrief: { skipped: true },
+  });
+  assert.match(p, /skipped/i);
+  assert.match(p, /intent.*"skipped"/,
+    "an exempt diff must be reported as skipped, never inferred from the code");
+});
+
+test("workerPrompt gives the caller's test command ONLY to the test worker", () => {
+  const args = {
+    diff: DIFF, prepPack: {}, intentBrief: BRIEF,
+    testCommand: "npm run test:ci", testHint: "install with pnpm first",
+  };
+  const testWorker = workerPrompt({
+    task: { id: "x1", kind: "test", angles: [], focus: [], question: "q" }, ...args,
+  });
+  assert.ok(testWorker.includes("npm run test:ci"));
+  assert.ok(testWorker.includes("install with pnpm first"));
+
+  const scanWorker = workerPrompt({
+    task: { id: "s1", kind: "scan", angles: ["B"], focus: [], question: "q" }, ...args,
+  });
+  assert.ok(!scanWorker.includes("npm run test:ci"),
+    "a read-only worker cannot run anything; showing it a command invites a false claim");
+});
+
 test("the judge schema has no counts property", () => {
   assert.ok(!("counts" in SCHEMAS.judge.properties),
     "counts is written by the orchestrator from merge.js, never by the model");

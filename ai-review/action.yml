@@ -154,6 +154,24 @@ inputs:
     description: Maximum workers dispatched in a single round.
     required: false
     default: "12"
+  worker-timeout-minutes:
+    description: >
+      Wall-clock budget for a SINGLE orchestrator model call (a worker, a
+      planning call, or a judging call) before `orchestrator/session.js`
+      aborts it and records the stage as dead. Consumed as
+      `WORKER_TIMEOUT_MINUTES` by the Review stage. Exposed as an input so
+      the cap can be tuned from shadow-mode data without a code change.
+    required: false
+    default: "10"
+  worker-max-turns:
+    description: >
+      Maximum agent turns a single orchestrator model call may take before
+      the SDK stops it. Consumed as `WORKER_MAX_TURNS` by the Review stage.
+      Nothing resumes a stopped session, so a hit cap surfaces as a dead
+      stage the round loop must account for — never as a partial result
+      laundered into a verdict.
+    required: false
+    default: "60"
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
@@ -173,19 +191,20 @@ inputs:
     required: false
   test-command:
     description: >
-      Optional explicit command the Review stage runs to execute the
-      project's tests (e.g. `npm test`, `pytest -q`). Best-effort: the
-      caller workflow must install the toolchain/dependencies BEFORE this
-      action so the command can run. When empty, the model may still
-      auto-detect and run an obvious test command, and skips gracefully
-      (reporting `test_execution: skipped`) when no toolchain is present.
+      Optional explicit command run to execute the project's tests (e.g.
+      `npm test`, `pytest -q`). In the orchestrated pipeline this reaches
+      the single `kind: "test"` worker — the only one holding an exec
+      allowlist. Best-effort: the caller workflow must install the
+      toolchain/dependencies BEFORE this action so the command can run. When
+      empty, the model may still auto-detect and run an obvious test command,
+      and skips gracefully (reporting `test_execution: skipped`) when no
+      toolchain is present.
     required: false
   test-hint:
     description: >
-      Optional free-text guidance passed to the Review stage about how to
-      build/run/verify this project (setup steps, which suites matter,
-      known-flaky areas). Interpolated into the review prompt alongside
-      `test-command`.
+      Optional free-text guidance about how to build/run/verify this project
+      (setup steps, which suites matter, known-flaky areas). Rendered into
+      the same test worker's prompt alongside `test-command`.
     required: false
   update-pr-body:
     description: >
@@ -546,15 +565,81 @@ runs:
         echo "signal=${SIGNAL}" >> "${GITHUB_OUTPUT}"
 
     # --- Shadow control arm (orchestrator-mode: shadow) --------------------
-    # The two steps below (route, serial_review) are the pre-orchestrator
-    # serial review path, restored verbatim from git history (7343aa0, the
-    # commit immediately before it was deleted) so the orchestrator can be
-    # shadowed against a known-good baseline until the rollout's section 8
-    # gate is met. Gated OFF in orchestrator-mode: primary. The repair,
-    # retry, salvage, and execution-log-snapshot steps that used to
-    # accompany this review step are deliberately NOT restored — this is a
-    # plain single-invocation serial review, so its inconclusive rate will
-    # run higher than the production serial path's did before this rollout.
+    # The three steps below (context, route, serial_review) are the
+    # pre-orchestrator serial review path, restored verbatim from git history
+    # (7343aa0, the commit immediately before it was deleted) so the
+    # orchestrator can be shadowed against a known-good baseline until the
+    # rollout's section 8 gate is met. Gated OFF in orchestrator-mode:
+    # primary. The repair, retry, salvage, and execution-log-snapshot steps
+    # that used to accompany this review step are deliberately NOT restored —
+    # this is a plain single-invocation serial review, so its inconclusive
+    # rate will run higher than the production serial path's did before this
+    # rollout.
+    #
+    # The Context stage is restored because serial_review's prompt reads
+    # `context.md`. Without a producer the control arm runs strictly weaker
+    # than the production serial path did, which corrupts the very comparison
+    # shadow mode exists to produce. Its `context-verify` companion and its
+    # execution-log snapshot are NOT restored: neither feeds the comparison.
+    - name: Context stage (Haiku)
+      id: context
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.orchestrator-mode == 'shadow'
+      # continue-on-error: context.md is a non-essential optimization — the
+      # Review stage reads it only "if present" and works without it. A flaky
+      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
+      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
+      # stall); that must NOT sink the whole review. Composite-action steps
+      # cannot set timeout-minutes, so graceful degradation here + the caller's
+      # job-level timeout backstop is how we bound this failure mode.
+      continue-on-error: true
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
+      # so the bearer token also fills anthropic_api_key to pass validation, while
+      # ANTHROPIC_CUSTOM_HEADERS carries the real bearer credential used on the wire.
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        # Deliberately NOT steps.identity.outputs.author-token: this stage only
+        # reads the local working tree and writes context.md, so it gets the
+        # unprivileged fallback token rather than the App-minted
+        # pull-requests/issues/checks-scoped identity used by the publishing
+        # steps later in this action.
+        github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
+        # Root cause of the context.md handoff failure (Task 2.4 fix round): this
+        # step ran with NO --allowedTools at all, so claude-code-action's headless
+        # permission model silently denied every Write and most Bash tool calls
+        # (confirmed via live run 29635771162's Context-stage permission_denials_count
+        # of 6, and anthropics/claude-code-action's own base-action/README.md, which
+        # shows `Write` must be explicitly allowlisted — it is not a default tool).
+        # Both stages run as plain composite-action steps on the same runner
+        # checkout (no container isolation), so once Write is permitted here, the
+        # Review stage's relative-path read of `context.md` at the repository root
+        # resolves to the same file.
+        claude_args: |
+          --model ${{ inputs.haiku-model }}
+          --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
+        prompt: |
+          Read the PR diff (the working tree is already checked out at the PR head
+          commit; diff it against the merge-base with the repository's default
+          branch — discover the default branch yourself, e.g. via `git remote show
+          origin` or `git symbolic-ref refs/remotes/origin/HEAD`, if you need it) and
+          the full contents of every changed file. Grep the repository for callers,
+          callees, and helper functions related to the changed code, so a reviewer
+          has the surrounding context without re-deriving it.
+
+          Write a concise summary to `context.md` at the repository root covering:
+          - what changed, in plain language
+          - which files/functions call into or are called by the changed code
+          - any related helpers, shared utilities, or patterns the changed code
+            reuses or should have reused
+
+          Do NOT review the change. Do NOT judge correctness, quality, or security.
+          Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
+          output is the factual context.md summary — a later stage does the review.
+
     - name: Compute diff stats and route model
       id: route
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.orchestrator-mode == 'shadow'
@@ -763,6 +848,11 @@ runs:
         HAIKU_MODEL: ${{ inputs.haiku-model }}
         MAX_ROUNDS: ${{ inputs.max-rounds }}
         MAX_TASKS_PER_ROUND: ${{ inputs.max-tasks-per-round }}
+        WORKER_TIMEOUT_MINUTES: ${{ inputs.worker-timeout-minutes }}
+        WORKER_MAX_TURNS: ${{ inputs.worker-max-turns }}
+        # Read by index.js and threaded through pipeline.js into the prompt of
+        # the single `kind: "test"` worker — the only one holding the exec
+        # allowlist, and so the only one that can act on them.
         TEST_COMMAND: ${{ inputs.test-command }}
         TEST_HINT: ${{ inputs.test-hint }}
       run: |
