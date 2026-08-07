@@ -742,12 +742,12 @@ module.exports = {
 - [ ] **Step 4: Run the test file to verify it passes**
 
 Run: `node --test ai-review/lib/action-refs.test.js`
-Expected: PASS — `pass 9`, `fail 0`. The last two tests (the integration checks against the real `ai-review/action.yml`) must pass on the file as it exists today, before any later task in this plan edits it — this proves the guard has no false positives against the current production file.
+Expected: PASS — `pass 10`, `fail 0` (8 fixture tests + 2 integration tests). The last two tests (the integration checks against the real `ai-review/action.yml`) must pass on the file as it exists today, before any later task in this plan edits it — this proves the guard has no false positives against the current production file.
 
 - [ ] **Step 5: Run the full glob**
 
 Run: `node --test "ai-review/lib/**/*.test.js"`
-Expected: PASS — `pass 42` (21 + 12 + 9), `fail 0`.
+Expected: PASS — `pass 43` (21 + 12 + 10), `fail 0`.
 
 - [ ] **Step 6: Commit**
 
@@ -933,7 +933,7 @@ Expected: `valid` — no exception. (This repo has no local `actionlint`; `.gith
 - [ ] **Step 5: Verify the structural guard from Task 3 still passes against the now-modified file**
 
 Run: `node --test ai-review/lib/action-refs.test.js`
-Expected: PASS. All new `steps.<id>.` references added in this task (`steps.context.outputs.execution_file`, `steps.review_repair.outputs.execution_file`, `steps.review_retry.outputs.execution_file`) point at ids already declared before this task ran — no new ids were introduced (the snapshot steps deliberately have no `id:`, matching the existing review-snapshot step's pattern, since nothing needs to reference them by id).
+Expected: PASS. All new `steps.<id>.` references added in this task (`steps.context.outputs.execution_file`, `steps.review_repair.outputs.execution_file`, `steps.review_retry.outputs.execution_file`) point at ids already declared before this task ran. The two snapshot steps deliberately have no `id:` (matching the existing review-snapshot step's pattern — nothing needs to reference them), and the telemetry step's new `id: telemetry` is declared but referenced by nothing, which the guard accepts: it flags only duplicate ids and dangling references, never an unreferenced declared id.
 
 - [ ] **Step 6: Confirm zero behaviour change by inspection**
 
@@ -1494,12 +1494,12 @@ module.exports = {
 - [ ] **Step 4: Run the test file to verify it passes**
 
 Run: `node --test ai-review/lib/publish.test.js`
-Expected: PASS — `pass 22`, `fail 0`.
+Expected: PASS — `pass 28`, `fail 0`.
 
 - [ ] **Step 5: Run the full glob**
 
 Run: `node --test "ai-review/lib/**/*.test.js"`
-Expected: PASS — `pass 64` (21 + 12 + 9 + 22), `fail 0`.
+Expected: PASS — `pass 71` (21 + 12 + 10 + 28), `fail 0`.
 
 - [ ] **Step 6: Commit**
 
@@ -2088,7 +2088,7 @@ Expected: PASS. This step introduces no new `id:` or `steps.<id>.` references at
 
 - [ ] **Step 5: Line-by-line equivalence check**
 
-This is the highest-risk step in the whole plan — a transcription error here changes the gate's behavior. For each of these six behaviors, find it in the OLD script body above and confirm the exact same behavior exists in the NEW body (calling into `lib/publish.js` instead of inlining):
+This is the highest-risk step in the whole plan — a transcription error here changes the gate's behavior. For each of these seven behaviors, find it in the OLD script body above and confirm the exact same behavior exists in the NEW body (calling into `lib/publish.js` instead of inlining):
 
 1. On a `JSON.parse` failure: posts `REQUEST_CHANGES` with the inconclusive body, adds `failLabel` only (never removes `passLabel`), sets all four outputs to the fail/inconclusive values, then `return`s — nothing after this block runs.
 2. `verificationEvidence` is computed from `review.verification_evidence` (defaulting to `[]`) **before** `recompute()` is called, and is used only in the later checklist block — `recompute()` itself does not take it as an argument.
@@ -2096,8 +2096,9 @@ This is the highest-risk step in the whole plan — a transcription error here c
 4. The checklist block is gated on **three** conditions together: `UPDATE_PR_BODY === "true"` AND `Array.isArray(review.checklist)` AND `review.checklist.length > 0`. If any is false, no `pulls.get`/`pulls.update` call happens at all.
 5. `pulls.update` is called **only when** `newBody !== originalBody` — an all-ready-current PR body makes no API call.
 6. The final four `core.setOutput` calls are unconditional at the end of the non-error path, in the same order (`verdict`, `confidence`, `merge_risk`, `review_event`).
+7. `pulls.createReview` on the non-error path is called with `event: reviewEvent` — the value destructured from `recompute()`'s result — never `review.review_event` (the model's self-reported event), and its `body` is exactly the `buildReviewBody(...)` return value, with `commentBody` computed by `stripLeadingBannerArtifacts(review.comment_markdown)` BEFORE the `buildReviewBody` call and `modelVerdict` wired to `review.verdict`.
 
-If any of the six diverges, fix `lib/publish.js` (Task 5) or the call site here — do not special-case the YAML to work around it.
+If any of the seven diverges, fix `lib/publish.js` (Task 5) or the call site here — do not special-case the YAML to work around it.
 
 - [ ] **Step 6: Commit**
 
@@ -2111,12 +2112,14 @@ functions extracted in the prior commit. Every GitHub API call
 inline -- they need the github/context objects actions/github-script
 injects at runtime.
 
-Zero behaviour change: the six load-bearing behaviors (inconclusive-path
+Zero behaviour change: the seven load-bearing behaviors (inconclusive-path
 short-circuit and return, verification_evidence computed independently
 of recompute(), label winner-then-loser ordering with 404/422 tolerance,
 the three-condition checklist gate, the no-op guard on an
-already-current PR body, and output ordering) were checked line-by-line
-against the prior inline version before this commit."
+already-current PR body, output ordering, and createReview posting the
+deterministic reviewEvent -- never the model's self-reported one) were
+checked line-by-line against the prior inline version before this
+commit."
 ```
 
 ---
@@ -2128,7 +2131,7 @@ against the prior inline version before this commit."
 - [ ] **Step 1: Run the complete unit test suite one more time**
 
 Run: `node --test "ai-review/lib/**/*.test.js"`
-Expected: PASS — `pass 64`, `fail 0` (21 `recompute.test.js` + 12 `metrics.test.js` + 9 `action-refs.test.js` + 22 `publish.test.js`).
+Expected: PASS — `pass 71`, `fail 0` (21 `recompute.test.js` + 12 `metrics.test.js` + 10 `action-refs.test.js` + 28 `publish.test.js`).
 
 - [ ] **Step 2: Run the `ai-qa` parity guard**
 
@@ -2153,7 +2156,7 @@ Expected: `valid`.
 Run: `git diff main -- ai-review/ .github/workflows/unit.yml`
 Confirm by inspection:
 - `ai-review/action.yml`: only additive step insertions (Task 4) plus the Publish step's script-body substitution (Task 6, `lib/publish.js` calls replacing inline logic) and one new `env:` line (`PUBLISH_LIB_PATH`). No `if:` condition, model routing, prompt text, or schema changed anywhere.
-- `ai-review/lib/`: four new files (`metrics.js`, `metrics.test.js`, `action-refs.js`, `action-refs.test.js`, `publish.js`, `publish.test.js` — six, not four) plus the two pre-existing `recompute.js`/`recompute.test.js` untouched.
+- `ai-review/lib/`: six new files (`metrics.js`, `metrics.test.js`, `action-refs.js`, `action-refs.test.js`, `publish.js`, `publish.test.js`) plus the two pre-existing `recompute.js`/`recompute.test.js` untouched.
 - `.github/workflows/unit.yml`: glob-discovery change only.
 
 - [ ] **Step 5: Push the branch**
@@ -2174,7 +2177,7 @@ PR-A of the parallel-review migration (docs/superpowers/specs/2026-08-07-ai-revi
 
 1. Re-landed `lib/metrics.js` verbatim from the reverted `be2ab85` -- per-stage turns/cost/duration, parsed structurally rather than by grepping (both prior measurement errors came from grepping).
 2. New `lib/action-refs.js` -- a guard against dangling `steps.<id>.` references and duplicate step ids, tested against the real production `action.yml`, not just fixtures.
-3. Extracted the Publish step's pure logic into `lib/publish.js` -- 340 lines of previously-untested inline `github-script` now has 22 unit tests. The GitHub API calls stay inline (they need the runtime-injected `github`/`context` objects).
+3. Extracted the Publish step's pure logic into `lib/publish.js` -- 340 lines of previously-untested inline `github-script` now has 28 unit tests. The GitHub API calls stay inline (they need the runtime-injected `github`/`context` objects).
 4. Wired telemetry into the pipeline: two new snapshot steps (Context, Repair -- the Review stage already had one) plus a `Pipeline telemetry` step that renders per-stage turns/cost/duration to the job summary. All `if: always()` / `continue-on-error` -- none can affect the verdict.
 5. `unit.yml` now discovers tests by glob (`ai-review/lib/**/*.test.js`) instead of a hardcoded single path.
 
@@ -2187,10 +2190,10 @@ PR-A of the parallel-review migration (docs/superpowers/specs/2026-08-07-ai-revi
 
 ## Verification
 
-- `node --test "ai-review/lib/**/*.test.js"` -> 64/64 pass
+- `node --test "ai-review/lib/**/*.test.js"` -> 71/71 pass
 - `parity.yml` drift guard -> in sync
 - `python3 -c "import yaml; yaml.safe_load(...)"` -> valid
-- Six load-bearing Publish behaviors checked line-by-line against the prior inline version (see Task 6 commit)
+- Seven load-bearing Publish behaviors checked line-by-line against the prior inline version (see Task 6 commit)
 - 3 selftest.yml runs on this PR, compared against pre-change verdicts (see below)
 
 ## Selftest verdicts (fill in after Step 7)
@@ -2208,7 +2211,7 @@ BODY
 
 - [ ] **Step 7: Dispatch and monitor 3 selftest runs, comparing verdicts**
 
-`selftest.yml` triggers automatically on `pull_request` for the PR opened in Step 6 — that is run 1. For runs 2 and 3, either push a trivial no-op commit (e.g. touch a comment) or use `gh workflow run selftest.yml -f pr_number=<this PR's number>` twice more. For each run:
+`selftest.yml` triggers automatically on `pull_request` for the PR opened in Step 6 — that is run 1. For runs 2 and 3, either push a trivial no-op commit (e.g. touch a comment) or use `gh workflow run selftest.yml --ref <branch-name> -f pr_number=<this PR's number>` twice more. The `--ref <branch-name>` is load-bearing: `gh workflow run` without it dispatches the workflow from the default branch, and `selftest.yml`'s checkout + `uses: ./ai-review` then run **main's pre-change action**, making the "identical verdicts" comparison vacuous — the dispatch must run from this PR's branch so it exercises the changed action. For each run:
 
 ```bash
 gh run list --workflow selftest.yml --limit 3 --json databaseId,status,conclusion,createdAt
@@ -2220,8 +2223,13 @@ Record each run's `verdict`/`confidence`/`merge_risk` (visible in the posted PR 
 
 - [ ] **Step 8: Confirm the telemetry summary rendered**
 
-On any completed selftest run, check: `gh run view <run-id> --json jobs --jq '.jobs[].steps[] | select(.name=="Pipeline telemetry")'`
-Expected: `conclusion: success` (or `success` even if individual snapshots were empty — the step itself never fails). Then view the job summary in the Actions UI and confirm the "ai-review telemetry" table with per-stage turns/cost/duration is present.
+On any completed selftest run, check that the telemetry step ran and emitted its totals line. The telemetry step is an inner step of a **composite action**, so it does NOT appear in the jobs API's `steps[]` array (`gh run view --json jobs` lists only the outer "Run ai-review" step) — check the log instead:
+
+```bash
+gh run view <run-id> --log | grep -F "ai-review-metrics"
+```
+
+Expected: one line containing `ai-review-metrics {"turns":...,"costUsd":...,...}` — the telemetry step's `core.info` output. (Absence of this line means the step was skipped or errored; since it is `continue-on-error`, the job can still be green without it — which is exactly why this explicit check exists.) Then view the job summary in the Actions UI and confirm the "ai-review telemetry" table with per-stage turns/cost/duration is present.
 
 ---
 
