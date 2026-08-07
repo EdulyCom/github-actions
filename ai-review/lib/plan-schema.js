@@ -31,8 +31,16 @@ function validatePlan(plan, options) {
     return { ok: false, violations: ["plan is not an object"] };
   }
 
+  // Collection plans have no angles to cover; only test plans face the floor.
+  const requireFloor = !(options && options.requireFloor === false);
+
   const tasks = plan.tasks;
-  if (!Array.isArray(tasks) || tasks.length === 0) {
+  if (!Array.isArray(tasks)) {
+    return { ok: false, violations: ["plan.tasks must be a non-empty array"] };
+  }
+  // A collection round may legitimately have nothing to collect for a small
+  // diff — only a round that must cover the floor requires at least one task.
+  if (requireFloor && tasks.length === 0) {
     return { ok: false, violations: ["plan.tasks must be a non-empty array"] };
   }
   if (tasks.length > maxTasks) {
@@ -86,11 +94,13 @@ function validatePlan(plan, options) {
     }
   }
 
-  const missing = FLOOR_ANGLES.filter((a) => !coveredByScan.has(a));
-  if (missing.length > 0) {
-    violations.push(
-      `scan tasks do not cover the mandatory floor — missing angle(s): ${missing.join(", ")}`
-    );
+  if (requireFloor) {
+    const missing = FLOOR_ANGLES.filter((a) => !coveredByScan.has(a));
+    if (missing.length > 0) {
+      violations.push(
+        `scan tasks do not cover the mandatory floor — missing angle(s): ${missing.join(", ")}`
+      );
+    }
   }
 
   return violations.length === 0 ? { ok: true } : { ok: false, violations };

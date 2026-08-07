@@ -78,3 +78,11 @@ test("accepts angles spread across several scan tasks", () => {
   );
   assert.equal(res.ok, true, JSON.stringify(res.violations));
 });
+
+test("requireFloor: false skips the floor check for collection rounds", () => {
+  const collect = { round: 1, rationale: "r", tasks: [
+    { id: "c1", kind: "collect", angles: [], model: "haiku", focus: [], question: "q", rationale: "r" },
+  ] };
+  assert.equal(validatePlan(collect, { maxTasks: 12, requireFloor: false }).ok, true);
+  assert.equal(validatePlan(collect, { maxTasks: 12 }).ok, false, "the floor still applies by default");
+});
