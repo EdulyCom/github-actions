@@ -253,6 +253,25 @@ test("logs are collected per stage for telemetry", async () => {
   const res = await runPipeline({ runner: fakeRunner(happyPath()), inputs: INPUTS, caps: CAPS, models: MODELS });
   const names = res.logs.map((l) => l.name);
   assert.ok(names.includes("intent"));
-  assert.ok(names.includes("judge"));
-  assert.ok(names.some((n) => n.startsWith("worker:")));
+  assert.ok(names.some((n) => n.endsWith("judge")));
+  assert.ok(names.some((n) => n.includes("worker:")));
+});
+
+test("log names are unique per round so a later round cannot overwrite an earlier one", async () => {
+  let judgeCalls = 0;
+  const res = await runPipeline({
+    runner: fakeRunner(happyPath({
+      judge: () => {
+        judgeCalls += 1;
+        return okRes(judgeOut({ more_rounds_needed: judgeCalls === 1 }));
+      },
+    })),
+    inputs: INPUTS, caps: { maxRounds: 3, maxTasksPerRound: 12 }, models: MODELS,
+  });
+  assert.equal(res.ok, true, res.reason);
+  const names = res.logs.map((l) => l.name);
+  assert.equal(new Set(names).size, names.length,
+    `duplicate log names would silently overwrite telemetry: ${names.join(", ")}`);
+  assert.equal(names.filter((n) => n.endsWith("judge")).length, 2,
+    "a two-round review must produce two distinct judge logs");
 });

@@ -89,7 +89,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
   }
 
   const facts = [];
-  for (const r of await dispatch(collectPlan.data.tasks)) {
+  for (const r of await dispatch("collect", collectPlan.data.tasks)) {
     if (r.ok) facts.push({ task_id: r.result.task_id, findings: r.result.findings, evidence: r.result.evidence });
   }
 
@@ -106,7 +106,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
     let plan = null;
     let violations = null;
     for (let attempt = 0; attempt < 2 && plan === null; attempt += 1) {
-      const res = record(`test-plan:${round}:${attempt}`, await runner({
+      const res = record(`r${round}:test-plan:${attempt}`, await runner({
         label: "test-plan",
         prompt:
           P.testPlanPrompt({
@@ -132,7 +132,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
     }
 
     // --- dispatch
-    const settled = await dispatch(plan.tasks);
+    const settled = await dispatch(`r${round}`, plan.tasks);
     const completed = settled.filter((r) => r.ok).map((r) => r.result);
     for (const r of completed) {
       allFindings = allFindings.concat(r.findings);
@@ -151,7 +151,7 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
     const merged = dedupe(allFindings);
 
     // --- judge
-    const judgeRes = record("judge", await runner({
+    const judgeRes = record(`r${round}:judge`, await runner({
       label: "judge",
       prompt: P.judgePrompt({
         findings: merged.findings, evidence: allEvidence, gaps,
@@ -225,11 +225,16 @@ async function runPipeline({ runner, inputs, caps, models, isIntentExempt }) {
   /**
    * Fan out one round's tasks. allSettled, never all: a rejected worker must
    * not discard its siblings' completed (and paid-for) results.
+   *
+   * `prefix` scopes the log name to the round (or "collect") that produced
+   * it — Opus can legitimately reuse a task id like "s1" across rounds, and
+   * without the prefix a later round's log silently overwrites an earlier
+   * round's telemetry.
    */
-  async function dispatch(tasks) {
+  async function dispatch(prefix, tasks) {
     const settled = await Promise.allSettled(
       (tasks || []).map(async (task) => {
-        const res = record(`worker:${task.id}`, await runner({
+        const res = record(`${prefix}:worker:${task.id}`, await runner({
           label: `worker:${task.id}`,
           prompt: P.workerPrompt({
             task, diff: inputs.diff, prepPack: inputs.prepPack, intentBrief,
