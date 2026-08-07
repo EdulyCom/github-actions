@@ -205,6 +205,14 @@ inputs:
       state (that is ai-qa's post-merge job).
     required: false
     default: "true"
+  orchestrator-mode:
+    description: >
+      "shadow" runs the orchestrator alongside the serial review with the
+      SERIAL verdict governing and the orchestrator publishing nothing.
+      "primary" makes the orchestrator the reviewer. Shadow is the default
+      until the section 8 gate is met on >=10 real PRs.
+    required: false
+    default: shadow
 
 outputs:
   verdict:
@@ -537,6 +545,193 @@ runs:
         fi
         echo "signal=${SIGNAL}" >> "${GITHUB_OUTPUT}"
 
+    # --- Shadow control arm (orchestrator-mode: shadow) --------------------
+    # The two steps below (route, serial_review) are the pre-orchestrator
+    # serial review path, restored verbatim from git history (7343aa0, the
+    # commit immediately before it was deleted) so the orchestrator can be
+    # shadowed against a known-good baseline until the rollout's section 8
+    # gate is met. Gated OFF in orchestrator-mode: primary. The repair,
+    # retry, salvage, and execution-log-snapshot steps that used to
+    # accompany this review step are deliberately NOT restored — this is a
+    # plain single-invocation serial review, so its inconclusive rate will
+    # run higher than the production serial path's did before this rollout.
+    - name: Compute diff stats and route model
+      id: route
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.orchestrator-mode == 'shadow'
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
+        SONNET: ${{ inputs.sonnet-model }}
+        OPUS: ${{ inputs.opus-model }}
+        FILES_MAX: ${{ inputs.sonnet-files-threshold }}
+        CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
+      run: |
+        set -euo pipefail
+        NUMSTAT="$(git diff --numstat "origin/${BASE_REF}...HEAD")"
+        if [ -z "${NUMSTAT}" ]; then
+          FILES=0
+          CHURN=0
+        else
+          FILES="$(printf '%s\n' "${NUMSTAT}" | wc -l | tr -d ' ')"
+          # Binary-file numstat rows report "-" for added/removed instead of a
+          # number (e.g. "-\t-\tpath"); awk coerces non-numeric fields to 0,
+          # so binary churn is intentionally counted as 0 here. This is an
+          # accepted limitation matching the task brief's own formula, not a
+          # bug — do not re-flag it.
+          CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
+        fi
+        # Opus-by-default routing: the review stage prefers Opus for its
+        # stronger reasoning, dropping to Sonnet ONLY for trivially tiny
+        # diffs (at or under BOTH thresholds). Everything else → Opus.
+        FILES_MAX="${FILES_MAX:-3}"
+        CHURN_MAX="${CHURN_MAX:-60}"
+        if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
+          MODEL="${SONNET:-claude-sonnet-5}"
+        else
+          MODEL="${OPUS:-claude-opus-4-8}"
+        fi
+        {
+          echo "files=${FILES}"
+          echo "churn=${CHURN}"
+          echo "model=${MODEL}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Review stage (Sonnet/Opus)
+      id: serial_review
+      # continue-on-error: claude-code-action intermittently finishes the
+      # session successfully but without emitting structured_output and then
+      # exits 1 (upstream flakiness). Don't crash the job — the retry step
+      # below re-attempts, and Publish degrades gracefully if both miss.
+      continue-on-error: true
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.orchestrator-mode == 'shadow'
+      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      # Same anthropics/claude-code-action#1294 workaround as the Context stage above:
+      # this action version rejects ANTHROPIC_AUTH_TOKEN alone, so the bearer token also
+      # fills anthropic_api_key to pass validation, while ANTHROPIC_CUSTOM_HEADERS carries
+      # the real bearer credential on the wire.
+      env:
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        TEST_HINT: ${{ inputs.test-hint }}
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        # Deliberately NOT steps.identity.outputs.author-token, for the same
+        # least-privilege reason as the Context stage: this step only reads the
+        # repo, calls the Anthropic API, and returns structured output — it
+        # never calls the GitHub API to post anything. The App-minted identity
+        # is reserved for the deterministic Publish review step below.
+        github_token: ${{ inputs.github-token }}
+        allowed_bots: ${{ inputs.allowed-bots }}
+        plugins: superpowers@superpowers-marketplace
+        plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
+        claude_args: |
+          --model ${{ steps.route.outputs.model }}
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+        prompt: |
+          You are performing an automated code review. Attempt to load the
+          live `/requesting-code-review` and `/verification-before-completion`
+          skills if the superpowers plugin installed successfully; if either
+          is unavailable, proceed without it — do not fail or block on a
+          missing plugin. Apply `/verification-before-completion` throughout:
+          treat NO pass/verified claim as valid without fresh evidence — the
+          command you ran and its actual output/exit code. If you assert a
+          check passed, you must have run it and read the result this session.
+
+          Read `${{ github.action_path }}/rubric.md`. This is the
+          authoritative review methodology: an 8-angle scan (intent alignment
+          first, then line-by-line diff, removed-behavior audit, cross-file
+          tracing, reuse, simplification, efficiency, altitude), a severity
+          scale (P0-P3), and a full review checklist. Follow it.
+
+          The PR number is available in the `PR_NUMBER` environment variable.
+          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` to read
+          the PR's stated goal. A deterministic earlier step has already
+          resolved every issue this PR closes (via closing keywords AND
+          GitHub's linked-issue graph) into `.ai-review/linked-issues.json`
+          at the repository root — read that file. For each linked issue it
+          lists, treat the issue's title/body/acceptance-criteria as the
+          PRIMARY intent contract for the rubric's Angle H (Intent
+          alignment); `gh issue view <n> --json title,body,state,labels` is
+          available if you need more detail. Establish this stated goal
+          BEFORE analyzing the diff, per the rubric's Angle H methodology
+          (frame-setting must happen before code analysis, not after). If
+          `.ai-review/linked-issues.json` is absent or empty, fall back to
+          the PR title/body as the intent source.
+
+          Read `context.md` at the repository root (written by an earlier
+          context-gathering stage) for a summary of what changed and its
+          callers/callees/related helpers.
+
+          Read the PR diff yourself: the working tree is already checked out
+          at the PR head commit; diff it against the merge-base with the
+          repository's default branch (discover the default branch yourself,
+          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`). Read the
+          COMPLETE contents of every changed file (and any caller/callee you
+          need to judge correctness) with `Read` — never sample, truncate, or
+          reason from the diff hunks alone. There is no size cap; large files
+          are why this diff was routed to the stronger model.
+
+          Perform the full 8-angle scan from the rubric against the diff.
+          Classify every confirmed or plausible finding into P0/P1/P2/P3 per
+          the rubric's severity definitions, and count them.
+
+          Run the tests, best-effort. The caller is expected to have
+          installed the project's toolchain/dependencies before this action.
+          If `TEST_COMMAND` (env) is set, run exactly that; otherwise
+          auto-detect an obvious command (e.g. `npm test`/`npm run test`,
+          `pytest -q`, `make test`) from the repo's manifests. Consider
+          `TEST_HINT` (env) for setup/guidance. Set `test_execution` to:
+          `passed` (command ran, exit 0), `failed` (command ran, non-zero),
+          `skipped` (no toolchain/deps available, or command errored on
+          environment — not a real test failure), or `not_run` (no test
+          command exists / diff is not testable). NEVER report `passed`
+          without having actually run the command and read its output this
+          session (`/verification-before-completion`). When you run tests,
+          record the command and its key output line(s) in
+          `verification_evidence`.
+
+          Also assess test quality per the rubric's Testing section: are
+          there tests for the changed logic (`no_tests_for_changed_logic`),
+          is coverage on critical paths below target
+          (`coverage_below_threshold_on_critical_paths`), and are any tests
+          failing (`tests_failing`)? Set `tests_failing: true` if
+          `test_execution` is `failed`. Report these as booleans; omit any
+          you cannot assess rather than guessing. Per the rubric's exemption:
+          if this diff is Docs/Config-only per §12's test requirement matrix
+          (CI/workflow YAML, composite action wiring, markdown, prompt text,
+          or other config with no unit-testable logic — nothing a test could
+          exercise), report `no_tests_for_changed_logic: false` — that row
+          requires no tests, so none missing is not a defect.
+
+          Evaluate the PR description's checklist. If the PR body (or a
+          linked issue) contains `- [ ]`/`- [x]` checklist items, return a
+          `checklist` array: one entry per item with its `text` copied
+          verbatim (without the `- [ ]`/`- [x]` prefix), a `status` of
+          `verified` (you confirmed it is satisfied — cite how in
+          `evidence`), `failed` (you confirmed it is NOT satisfied), or
+          `unverifiable` (cannot be checked from code/tests, e.g. a manual
+          or post-merge step). Only mark `verified` with real evidence per
+          `/verification-before-completion`. A later deterministic step uses
+          this to tick verified boxes in the PR body; do not edit the PR body
+          yourself. Per the rubric, checklist status is a P2 reminder at
+          most — do not fail the review solely on incomplete checklist items.
+
+          Write a complete review as `comment_markdown`: findings grouped by
+          severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
+          state "_None._" for empty sections), and strengths. Do not include
+          a leading verdict token, a confidence/merge-risk line, or any HTML
+          marker comment in `comment_markdown` — the caller deterministically
+          recomputes the verdict and prepends its own banner separately.
+
+          Return your full assessment via the required structured output
+          schema. `counts` must be accurate — a later deterministic step
+          recomputes the actual pass/fail decision from `counts` alone and
+          does not trust your `verdict` field; report it anyway as your own
+          best assessment.
+
     - name: Install orchestrator dependencies
       id: orchestrator-deps
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -691,7 +886,10 @@ runs:
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
-        REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
+        REVIEW_JSON: >-
+          ${{ inputs.orchestrator-mode == 'primary'
+          && steps.review.outputs.structured_output
+          || steps.serial_review.outputs.structured_output }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
@@ -1074,3 +1272,50 @@ runs:
           // Also in the plain log, so a run's numbers survive summary retention
           // and can be scraped for the baseline table.
           core.info(`ai-review-metrics ${JSON.stringify(metrics.totals)}`);
+
+    # --- Shadow control arm, continued ---------------------------------
+    # Comparison table + artifact are pure observation: they run whenever the
+    # shadow arm ran (steps.route/serial_review above), never gate anything,
+    # and never fail the job. Nothing here can cause the orchestrator's
+    # output to be published — see Publish's REVIEW_JSON above, which is the
+    # only path from steps.review.outputs.structured_output to a posted
+    # review, and which reads from steps.serial_review in shadow mode.
+    - name: Shadow comparison
+      if: always() && inputs.orchestrator-mode == 'shadow' && steps.fork-guard.outputs.is-fork != 'true'
+      continue-on-error: true
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        ORCH_JSON: ${{ steps.review.outputs.structured_output }}
+        ORCH_REASON: ${{ steps.review.outputs.failed_reason }}
+        SERIAL_JSON: ${{ steps.serial_review.outputs.structured_output }}
+      with:
+        script: |
+          const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+          const orch = parse(process.env.ORCH_JSON);
+          const serial = parse(process.env.SERIAL_JSON);
+          const c = (r) => (r && r.counts) || {};
+          const row = (k) => `| ${k} | ${c(serial)[k] ?? "—"} | ${c(orch)[k] ?? "—"} |`;
+          await core.summary
+            .addHeading("ai-review shadow comparison", 3)
+            .addTable([
+              [{ data: "", header: true }, { data: "serial (governing)", header: true }, { data: "orchestrator", header: true }],
+              ["verdict", (serial && serial.verdict) || "inconclusive", (orch && orch.verdict) || "inconclusive"],
+              ["p0", String(c(serial).p0 ?? "—"), String(c(orch).p0 ?? "—")],
+              ["p1", String(c(serial).p1 ?? "—"), String(c(orch).p1 ?? "—")],
+              ["p2", String(c(serial).p2 ?? "—"), String(c(orch).p2 ?? "—")],
+              ["p3", String(c(serial).p3 ?? "—"), String(c(orch).p3 ?? "—")],
+            ])
+            .addRaw(process.env.ORCH_REASON ? `\n> Orchestrator failed closed: ${process.env.ORCH_REASON}\n` : "")
+            .write();
+
+    - name: Upload shadow artifact
+      if: always() && inputs.orchestrator-mode == 'shadow'
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ai-review-shadow-${{ steps.pr.outputs.pr-number }}
+        path: |
+          .ai-review/orchestrator-output.json
+          .ai-review/orchestrator-reason.txt
+          ${{ runner.temp }}/ai-review-logs/
+        if-no-files-found: ignore
