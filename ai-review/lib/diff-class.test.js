@@ -27,3 +27,17 @@ test("non-array input is not exempt rather than throwing", () => {
 test("lockfiles and generated manifests alone are exempt", () => {
   assert.equal(isIntentExempt(["package-lock.json", "CHANGELOG.md"]), true);
 });
+
+test("executable code under docs/ is NOT exempt", () => {
+  assert.equal(isIntentExempt(["docs/deploy.sh"]), false);
+  assert.equal(isIntentExempt(["docs/scripts/run.js"]), false);
+  assert.equal(isIntentExempt(["DOCS/build.py"]), false);
+});
+
+test("markdown under docs/ is still exempt via its extension", () => {
+  assert.equal(isIntentExempt(["docs/guide.md", "README.md"]), true);
+});
+
+test("mdx is NOT exempt — it compiles to JSX and can embed JS", () => {
+  assert.equal(isIntentExempt(["guide.mdx"]), false);
+});

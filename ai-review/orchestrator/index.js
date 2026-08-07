@@ -13,6 +13,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { query } = require("@anthropic-ai/claude-agent-sdk");
 
 const { createRunner } = require("./session.js");
@@ -38,9 +39,21 @@ const readText = (p) => {
 const setOutput = (name, value) => {
   const file = process.env.GITHUB_OUTPUT;
   if (!file) return;
+  const str = String(value);
   // Heredoc form: model output is multi-line and must never be shell-expanded.
-  const delim = `EOF_${name}_${Date.now()}`;
-  fs.appendFileSync(file, `${name}<<${delim}\n${value}\n${delim}\n`);
+  // The delimiter must be unpredictable and checked against the body — a
+  // value that is rejected precisely because it violates a format pattern
+  // (e.g. a task id) can still contain newlines, and an attacker-shaped body
+  // must never be able to forge its own terminator line.
+  let delim = `EOF_${name}_${crypto.randomUUID()}`;
+  if (str.includes(delim)) delim = `EOF_${name}_${crypto.randomUUID()}`;
+  if (str.includes(delim)) {
+    // Still collides (should not happen twice) — never emit a heredoc whose
+    // body contains its own terminator. Strip newlines instead.
+    fs.appendFileSync(file, `${name}<<${delim}\n${str.replace(/\r?\n/g, " ")}\n${delim}\n`);
+    return;
+  }
+  fs.appendFileSync(file, `${name}<<${delim}\n${str}\n${delim}\n`);
 };
 
 (async () => {
@@ -118,9 +131,13 @@ const setOutput = (name, value) => {
   fs.writeFileSync(".ai-review/orchestrator-output.json", json);
   setOutput("structured_output", json);
 })().catch((err) => {
-  // An orchestrator crash must still land on the fail-closed path.
+  // An orchestrator crash must still land on the fail-closed path. Even if
+  // setOutput itself throws (e.g. an unwritable GITHUB_OUTPUT), this step
+  // must still exit 0 so publish is never left guessing.
   console.error(`ai-review orchestrator crashed: ${err && err.stack}`);
-  setOutput("structured_output", "");
-  setOutput("failed_reason", `orchestrator crashed: ${err && err.message}`);
+  try {
+    setOutput("structured_output", "");
+    setOutput("failed_reason", `orchestrator crashed: ${err && err.message}`);
+  } catch {}
   process.exit(0);
 });

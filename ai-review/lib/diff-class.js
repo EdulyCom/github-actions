@@ -14,9 +14,7 @@
 
 const EXEMPT_PATTERNS = [
   /\.md$/i,
-  /\.mdx$/i,
   /\.txt$/i,
-  /^docs\//i,
   /^\.github\/ISSUE_TEMPLATE\//i,
   /(^|\/)(LICENSE|NOTICE|CODEOWNERS|CHANGELOG)(\.\w+)?$/i,
   /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock)$/i,
