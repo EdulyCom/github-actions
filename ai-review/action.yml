@@ -401,10 +401,10 @@ runs:
         echo "base_sha=${BASE_SHA}"
         echo "is-shallow-repository=$(git rev-parse --is-shallow-repository)"
 
-        git diff "${BASE_SHA}...HEAD" > .ai-review/diff.patch
+        git -c core.quotePath=false diff "${BASE_SHA}...HEAD" > .ai-review/diff.patch
 
-        CHANGED_FILES_JSON="$(git diff --name-only "${BASE_SHA}...HEAD" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
-        CHURN="$(git diff --numstat "${BASE_SHA}...HEAD" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
+        CHANGED_FILES_JSON="$(git -c core.quotePath=false diff --name-only "${BASE_SHA}...HEAD" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+        CHURN="$(git -c core.quotePath=false diff --numstat "${BASE_SHA}...HEAD" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
 
         HAS_NODE_MODULES=false
         [ -d node_modules ] && HAS_NODE_MODULES=true
