@@ -1,0 +1,126 @@
+"use strict";
+
+// Orchestrator entry point.
+//
+// Thin by design: every decision worth testing lives in lib/ or pipeline.js.
+// This file reads the environment, runs the pipeline, and writes three things:
+//
+//   1. structured_output  — the publish step's input (empty on fail-closed, so
+//      publish degrades to its existing inconclusive path unchanged)
+//   2. per-stage logs     — RUNNER_TEMP files the telemetry step parses with
+//      lib/metrics.js, which needs no change
+//   3. failed_reason      — human-readable, surfaced in the step summary
+
+const fs = require("node:fs");
+const path = require("node:path");
+const { query } = require("@anthropic-ai/claude-agent-sdk");
+
+const { createRunner } = require("./session.js");
+const { runPipeline } = require("./pipeline.js");
+const { isIntentExempt } = require("../lib/diff-class.js");
+
+const readJson = (p, fallback) => {
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return fallback;
+  }
+};
+
+const readText = (p) => {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch {
+    return "";
+  }
+};
+
+const setOutput = (name, value) => {
+  const file = process.env.GITHUB_OUTPUT;
+  if (!file) return;
+  // Heredoc form: model output is multi-line and must never be shell-expanded.
+  const delim = `EOF_${name}_${Date.now()}`;
+  fs.appendFileSync(file, `${name}<<${delim}\n${value}\n${delim}\n`);
+};
+
+(async () => {
+  const prepPack = readJson(".ai-review/context-pack.json", {});
+  const diff = readText(".ai-review/diff.patch");
+  const linkedIssues = readJson(".ai-review/linked-issues.json", []);
+
+  const caps = {
+    maxRounds: Number(process.env.MAX_ROUNDS) || 3,
+    maxTasksPerRound: Number(process.env.MAX_TASKS_PER_ROUND) || 12,
+  };
+  const models = {
+    opus: process.env.ORCHESTRATOR_MODEL || "claude-opus-5",
+    sonnet: process.env.SONNET_MODEL || "claude-sonnet-5",
+    haiku: process.env.HAIKU_MODEL || "claude-haiku-4-5",
+  };
+
+  const runner = createRunner({
+    query,
+    cwd: process.cwd(),
+    timeoutMs: (Number(process.env.WORKER_TIMEOUT_MINUTES) || 10) * 60 * 1000,
+    maxTurns: Number(process.env.WORKER_MAX_TURNS) || 60,
+  });
+
+  const result = await runPipeline({
+    runner,
+    caps,
+    models,
+    isIntentExempt: isIntentExempt(prepPack.changed_files),
+    inputs: {
+      prTitle: process.env.PR_TITLE || "",
+      prBody: process.env.PR_BODY || "",
+      linkedIssues,
+      diff,
+      prepPack,
+    },
+  });
+
+  // Per-stage logs for the telemetry step. One file per stage, named so the
+  // step can collect them without knowing the plan's shape in advance.
+  const logDir = path.join(process.env.RUNNER_TEMP || ".", "ai-review-logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  for (const { name, log } of result.logs) {
+    const safe = name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    fs.writeFileSync(path.join(logDir, `${safe}.json`), JSON.stringify(log));
+  }
+  fs.writeFileSync(
+    path.join(logDir, "_rounds.json"),
+    JSON.stringify({ rounds: result.rounds, ok: result.ok, reason: result.reason })
+  );
+
+  if (!result.ok) {
+    // Fail closed. An empty structured_output is exactly what the existing
+    // publish step already handles: it posts the inconclusive comment and does
+    // not pass the gate.
+    console.error(`ai-review orchestrator failed closed: ${result.reason}`);
+    setOutput("structured_output", "");
+    setOutput("failed_reason", result.reason);
+    fs.mkdirSync(".ai-review", { recursive: true });
+    fs.writeFileSync(".ai-review/orchestrator-reason.txt", result.reason);
+    process.exit(0); // the step succeeds; publish decides the verdict
+  }
+
+  // Refuted findings stay visible to the PR's humans rather than vanishing.
+  if (result.refuted.length > 0) {
+    const rows = result.refuted
+      .map((f) => `- **${f.severity}** \`${f.file}:${f.line}\` — ${f.claim}`)
+      .join("\n");
+    result.output.comment_markdown +=
+      `\n\n<details><summary>Refuted during judging (${result.refuted.length})</summary>\n\n${rows}\n\n</details>`;
+  }
+
+  const json = JSON.stringify(result.output);
+  fs.mkdirSync(".ai-review", { recursive: true });
+  fs.writeFileSync(".ai-review/orchestrator-output.json", json);
+  setOutput("structured_output", json);
+})().catch((err) => {
+  // An orchestrator crash must still land on the fail-closed path.
+  console.error(`ai-review orchestrator crashed: ${err && err.stack}`);
+  setOutput("structured_output", "");
+  setOutput("failed_reason", `orchestrator crashed: ${err && err.message}`);
+  process.exit(0);
+});
