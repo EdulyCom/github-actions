@@ -134,6 +134,27 @@ inputs:
       gateway aliases model names.
     required: false
     default: "claude-haiku-4-5-20251001"
+  orchestrator-model:
+    description: >
+      Model for the orchestrator's own calls — intent brief, planning, and
+      judging. Pinned to Claude Opus 5 by default, deliberately NOT the
+      opus-model input: Opus 5 sits in a separate rate-limit bucket from the
+      combined Opus 4.x pool, which is what keeps a 12-worker fan-out from
+      concentrating on one bucket, and what keeps shadow mode from contending
+      with the serial control arm.
+    required: false
+    default: claude-opus-5
+  max-rounds:
+    description: >
+      Maximum plan/dispatch/judge cycles. Reaching this cap while the judge
+      still requires more work publishes an inconclusive result, never a
+      verdict.
+    required: false
+    default: "3"
+  max-tasks-per-round:
+    description: Maximum workers dispatched in a single round.
+    required: false
+    default: "12"
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
@@ -351,47 +372,6 @@ runs:
         fetch-depth: 0
         persist-credentials: false
 
-    - name: Compute diff stats and route model
-      id: route
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      env:
-        BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
-        SONNET: ${{ inputs.sonnet-model }}
-        OPUS: ${{ inputs.opus-model }}
-        FILES_MAX: ${{ inputs.sonnet-files-threshold }}
-        CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
-      run: |
-        set -euo pipefail
-        NUMSTAT="$(git diff --numstat "origin/${BASE_REF}...HEAD")"
-        if [ -z "${NUMSTAT}" ]; then
-          FILES=0
-          CHURN=0
-        else
-          FILES="$(printf '%s\n' "${NUMSTAT}" | wc -l | tr -d ' ')"
-          # Binary-file numstat rows report "-" for added/removed instead of a
-          # number (e.g. "-\t-\tpath"); awk coerces non-numeric fields to 0,
-          # so binary churn is intentionally counted as 0 here. This is an
-          # accepted limitation matching the task brief's own formula, not a
-          # bug — do not re-flag it.
-          CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
-        fi
-        # Opus-by-default routing: the review stage prefers Opus for its
-        # stronger reasoning, dropping to Sonnet ONLY for trivially tiny
-        # diffs (at or under BOTH thresholds). Everything else → Opus.
-        FILES_MAX="${FILES_MAX:-3}"
-        CHURN_MAX="${CHURN_MAX:-60}"
-        if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
-          MODEL="${SONNET:-claude-sonnet-5}"
-        else
-          MODEL="${OPUS:-claude-opus-4-8}"
-        fi
-        {
-          echo "files=${FILES}"
-          echo "churn=${CHURN}"
-          echo "model=${MODEL}"
-        } >> "${GITHUB_OUTPUT}"
-
     - name: Resolve linked issues
       id: linked-issues
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.update-linked-issues == 'true'
@@ -427,101 +407,24 @@ runs:
         echo "count=${COUNT}" >> "${GITHUB_OUTPUT}"
         echo "Resolved ${COUNT} linked issue(s) for PR #${PR_NUMBER:-?}."
 
-    - name: Context stage (Haiku)
-      id: context
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      # continue-on-error: context.md is a non-essential optimization — the
-      # Review stage reads it only "if present" and works without it. A flaky
-      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
-      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
-      # stall); that must NOT sink the whole review. Composite-action steps
-      # cannot set timeout-minutes, so graceful degradation here + the caller's
-      # job-level timeout backstop is how we bound this failure mode.
-      continue-on-error: true
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
-      # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
-      # so the bearer token also fills anthropic_api_key to pass validation, while
-      # ANTHROPIC_CUSTOM_HEADERS carries the real bearer credential used on the wire.
-      env:
-        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
-        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-      with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
-        # Deliberately NOT steps.identity.outputs.author-token: this stage only
-        # reads the local working tree and writes context.md, so it gets the
-        # unprivileged fallback token rather than the App-minted
-        # pull-requests/issues/checks-scoped identity used by the publishing
-        # steps later in this action.
-        github_token: ${{ inputs.github-token }}
-        allowed_bots: ${{ inputs.allowed-bots }}
-        # Root cause of the context.md handoff failure (Task 2.4 fix round): this
-        # step ran with NO --allowedTools at all, so claude-code-action's headless
-        # permission model silently denied every Write and most Bash tool calls
-        # (confirmed via live run 29635771162's Context-stage permission_denials_count
-        # of 6, and anthropics/claude-code-action's own base-action/README.md, which
-        # shows `Write` must be explicitly allowlisted — it is not a default tool).
-        # Both stages run as plain composite-action steps on the same runner
-        # checkout (no container isolation), so once Write is permitted here, the
-        # Review stage's relative-path read of `context.md` at the repository root
-        # resolves to the same file.
-        claude_args: |
-          --model ${{ inputs.haiku-model }}
-          --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
-        prompt: |
-          Read the PR diff (the working tree is already checked out at the PR head
-          commit; diff it against the merge-base with the repository's default
-          branch — discover the default branch yourself, e.g. via `git remote show
-          origin` or `git symbolic-ref refs/remotes/origin/HEAD`, if you need it) and
-          the full contents of every changed file. Grep the repository for callers,
-          callees, and helper functions related to the changed code, so a reviewer
-          has the surrounding context without re-deriving it.
-
-          Write a concise summary to `context.md` at the repository root covering:
-          - what changed, in plain language
-          - which files/functions call into or are called by the changed code
-          - any related helpers, shared utilities, or patterns the changed code
-            reuses or should have reused
-
-          Do NOT review the change. Do NOT judge correctness, quality, or security.
-          Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
-          output is the factual context.md summary — a later stage does the review.
-
-    # Same shared-path problem the review snapshot below documents: every
-    # claude-code-action step writes its execution log to the one fixed path
-    # "${RUNNER_TEMP}/claude-execution-output.json", so the Review stage
-    # destroys the Context stage's log before the telemetry step can read it.
-    # Snapshot it now, while it is still context's own output. Observation
-    # only — never fails the job, never affects the verdict.
-    - name: Snapshot the context stage's execution log
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+    - name: Resolve PR title and body
+      id: pr-details
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.update-linked-issues == 'true'
       shell: bash
       env:
-        EXEC_FILE: ${{ steps.context.outputs.execution_file }}
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       run: |
         set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-context-snapshot.json" || true
-        fi
-        exit 0
-
-    - name: Verify context.md handoff
-      id: context-verify
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        # Durable regression check for the Task 2.4 fix-round finding that the
-        # Context stage's Write tool calls were silently denied (see the
-        # --allowedTools comment on the Context stage step above). This makes
-        # the handoff's health visible in every run's plain step log instead of
-        # requiring a permission_denials_count archaeology dig.
-        if [ ! -s context.md ]; then
-          echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
-          exit 0
-        fi
-        echo "context.md present: $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
-        echo "--- context.md preview (first 20 lines) ---"
-        head -n 20 context.md
+        # Best-effort, same pattern as the linked-issues resolver above: the
+        # orchestrator reads title/body as plain JSON-file values, never
+        # interpolated into a shell command, so an attacker-controlled PR
+        # body can't forge a $GITHUB_OUTPUT heredoc terminator (the hole
+        # fixed in Task 8).
+        mkdir -p .ai-review
+        OUT=".ai-review/pr.json"
+        gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title,body,url,number > "${OUT}" 2>/dev/null || echo '{}' > "${OUT}"
 
     - name: CI signal (re-review only)
       id: ci-signal
@@ -562,351 +465,42 @@ runs:
         fi
         echo "signal=${SIGNAL}" >> "${GITHUB_OUTPUT}"
 
-    - name: Review stage (Sonnet/Opus)
+    - name: Install orchestrator dependencies
+      id: orchestrator-deps
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ github.action_path }}/orchestrator
+      run: |
+        set -euo pipefail
+        # A registry outage must degrade to an inconclusive review, never a
+        # hung job: npm's own retry budget is bounded and the step is
+        # continue-on-error, so a failure falls through to the fail-closed
+        # publish path below.
+        npm ci --no-audit --no-fund
+
+    - name: Review stage (Opus-orchestrated fan-out)
       id: review
-      # continue-on-error: claude-code-action intermittently finishes the
-      # session successfully but without emitting structured_output and then
-      # exits 1 (upstream flakiness). Don't crash the job — the retry step
-      # below re-attempts, and Publish degrades gracefully if both miss.
+      # continue-on-error: the orchestrator already exits 0 on a fail-closed
+      # path, but a crash before its handler runs must not kill the job —
+      # Publish degrades to the inconclusive comment on empty output.
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
-      # Same anthropics/claude-code-action#1294 workaround as the Context stage above:
-      # this action version rejects ANTHROPIC_AUTH_TOKEN alone, so the bearer token also
-      # fills anthropic_api_key to pass validation, while ANTHROPIC_CUSTOM_HEADERS carries
-      # the real bearer credential on the wire.
+      shell: bash
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
-        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic-auth-token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
+        ORCHESTRATOR_MODEL: ${{ inputs.orchestrator-model }}
+        SONNET_MODEL: ${{ inputs.sonnet-model }}
+        HAIKU_MODEL: ${{ inputs.haiku-model }}
+        MAX_ROUNDS: ${{ inputs.max-rounds }}
+        MAX_TASKS_PER_ROUND: ${{ inputs.max-tasks-per-round }}
         TEST_COMMAND: ${{ inputs.test-command }}
         TEST_HINT: ${{ inputs.test-hint }}
-      with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
-        # Deliberately NOT steps.identity.outputs.author-token, for the same
-        # least-privilege reason as the Context stage: this step only reads the
-        # repo, calls the Anthropic API, and returns structured output — it
-        # never calls the GitHub API to post anything. The App-minted identity
-        # is reserved for the deterministic Publish review step below.
-        github_token: ${{ inputs.github-token }}
-        allowed_bots: ${{ inputs.allowed-bots }}
-        plugins: superpowers@superpowers-marketplace
-        plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
-        claude_args: |
-          --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
-        prompt: |
-          You are performing an automated code review. Attempt to load the
-          live `/requesting-code-review` and `/verification-before-completion`
-          skills if the superpowers plugin installed successfully; if either
-          is unavailable, proceed without it — do not fail or block on a
-          missing plugin. Apply `/verification-before-completion` throughout:
-          treat NO pass/verified claim as valid without fresh evidence — the
-          command you ran and its actual output/exit code. If you assert a
-          check passed, you must have run it and read the result this session.
-
-          Read `${{ github.action_path }}/rubric.md`. This is the
-          authoritative review methodology: an 8-angle scan (intent alignment
-          first, then line-by-line diff, removed-behavior audit, cross-file
-          tracing, reuse, simplification, efficiency, altitude), a severity
-          scale (P0-P3), and a full review checklist. Follow it.
-
-          The PR number is available in the `PR_NUMBER` environment variable.
-          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` to read
-          the PR's stated goal. A deterministic earlier step has already
-          resolved every issue this PR closes (via closing keywords AND
-          GitHub's linked-issue graph) into `.ai-review/linked-issues.json`
-          at the repository root — read that file. For each linked issue it
-          lists, treat the issue's title/body/acceptance-criteria as the
-          PRIMARY intent contract for the rubric's Angle H (Intent
-          alignment); `gh issue view <n> --json title,body,state,labels` is
-          available if you need more detail. Establish this stated goal
-          BEFORE analyzing the diff, per the rubric's Angle H methodology
-          (frame-setting must happen before code analysis, not after). If
-          `.ai-review/linked-issues.json` is absent or empty, fall back to
-          the PR title/body as the intent source.
-
-          Read `context.md` at the repository root (written by an earlier
-          context-gathering stage) for a summary of what changed and its
-          callers/callees/related helpers.
-
-          Read the PR diff yourself: the working tree is already checked out
-          at the PR head commit; diff it against the merge-base with the
-          repository's default branch (discover the default branch yourself,
-          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`). Read the
-          COMPLETE contents of every changed file (and any caller/callee you
-          need to judge correctness) with `Read` — never sample, truncate, or
-          reason from the diff hunks alone. There is no size cap; large files
-          are why this diff was routed to the stronger model.
-
-          Perform the full 8-angle scan from the rubric against the diff.
-          Classify every confirmed or plausible finding into P0/P1/P2/P3 per
-          the rubric's severity definitions, and count them.
-
-          Run the tests, best-effort. The caller is expected to have
-          installed the project's toolchain/dependencies before this action.
-          If `TEST_COMMAND` (env) is set, run exactly that; otherwise
-          auto-detect an obvious command (e.g. `npm test`/`npm run test`,
-          `pytest -q`, `make test`) from the repo's manifests. Consider
-          `TEST_HINT` (env) for setup/guidance. Set `test_execution` to:
-          `passed` (command ran, exit 0), `failed` (command ran, non-zero),
-          `skipped` (no toolchain/deps available, or command errored on
-          environment — not a real test failure), or `not_run` (no test
-          command exists / diff is not testable). NEVER report `passed`
-          without having actually run the command and read its output this
-          session (`/verification-before-completion`). When you run tests,
-          record the command and its key output line(s) in
-          `verification_evidence`.
-
-          Also assess test quality per the rubric's Testing section: are
-          there tests for the changed logic (`no_tests_for_changed_logic`),
-          is coverage on critical paths below target
-          (`coverage_below_threshold_on_critical_paths`), and are any tests
-          failing (`tests_failing`)? Set `tests_failing: true` if
-          `test_execution` is `failed`. Report these as booleans; omit any
-          you cannot assess rather than guessing. Per the rubric's exemption:
-          if this diff is Docs/Config-only per §12's test requirement matrix
-          (CI/workflow YAML, composite action wiring, markdown, prompt text,
-          or other config with no unit-testable logic — nothing a test could
-          exercise), report `no_tests_for_changed_logic: false` — that row
-          requires no tests, so none missing is not a defect.
-
-          Evaluate the PR description's checklist. If the PR body (or a
-          linked issue) contains `- [ ]`/`- [x]` checklist items, return a
-          `checklist` array: one entry per item with its `text` copied
-          verbatim (without the `- [ ]`/`- [x]` prefix), a `status` of
-          `verified` (you confirmed it is satisfied — cite how in
-          `evidence`), `failed` (you confirmed it is NOT satisfied), or
-          `unverifiable` (cannot be checked from code/tests, e.g. a manual
-          or post-merge step). Only mark `verified` with real evidence per
-          `/verification-before-completion`. A later deterministic step uses
-          this to tick verified boxes in the PR body; do not edit the PR body
-          yourself. Per the rubric, checklist status is a P2 reminder at
-          most — do not fail the review solely on incomplete checklist items.
-
-          Write a complete review as `comment_markdown`: findings grouped by
-          severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
-          state "_None._" for empty sections), and strengths. Do not include
-          a leading verdict token, a confidence/merge-risk line, or any HTML
-          marker comment in `comment_markdown` — the caller deterministically
-          recomputes the verdict and prepends its own banner separately.
-
-          Return your full assessment via the required structured output
-          schema. `counts` must be accurate — a later deterministic step
-          recomputes the actual pass/fail decision from `counts` alone and
-          does not trust your `verdict` field; report it anyway as your own
-          best assessment.
-
-    # claude-code-action always writes its execution log to the fixed path
-    # "${RUNNER_TEMP}/claude-execution-output.json" (no per-invocation unique
-    # component — verified against the pinned action's source). Every
-    # claude-code-action step below (repair, retry) writes to that SAME file,
-    # so review's log — the expensive analysis Salvage exists to rescue —
-    # would otherwise be overwritten before Salvage ever runs. Snapshot it now,
-    # while it's still review's own output. Best-effort: never fails the job.
-    - name: Snapshot the review stage's execution log
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      env:
-        EXEC_FILE: ${{ steps.review.outputs.execution_file }}
       run: |
         set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
-        fi
-        exit 0
-
-    # Cheap structured-output repair. The first attempt frequently completes a
-    # full review (observed: 33 turns, $3.76, 5.5 min) and then ends without
-    # emitting structured_output — claude-code-action reports subtype "success"
-    # with is_error true. Resuming that same session and asking only for the
-    # JSON recovers the work already paid for, instead of re-reviewing from
-    # scratch. Best-effort: restricted to Read only (this step must not
-    # re-read the repo or use any other tool — it only re-emits output it
-    # already composed), and the full retry below still runs if this misses.
-    - name: Review stage — structured-output repair
-      id: review_repair
-      continue-on-error: true
-      if: >-
-        steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        steps.review.outputs.structured_output == '' &&
-        steps.review.outputs.session_id != ''
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
-      env:
-        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
-        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-      with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
-        github_token: ${{ inputs.github-token }}
-        allowed_bots: ${{ inputs.allowed-bots }}
-        claude_args: |
-          --resume ${{ steps.review.outputs.session_id }}
-          --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
-        prompt: |
-          Your previous turn in this session finished the review but ended
-          without emitting the required structured output.
-
-          Do NOT re-analyze the diff, re-read files, or revise your findings.
-          Emit the structured output NOW, using the schema, populated from the
-          analysis you already completed in this session. `counts` must match
-          the findings you already wrote up, and `comment_markdown` must be the
-          review body you already composed (findings grouped P0-P3 with
-          "_None._" for empty sections, plus strengths; no leading verdict
-          token, confidence line, or HTML marker).
-
-          Emitting the structured output is your only remaining task.
-
-    # Snapshot for the same shared-path reason as the two above. Repair's log
-    # only survives at the shared path when the retry does NOT run; on the
-    # double-failure path the retry overwrites it, and its cost would silently
-    # vanish from the telemetry totals. Observation only.
-    - name: Snapshot the repair stage's execution log
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      env:
-        EXEC_FILE: ${{ steps.review_repair.outputs.execution_file }}
-      run: |
-        set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-repair-snapshot.json" || true
-        fi
-        exit 0
-
-    # The full retry previously fired ~11s after the first attempt ended and
-    # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
-    # never reached the model. Give a transient upstream/rate-limit condition
-    # time to clear before spending another full review.
-    # This step's `if:` must be kept identical to the retry step's `if:`
-    # below (the "Review stage (Sonnet/Opus) — retry" step) — they gate the
-    # same condition, and if they drift the retry could fire without its
-    # back-off delay, reintroducing the "143ms, $0.00, never reached the
-    # model" bug this step exists to prevent.
-    - name: Back off before the review retry
-      if: >-
-        steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
-        steps.review_repair.outputs.structured_output == ''
-      shell: bash
-      run: sleep 45
-
-    # Retry of the Review stage — runs only if the first attempt failed or
-    # returned no structured_output (the intermittent claude-code-action miss).
-    # Same model/tools/schema/credentials; a condensed prompt that re-runs the
-    # full review and stresses that emitting structured output is mandatory.
-    # Keep the model/tools/schema in sync with the Review stage step above.
-    # This step's `if:` must also be kept identical to the "Back off before
-    # the review retry" step's `if:` above, so the retry never fires without
-    # first paying the 45s back-off delay.
-    - name: Review stage (Sonnet/Opus) — retry
-      id: review_retry
-      continue-on-error: true
-      if: >-
-        steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
-        steps.review_repair.outputs.structured_output == ''
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
-      env:
-        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
-        ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
-      with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
-        github_token: ${{ inputs.github-token }}
-        allowed_bots: ${{ inputs.allowed-bots }}
-        plugins: superpowers@superpowers-marketplace
-        plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
-        claude_args: |
-          --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
-        prompt: |
-          This is a RETRY of an automated code review whose previous attempt
-          ended without returning the required structured output. Emitting the
-          structured output as your FINAL action is mandatory this time.
-
-          Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
-          scan + P0-P3 severities + checklist) and `context.md` at the repo root
-          if present. The PR number is in the `PR_NUMBER` environment variable;
-          the PR head is already checked out. Run
-          `gh pr view "$PR_NUMBER" --json title,body,url,number` and `git diff`
-          against the merge base to get the change under review. Read
-          `.ai-review/linked-issues.json` (repo root) if present and use each
-          linked issue's acceptance criteria as the intent contract for Angle
-          H. Attempt to load `/verification-before-completion` and
-          `/requesting-code-review` (best-effort). Read complete file contents,
-          never just the diff hunks. If a `TEST_COMMAND` env var is set (or an
-          obvious test command exists) and the toolchain is available, run it
-          and set `test_execution` accordingly — never claim `passed` without
-          running it. You MAY populate the optional `checklist`,
-          `verification_evidence`, and `test_execution` fields; omit them if
-          you cannot assess them.
-
-          Perform the full review per the rubric, then write `comment_markdown`
-          (findings grouped by severity P0-P3 with "_None._" for empty sections,
-          plus strengths; no leading verdict token / confidence line / HTML
-          marker — the caller prepends its own banner). `counts` must be
-          accurate; a deterministic step recomputes the pass/fail decision.
-
-          Return your assessment via the required structured output schema. Do
-          NOT end your turn without emitting the structured output.
-
-    # When every attempt missed the structured output, the model's final prose
-    # is still in claude-code-action's execution log — a completed review that
-    # would otherwise be discarded (observed: 33 turns / $3.76 thrown away).
-    # Extract it so the inconclusive review carries something a human can act
-    # on. Best-effort throughout: never fails the job, and an empty result just
-    # means the inconclusive notice stays as-is.
-    - name: Salvage unstructured review output
-      id: salvage
-      if: >-
-        steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        steps.review.outputs.structured_output == '' &&
-        steps.review_repair.outputs.structured_output == '' &&
-        steps.review_retry.outputs.structured_output == ''
-      shell: bash
-      env:
-        # A snapshot, not steps.review.outputs.execution_file directly: by
-        # this point in the job that shared path has been overwritten by
-        # review_repair and/or review_retry (see the snapshot step above).
-        REVIEW_EXEC_FILE: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
-        # No snapshot needed here: review_retry is the last claude-code-action
-        # invocation before this step runs, and nothing in between rewrites
-        # the shared execution-log path.
-        RETRY_EXEC_FILE: ${{ steps.review_retry.outputs.execution_file }}
-      run: |
-        # Best-effort only — must never hard-fail the job, so no `set -e`.
-        set -uo pipefail
-        mkdir -p .ai-review
-        OUT=".ai-review/salvaged.md"
-        : > "${OUT}"
-        for f in "${RETRY_EXEC_FILE:-}" "${REVIEW_EXEC_FILE:-}"; do
-          [ -n "${f}" ] && [ -s "${f}" ] || continue
-          # Preferred shape: a stream of events, assistant messages carrying
-          # content blocks. Fall back to a recursive scan for any text block.
-          jq -r '[.[]? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] | last // empty' \
-            "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
-          if [ ! -s "${OUT}" ]; then
-            jq -r '[.. | objects | select(.type? == "text") | .text?] | map(select(. != null)) | last // empty' \
-              "${f}" > "${OUT}" 2>/dev/null || : > "${OUT}"
-          fi
-          [ -s "${OUT}" ] && break
-        done
-        # GitHub caps a review body at 65536 characters; leave room for the
-        # notice wrapper around it.
-        if [ -s "${OUT}" ]; then
-          head -c 50000 "${OUT}" > "${OUT}.trunc" && mv "${OUT}.trunc" "${OUT}"
-          echo "Salvaged $(wc -c < "${OUT}") bytes of unstructured model output."
-        else
-          echo "No unstructured model output could be salvaged."
-        fi
-        exit 0
+        node "${GITHUB_ACTION_PATH}/orchestrator/index.js"
 
     - name: Reset prior review and labels
       id: reset
@@ -1025,10 +619,7 @@ runs:
         CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
         CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
-        REVIEW_JSON: >-
-          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
-          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
-          || steps.review.outputs.structured_output) }}
+        REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
@@ -1043,34 +634,32 @@ runs:
           try {
             review = JSON.parse(process.env.REVIEW_JSON);
           } catch (err) {
-            // Both the review stage and its retry ended without valid
-            // structured output (the intermittent claude-code-action miss).
-            // Degrade gracefully rather than crashing the job: post an explicit
-            // "inconclusive — re-run" review, fail the gate (safe — a review
-            // that didn't complete must not read as pass), and set outputs so
-            // review-gate sees a non-pass verdict. A re-run usually succeeds.
-            core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
+            // The orchestrator failed closed (crash, cap reached, or every
+            // worker/judge round came up empty) and emitted no structured
+            // output. Degrade gracefully rather than crashing the job: post
+            // an explicit "inconclusive — re-run" review, fail the gate
+            // (safe — a review that didn't complete must not read as pass),
+            // and set outputs so review-gate sees a non-pass verdict.
+            core.warning(`Review stage returned no valid structured output: ${err.message}. Publishing an inconclusive result.`);
             let salvaged = "";
             try {
-              salvaged = require("fs").readFileSync(".ai-review/salvaged.md", "utf8").trim();
+              salvaged = require("fs").readFileSync(".ai-review/orchestrator-reason.txt", "utf8").trim();
             } catch (e) {
-              // No salvage file (step skipped, or nothing recoverable).
+              // No reason file (crash before the handler) — the generic body stands.
             }
             const inconclusiveBody = [
               "<!-- ai-review -->",
               "### ⚠️ AI Review — inconclusive (re-run required)",
               "",
-              "The review model did not return a structured result after a",
-              "resume-repair attempt and a full retry (a known intermittent",
-              "`anthropics/claude-code-action` issue). This is **not** a",
-              "code-quality judgment — the review did not complete, so the gate",
-              "fails closed.",
+              "The review orchestrator did not return a structured result.",
+              "This is **not** a code-quality judgment — the review did not",
+              "complete, so the gate fails closed.",
               "",
               "**Re-run the `ai-review` job** to get a verdict.",
               ...(salvaged
                 ? [
                     "",
-                    "<details><summary>Unstructured model output recovered from the run (not a verdict)</summary>",
+                    "<details><summary>Reason recorded by the orchestrator (not a verdict)</summary>",
                     "",
                     salvaged,
                     "",
@@ -1377,12 +966,11 @@ runs:
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
         METRICS_PATH: ${{ github.action_path }}/lib/metrics.js
-        # Snapshots, not the live outputs: claude-code-action writes every
-        # stage's log to the same fixed path, so only the last one survives.
-        CONTEXT_LOG: ${{ runner.temp }}/ai-review-exec-context-snapshot.json
-        REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
-        REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
-        RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
+        # The orchestrator writes one JSON log per stage/worker into this
+        # directory (plus a non-log "_rounds.json" manifest, excluded below)
+        # instead of the old fixed shared-path-per-invocation the previous
+        # serial pipeline snapshotted around.
+        LOG_DIR: ${{ runner.temp }}/ai-review-logs
       with:
         script: |
           const fs = require("fs");
@@ -1396,12 +984,18 @@ runs:
             }
           };
 
-          const metrics = collectMetrics([
-            { name: "context", log: read(process.env.CONTEXT_LOG) },
-            { name: "review", log: read(process.env.REVIEW_LOG) },
-            { name: "review_repair", log: read(process.env.REPAIR_LOG) },
-            { name: "review_retry", log: read(process.env.RETRY_LOG) },
-          ]);
+          const dir = process.env.LOG_DIR;
+          let names = [];
+          try {
+            names = fs.readdirSync(dir).filter((n) => n.endsWith(".json") && n !== "_rounds.json");
+          } catch { /* orchestrator never ran */ }
+
+          const metrics = collectMetrics(
+            names.sort().map((n) => ({
+              name: n.replace(/\.json$/, ""),
+              log: read(require("path").join(dir, n)),
+            }))
+          );
 
           await core.summary.addRaw(renderSummary(metrics)).write();
 

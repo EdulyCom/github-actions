@@ -60,6 +60,13 @@ const setOutput = (name, value) => {
   const prepPack = readJson(".ai-review/context-pack.json", {});
   const diff = readText(".ai-review/diff.patch");
   const linkedIssues = readJson(".ai-review/linked-issues.json", []);
+  // Title/body come from a file, never an env var: a PR body is fully
+  // attacker-controlled multiline text, and routing it through
+  // $GITHUB_OUTPUT/env would recreate the heredoc-forgery hole already
+  // fixed for structured output (see setOutput above). The "Resolve PR
+  // title and body" action.yml step writes this via `gh pr view` redirected
+  // straight to a file — never interpolated into a shell command.
+  const pr = readJson(".ai-review/pr.json", {});
 
   const caps = {
     maxRounds: Number(process.env.MAX_ROUNDS) || 3,
@@ -84,8 +91,8 @@ const setOutput = (name, value) => {
     models,
     isIntentExempt: isIntentExempt(prepPack.changed_files),
     inputs: {
-      prTitle: process.env.PR_TITLE || "",
-      prBody: process.env.PR_BODY || "",
+      prTitle: pr.title || "",
+      prBody: pr.body || "",
       linkedIssues,
       diff,
       prepPack,
