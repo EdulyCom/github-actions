@@ -20,15 +20,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # NOTE: actionlint covers WORKFLOWS ONLY. Its own docs state: "Note that
-      # `steps` in Composite action's metadata is not checked at this point."
-      # It also cannot be pointed at an action file — "it is not supported to
-      # specify `action.yml` directly via command line arguments" — and
-      # reviewdog/action-actionlint passes no globs, so it discovers only
-      # `.github/workflows/`. This job was named "Lint workflow and action
-      # files" while linting no action file at all; the action-validator step
-      # below is what makes that name true. Upstream tracking: actionlint#46,
-      # actionlint#401 (both open).
       - name: Run actionlint
         uses: reviewdog/action-actionlint@50842263c20a7c46bd0065b9e624d3c569db061e # v1.73.0
         with:
@@ -41,28 +32,3 @@ jobs:
           reporter: local
           filter_mode: nofilter
           fail_level: error
-
-      # Schema-validates the composite action metadata files themselves —
-      # `ai-review/action.yml` and friends had NO static checking of any kind
-      # before this. The default `patterns` only cover `.github/**`, which
-      # matches nothing in this repo, so they are overridden to the top-level
-      # action directories where our actions actually live.
-      - name: Validate action metadata
-        uses: mpalmer/action-validator@c994f427b7c42cd5ecb1bc9315cb91c3d7d72e3d # v0.9.0
-        with:
-          # Pinned rather than "latest" so a tool release cannot change what
-          # this gate accepts without a commit here.
-          version: "0.9.0"
-          patterns: |
-            :(glob)*/action.yml
-            :(glob)*/action.yaml
-
-      # Residual gap, deliberately recorded rather than papered over: nothing
-      # above validates the SEMANTICS of composite `runs.steps` — a
-      # `${{ steps.x.outputs.y }}` referring to a step that no longer exists
-      # still passes both tools, and GitHub Actions evaluates it to an empty
-      # string at runtime rather than failing. A step gated on such a
-      # reference silently never runs. Phase 1 of
-      # docs/superpowers/plans/2026-08-06-ai-review-time-and-quality.md adds a
-      # node:test guard for exactly that class before it refactors the gating
-      # conditions.

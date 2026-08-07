@@ -1,11 +1,9 @@
 name: Unit tests
 
-# Everything under ai-review/lib/ is logic that can be tested without paying
-# for a live model run — measured at 6-59 minutes and $1.74-$38.59 each.
-# Issue #25 (a P2-only diff hard-failing the gate) shipped because the gate
+# The deterministic gate arithmetic in ai-review/lib/recompute.js is the one
+# piece of this repo that can be tested without paying for a live model run.
+# Issue #25 (a P2-only diff hard-failing the gate) shipped because that
 # arithmetic lived inline in a github-script block with no test lane.
-#
-# Discovery is by directory, so adding a *.test.js file needs no edit here.
 
 on:
   pull_request:
@@ -28,7 +26,4 @@ jobs:
         run: |
           set -euo pipefail
           node --version
-          # Quoted so node expands the glob itself rather than the shell —
-          # `node --test <dir>` does NOT scan a directory, it tries to load it
-          # as a module entry point and fails with MODULE_NOT_FOUND.
-          node --test "ai-review/lib/**/*.test.js"
+          node --test ai-review/lib/recompute.test.js

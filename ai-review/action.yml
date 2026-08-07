@@ -486,24 +486,6 @@ runs:
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
           output is the factual context.md summary — a later stage does the review.
 
-    # Same shared-path problem the review snapshot below documents: every
-    # claude-code-action step writes its execution log to the one fixed path
-    # "${RUNNER_TEMP}/claude-execution-output.json", so the Review stage
-    # destroys the Context stage's log before the telemetry step can read it.
-    # Snapshot it now, while it is still context's own output. Observation
-    # only — never fails the job, never affects the verdict.
-    - name: Snapshot the context stage's execution log
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      env:
-        EXEC_FILE: ${{ steps.context.outputs.execution_file }}
-      run: |
-        set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-context-snapshot.json" || true
-        fi
-        exit 0
-
     - name: Verify context.md handoff
       id: context-verify
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -759,22 +741,6 @@ runs:
           token, confidence line, or HTML marker).
 
           Emitting the structured output is your only remaining task.
-
-    # Snapshot for the same shared-path reason as the two above. Repair's log
-    # only survives at the shared path when the retry does NOT run; on the
-    # double-failure path the retry overwrites it, and its cost would silently
-    # vanish from the telemetry totals. Observation only.
-    - name: Snapshot the repair stage's execution log
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      shell: bash
-      env:
-        EXEC_FILE: ${{ steps.review_repair.outputs.execution_file }}
-      run: |
-        set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-repair-snapshot.json" || true
-        fi
-        exit 0
 
     # The full retry previously fired ~11s after the first attempt ended and
     # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
@@ -1359,52 +1325,3 @@ runs:
           core.setOutput("confidence", String(confidence));
           core.setOutput("merge_risk", mergeRisk);
           core.setOutput("review_event", reviewEvent);
-
-    # Per-stage turns / cost / duration, rendered to the job summary. Pure
-    # observation: runs after the verdict is published, never fails the job,
-    # and touches nothing the gate depends on.
-    #
-    # Why this exists: the Review stage was measured at 56m04s of a 59m job
-    # (138 turns, $31.01) while the repair/retry/salvage chain contributed
-    # zero — but that took an archaeology dig through raw runner logs to
-    # establish, and two of the numbers derived that way were wrong. Every
-    # phase gate in docs/superpowers/plans/2026-08-06-ai-review-time-and-quality.md
-    # is a number this step produces.
-    - name: Pipeline telemetry
-      id: telemetry
-      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      continue-on-error: true
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-      env:
-        METRICS_PATH: ${{ github.action_path }}/lib/metrics.js
-        # Snapshots, not the live outputs: claude-code-action writes every
-        # stage's log to the same fixed path, so only the last one survives.
-        CONTEXT_LOG: ${{ runner.temp }}/ai-review-exec-context-snapshot.json
-        REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
-        REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
-        RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
-      with:
-        script: |
-          const fs = require("fs");
-          const { collectMetrics, renderSummary } = require(process.env.METRICS_PATH);
-
-          const read = (p) => {
-            try {
-              return JSON.parse(fs.readFileSync(p, "utf8"));
-            } catch {
-              return null; // absent (stage skipped) or unreadable — both are "not run"
-            }
-          };
-
-          const metrics = collectMetrics([
-            { name: "context", log: read(process.env.CONTEXT_LOG) },
-            { name: "review", log: read(process.env.REVIEW_LOG) },
-            { name: "review_repair", log: read(process.env.REPAIR_LOG) },
-            { name: "review_retry", log: read(process.env.RETRY_LOG) },
-          ]);
-
-          await core.summary.addRaw(renderSummary(metrics)).write();
-
-          // Also in the plain log, so a run's numbers survive summary retention
-          // and can be scraped for the baseline table.
-          core.info(`ai-review-metrics ${JSON.stringify(metrics.totals)}`);
