@@ -198,11 +198,17 @@ you are satisfied with the comparison.
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
 | `update-linked-issues` | When `true`, the linked issues the PR closes are resolved and evaluated. ai-review only reads them; it never mutates issue state. | No | `true` |
 
-Kept for backward compatibility but **inert** — setting them has no effect:
+Kept for backward compatibility and **inert in `primary` mode** —
 `opus-model` (superseded by `orchestrator-model`), `sonnet-files-threshold`
 and `sonnet-churn-threshold` (the diff-size router they fed is gone; each
 round's plan sizes itself), and `allowed-bots` (the orchestrator has no
 actor check, so bot-authored PRs are reviewed normally).
+
+> **They are still live in `shadow` mode, which is the default.** The serial
+> control arm governs the published verdict while shadowing, and it still
+> reads all four — so setting `sonnet-files-threshold` today changes which
+> model gates your merges. Treat them as inert only once you have set
+> `orchestrator-mode: primary`.
 
 ## Outputs
 
