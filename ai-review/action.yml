@@ -161,19 +161,21 @@ inputs:
     required: false
   test-command:
     description: >
-      Optional explicit command the Review stage runs to execute the
-      project's tests (e.g. `npm test`, `pytest -q`). Best-effort: the
-      caller workflow must install the toolchain/dependencies BEFORE this
-      action so the command can run. When empty, the model may still
-      auto-detect and run an obvious test command, and skips gracefully
-      (reporting `test_execution: skipped`) when no toolchain is present.
+      DEPRECATED — accepted but ignored; the Review stage no longer runs
+      tests. It never successfully did: no consumer ever set this input, no
+      caller installs a toolchain before the action, and every sampled run
+      reported `test_execution: skipped`. Meanwhile the allowlist needed to
+      support it granted the review session shell access to npm/npx/yarn/
+      pnpm/node/make/pytest while checked out at the PR head commit — a
+      code-execution path from PR content onto the runner, for a capability
+      that never worked. Tests run in the caller's own CI lanes downstream
+      of this gate. Still accepted so existing callers do not break; will be
+      deleted in a future release. See ai-review/README.md.
     required: false
   test-hint:
     description: >
-      Optional free-text guidance passed to the Review stage about how to
-      build/run/verify this project (setup steps, which suites matter,
-      known-flaky areas). Interpolated into the review prompt alongside
-      `test-command`.
+      DEPRECATED — accepted but ignored, for the same reason as
+      `test-command`. See that input's description.
     required: false
   update-pr-body:
     description: >
@@ -575,8 +577,6 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
-        TEST_COMMAND: ${{ inputs.test-command }}
-        TEST_HINT: ${{ inputs.test-hint }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token, for the same
@@ -590,7 +590,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -640,20 +640,12 @@ runs:
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
           the rubric's severity definitions, and count them.
 
-          Run the tests, best-effort. The caller is expected to have
-          installed the project's toolchain/dependencies before this action.
-          If `TEST_COMMAND` (env) is set, run exactly that; otherwise
-          auto-detect an obvious command (e.g. `npm test`/`npm run test`,
-          `pytest -q`, `make test`) from the repo's manifests. Consider
-          `TEST_HINT` (env) for setup/guidance. Set `test_execution` to:
-          `passed` (command ran, exit 0), `failed` (command ran, non-zero),
-          `skipped` (no toolchain/deps available, or command errored on
-          environment — not a real test failure), or `not_run` (no test
-          command exists / diff is not testable). NEVER report `passed`
-          without having actually run the command and read its output this
-          session (`/verification-before-completion`). When you run tests,
-          record the command and its key output line(s) in
-          `verification_evidence`.
+          Do NOT run the project's tests, and do NOT probe for a toolchain
+          or package manager. Set `test_execution: "skipped"` and move on.
+          You have no shell access to any test runner — the allowlist above
+          grants none — so an attempt can only waste turns on a gate that
+          blocks merges. The caller's own CI lanes run the tests downstream
+          of this gate and are the authoritative signal.
 
           Also assess test quality per the rubric's Testing section: are
           there tests for the changed logic (`no_tests_for_changed_logic`),
@@ -803,7 +795,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(pnpm:*),Bash(corepack:*),Bash(pytest:*),Bash(make:*)"
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
@@ -820,12 +812,11 @@ runs:
           linked issue's acceptance criteria as the intent contract for Angle
           H. Attempt to load `/verification-before-completion` and
           `/requesting-code-review` (best-effort). Read complete file contents,
-          never just the diff hunks. If a `TEST_COMMAND` env var is set (or an
-          obvious test command exists) and the toolchain is available, run it
-          and set `test_execution` accordingly — never claim `passed` without
-          running it. You MAY populate the optional `checklist`,
-          `verification_evidence`, and `test_execution` fields; omit them if
-          you cannot assess them.
+          never just the diff hunks. Do NOT run tests or probe for a
+          toolchain — set `test_execution: "skipped"` (you have no shell
+          access to a test runner). You MAY populate the optional
+          `checklist` and `verification_evidence` fields; omit them if you
+          cannot assess them.
 
           Perform the full review per the rubric, then write `comment_markdown`
           (findings grouped by severity P0-P3 with "_None._" for empty sections,

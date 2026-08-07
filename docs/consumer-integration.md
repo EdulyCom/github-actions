@@ -71,14 +71,11 @@ jobs:
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
-      # OPTIONAL: to let the review actually RUN your tests (best-effort),
-      # install the toolchain/deps BEFORE the action and pass `test-command`.
-      # ai-review ships no toolchain of its own. Omit this and it reviews
-      # statically, as before.
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-      - run: npm ci
+      # Do NOT install a toolchain here. The review does not run tests (see
+      # ai-review/README.md "Why the review no longer runs tests"), so
+      # `setup-node` + `npm ci` would only add runner minutes to the job
+      # that gates every downstream lane. Your own test jobs below — behind
+      # `needs: [review-gate]` — are the authoritative test signal.
       - uses: EdulyCom/github-actions/ai-review@main
         id: review
         with:

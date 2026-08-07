@@ -310,18 +310,20 @@ Flag as P0 (breaks feature) or P1 (incorrect behavior).
 | Performance | ⚠️ Benchmark if possible | ✅ If query-heavy | ⚠️ If UX-impacting |
 | Docs/Config | — | — | — |
 
-**Test execution:** you can and should RUN the tests (the review session allowlists
-`npm`/`npx`/`pnpm`/`yarn`/`pytest`/`make`/`node`; the caller installs deps first). If
-the `TEST_COMMAND` env var is set, run exactly that; otherwise auto-detect (e.g. Nx
-affected, turbo, plain `npm test`, `pytest -q`, `make test`). Consider the `TEST_HINT`
-env var for setup guidance. Record the outcome in `test_execution`
-(`passed`/`failed`/`skipped`/`not_run`) and, whenever you run anything, capture the
-command and its key output in `verification_evidence`. Apply
-`/verification-before-completion`: NEVER report `passed` (or claim any check is green)
-without having run it and read the output this session — an unverified "passed" is
-treated as unverified and penalized. If no command is detected and none is configured,
-report `test_execution: not_run` and P3 ("tests skipped — no command detected or
-configured") and continue.
+**Test execution: do NOT run tests.** Report `test_execution: "skipped"` and spend no
+turns looking for a toolchain or package manager. The review session no longer
+allowlists `npm`/`npx`/`pnpm`/`yarn`/`pytest`/`make`/`node`, so no attempt can succeed.
+
+This is not a gap in the review. Running the suite was never this stage's job — the
+caller's own CI lanes run the tests downstream of this gate, sharded and
+coverage-enforced, and a failing suite blocks the merge there. Removing the runners
+from the allowlist also closes a code-execution path: this stage is checked out at the
+**PR head commit**, so shell access to a package manager meant PR-authored scripts
+could execute on the runner.
+
+Assess test *quality* statically, as below. That judgment comes from reading the diff
+and the repo's existing test files, it still blocks the gate, and it is the part of
+"testing" this review is actually good at.
 
 **Test gap identification (from the diff):**
 
