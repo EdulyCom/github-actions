@@ -117,16 +117,22 @@ inputs:
       Max changed-file count for a diff to still be considered "tiny" and
       routed to `sonnet-model`. A diff qualifies for Sonnet only when it
       is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to `opus-model`.
+      larger routes to `opus-model`. Restored to 15 (from the 3 set by
+      7168977) — that narrowing sent nearly every real PR to Opus and moved
+      the review stage from ~10-13 min to a 35-min median / 59-min max, with
+      jobs killed at callers' 60-min cap. Lower it again only once the
+      review stage reviews in parallel, at which point Opus-by-default no
+      longer costs wall-clock.
     required: false
-    default: "3"
+    default: "15"
   sonnet-churn-threshold:
     description: >
       Max changed-line count (additions + deletions) for a diff to still
       be considered "tiny" and routed to `sonnet-model`. Applied together
-      with `sonnet-files-threshold` (both must hold for Sonnet).
+      with `sonnet-files-threshold` (both must hold for Sonnet). Restored to
+      400 alongside `sonnet-files-threshold` — see the note there.
     required: false
-    default: "60"
+    default: "400"
   haiku-model:
     description: >
       Model ID used by the context stage (this phase) to read the diff and changed
@@ -376,11 +382,19 @@ runs:
           # bug — do not re-flag it.
           CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
         fi
-        # Opus-by-default routing: the review stage prefers Opus for its
-        # stronger reasoning, dropping to Sonnet ONLY for trivially tiny
-        # diffs (at or under BOTH thresholds). Everything else → Opus.
-        FILES_MAX="${FILES_MAX:-3}"
-        CHURN_MAX="${CHURN_MAX:-60}"
+        # Sonnet for ordinary diffs; Opus once a diff exceeds EITHER
+        # threshold. 7168977 narrowed the Sonnet band from 15/400 to 3/60,
+        # which routed nearly every real PR to Opus and took the review
+        # stage from ~10-13 min to a 35-min median (59-min max, jobs killed
+        # at callers' 60-min cap). Every consumer picked that up at once
+        # because they track this action at @main.
+        #
+        # 15/400 is a STOPGAP trading review depth for wall-clock. The real
+        # fix is reviewing in parallel rather than in series — once the
+        # review stage fans out, Opus-by-default costs no extra wall-clock
+        # and these should come back down. Not the long-term answer.
+        FILES_MAX="${FILES_MAX:-15}"
+        CHURN_MAX="${CHURN_MAX:-400}"
         if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
           MODEL="${SONNET:-claude-sonnet-5}"
         else
