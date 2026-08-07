@@ -10,6 +10,35 @@
 
 **Spec:** [`docs/superpowers/specs/2026-08-06-ai-review-orchestrator-design.md`](../specs/2026-08-06-ai-review-orchestrator-design.md) (commits `8930049`, `f488d60`, `2654a53`).
 
+> ## ⚠️ This plan has been executed — the shipped code is authoritative
+>
+> All ten tasks are implemented, reviewed, and merged on `feat/ai-review-telemetry`.
+> Nine review findings were fixed during execution, and **most originated in this
+> plan's own code blocks**. Re-running a task from this document verbatim would
+> reintroduce them. The corrections, each with its commit range, are recorded in
+> `.superpowers/sdd/2026-08-06-ai-review-orchestrator/progress.md`; the shipped
+> source is the source of truth.
+>
+> The ones that would bite hardest if re-applied from this text:
+>
+> - **Task 1** — `allowedTools: []` alongside a schema deadlocks every session. The
+>   SDK ends a schema-constrained turn by calling a tool named `StructuredOutput`;
+>   it must be allowlisted. Fixed in `session.js` (folded into this plan).
+> - **Task 2** — `dedupe` dropped malformed entries silently; it now reports them in
+>   a third `malformed` array.
+> - **Task 4** — an empty `task.focus` made the coverage check a no-op; a scan worker
+>   that examined zero files is now a dead worker.
+> - **Task 7** — log names collided across rounds, so later rounds overwrote earlier
+>   telemetry; and `task.id` reached filenames unsanitised (`plan-schema.js` now
+>   constrains it to `/^[A-Za-z0-9_-]{1,64}$/`).
+> - **Task 8** — `/^docs\//` matched on path prefix, so `docs/deploy.sh` skipped a
+>   mandatory review angle; `.mdx` was wrongly treated as inert; `setOutput`'s
+>   heredoc delimiter was forgeable.
+> - **Task 9** — the biggest gap: this plan assumed a prep step from a *different,
+>   unstarted* plan already existed. Nothing produced `.ai-review/context-pack.json`
+>   or `diff.patch`, so the gate would have run blind on every PR. The prep step is
+>   now part of `action.yml`.
+
 ## Global Constraints
 
 - **`ai-review/lib/` stays dependency-free.** Tests use `node:test`, `node:assert/strict`, `node:fs`, `node:path` only. The SDK dependency is confined to `ai-review/orchestrator/`.
