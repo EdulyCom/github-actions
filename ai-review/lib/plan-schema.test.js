@@ -86,3 +86,24 @@ test("requireFloor: false skips the floor check for collection rounds", () => {
   assert.equal(validatePlan(collect, { maxTasks: 12, requireFloor: false }).ok, true);
   assert.equal(validatePlan(collect, { maxTasks: 12 }).ok, false, "the floor still applies by default");
 });
+
+test("rejects a task id that could escape a filesystem path", () => {
+  const res = validatePlan(plan({ tasks: [scan({ id: "../../../etc/passwd" })] }), { maxTasks: 12 });
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((v) => v.includes("id")),
+    "the planner reads an attacker-controlled diff; ids reach log filenames");
+});
+
+test("rejects a task id with a path separator or a space", () => {
+  for (const bad of ["a/b", "a\\b", "a b", "a.b"]) {
+    const res = validatePlan(plan({ tasks: [scan({ id: bad })] }), { maxTasks: 12 });
+    assert.equal(res.ok, false, `id '${bad}' should be rejected`);
+  }
+});
+
+test("accepts ordinary task ids", () => {
+  for (const good of ["t1", "scan-A", "collect_1", "S1"]) {
+    const res = validatePlan(plan({ tasks: [scan({ id: good })] }), { maxTasks: 12 });
+    assert.equal(res.ok, true, `id '${good}' should be accepted: ${JSON.stringify(res.violations)}`);
+  }
+});

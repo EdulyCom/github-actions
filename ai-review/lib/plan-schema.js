@@ -18,6 +18,16 @@ const ALL_ANGLES = Object.freeze([...FLOOR_ANGLES, "H"]);
 const KINDS = Object.freeze(["collect", "scan", "verify", "test"]);
 const MODELS = Object.freeze(["haiku", "sonnet"]);
 
+// task.id is Opus-authored from a plan built while reading an
+// attacker-controlled PR diff — the same threat model session.js already
+// defends against with settingSources: []. This id later becomes a log
+// filename (pipeline.js writes `${round}:worker:${task.id}`, and index.js
+// persists each log to `${name}.json`), so an unconstrained id is a
+// prompt-injectable path write (e.g. "../../../x"). Constraining the shape
+// here, where task validity is already policed, makes id safe for every
+// downstream consumer rather than relying on a filename-writer's regex.
+const TASK_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
 /**
  * @param {unknown} plan
  * @param {{maxTasks: number}} options
@@ -59,6 +69,11 @@ function validatePlan(plan, options) {
     }
     if (typeof t.id !== "string" || t.id.length === 0) {
       violations.push(`${where}.id must be a non-empty string`);
+    } else if (!TASK_ID_PATTERN.test(t.id)) {
+      violations.push(
+        `${where}.id '${t.id}' must match ${TASK_ID_PATTERN} — it becomes a log filename ` +
+          `and the planner reads an attacker-controlled diff`
+      );
     } else if (seenIds.has(t.id)) {
       violations.push(`${where}.id '${t.id}' is a duplicate`);
     } else {
