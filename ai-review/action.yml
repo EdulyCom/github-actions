@@ -502,6 +502,24 @@ runs:
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
           output is the factual context.md summary — a later stage does the review.
 
+    # Same shared-path problem the review snapshot below documents: every
+    # claude-code-action step writes its execution log to the one fixed path
+    # "${RUNNER_TEMP}/claude-execution-output.json", so the Review stage
+    # destroys the Context stage's log before the telemetry step can read it.
+    # Snapshot it now, while it is still context's own output. Observation
+    # only — never fails the job, never affects the verdict.
+    - name: Snapshot the context stage's execution log
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        EXEC_FILE: ${{ steps.context.outputs.execution_file }}
+      run: |
+        set -uo pipefail
+        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
+          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-context-snapshot.json" || true
+        fi
+        exit 0
+
     - name: Verify context.md handoff
       id: context-verify
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -747,6 +765,22 @@ runs:
           token, confidence line, or HTML marker).
 
           Emitting the structured output is your only remaining task.
+
+    # Snapshot for the same shared-path reason as the two above. Repair's log
+    # only survives at the shared path when the retry does NOT run; on the
+    # double-failure path the retry overwrites it, and its cost would silently
+    # vanish from the telemetry totals. Observation only.
+    - name: Snapshot the repair stage's execution log
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        EXEC_FILE: ${{ steps.review_repair.outputs.execution_file }}
+      run: |
+        set -uo pipefail
+        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
+          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-repair-snapshot.json" || true
+        fi
+        exit 0
 
     # The full retry previously fired ~11s after the first attempt ended and
     # was observed returning in 143ms with num_turns 1 and $0.00 cost — it
@@ -1001,9 +1035,21 @@ runs:
           || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
           || steps.review.outputs.structured_output) }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
+        PUBLISH_LIB_PATH: ${{ github.action_path }}/lib/publish.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
+          const fs = require("fs");
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
+          const {
+            stripLeadingBannerArtifacts,
+            buildReviewBody,
+            buildInconclusiveBody,
+            tickVerifiedBoxes,
+            buildStatusBlock,
+            upsertStatusBlock,
+          } = require(process.env.PUBLISH_LIB_PATH);
+
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
           const failLabel = process.env.FAIL_LABEL;
@@ -1023,32 +1069,11 @@ runs:
             core.warning(`Review stage returned no valid structured output after retry: ${err.message}. Publishing an inconclusive result.`);
             let salvaged = "";
             try {
-              salvaged = require("fs").readFileSync(".ai-review/salvaged.md", "utf8").trim();
+              salvaged = fs.readFileSync(".ai-review/salvaged.md", "utf8").trim();
             } catch (e) {
               // No salvage file (step skipped, or nothing recoverable).
             }
-            const inconclusiveBody = [
-              "<!-- ai-review -->",
-              "### ⚠️ AI Review — inconclusive (re-run required)",
-              "",
-              "The review model did not return a structured result after a",
-              "resume-repair attempt and a full retry (a known intermittent",
-              "`anthropics/claude-code-action` issue). This is **not** a",
-              "code-quality judgment — the review did not complete, so the gate",
-              "fails closed.",
-              "",
-              "**Re-run the `ai-review` job** to get a verdict.",
-              ...(salvaged
-                ? [
-                    "",
-                    "<details><summary>Unstructured model output recovered from the run (not a verdict)</summary>",
-                    "",
-                    salvaged,
-                    "",
-                    "</details>",
-                  ]
-                : []),
-            ].join("\n");
+            const inconclusiveBody = buildInconclusiveBody(salvaged);
             try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -1076,8 +1101,6 @@ runs:
             core.setOutput("review_event", "REQUEST_CHANGES");
             return;
           }
-
-          const { recompute } = require(process.env.RECOMPUTE_PATH);
 
           // verification_evidence is still needed below by the PR-body status
           // block, independently of the verdict computation.
@@ -1112,73 +1135,17 @@ runs:
             core.info(`Blocking conditions: ${blockers.join("; ")}`);
           }
 
-          const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
-          const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
-
-          // State the machine reason for every fail. Without this, a
-          // deterministic override reads as unexplained and gets attributed to
-          // whatever the model happened to write about in comment_markdown —
-          // exactly how issue #25 came to be filed as a test-toolchain bug.
-          const reasonNote =
-            verdict === "fail" && blockers.length
-              ? `\n> **Why the gate failed:** ${blockers.join("; ")}.\n`
-              : "";
-
-          const mismatchNote =
-            review.verdict && review.verdict !== verdict
-              ? `\n> ⚠️ Deterministic recomputation (**${verdict}**) overrides the model's self-reported verdict (**${review.verdict}**).\n`
-              : "";
-
-          // P2/P3 are advisory and never block (rubric.md §Severity). Say so
-          // on a pass, so a reader does not wonder why nits were tolerated.
-          const advisoryNote =
-            verdict === "pass" && counts.p2 + counts.p3 > 0
-              ? `\n> ${counts.p2} P2 / ${counts.p3} P3 finding(s) noted — non-blocking.\n`
-              : "";
-
-          // The review-stage prompt instructs the model not to prepend its own
-          // verdict token / confidence-merge-risk line / HTML marker to
-          // comment_markdown (this step owns that banner), but model
-          // instruction-following is not guaranteed — strip any leading copy of
-          // those artifacts defensively so a non-compliant response can't
-          // duplicate the banner above it.
-          function stripLeadingBannerArtifacts(markdown) {
-            if (!markdown) return markdown;
-            const verdictTokenRe = /^\*\*(?:✅ PASS|❌ FAIL)\*\*\s*$/;
-            const confidenceLineRe = /^Confidence:\s*\d+\s*·\s*Merge risk:\s*\S+\s*$/i;
-            const htmlCommentRe = /^<!--.*-->\s*$/;
-            const lines = markdown.split("\n");
-            let start = 0;
-            while (start < lines.length) {
-              const line = lines[start];
-              if (
-                line.trim() === "" ||
-                verdictTokenRe.test(line) ||
-                confidenceLineRe.test(line) ||
-                htmlCommentRe.test(line)
-              ) {
-                start += 1;
-                continue;
-              }
-              break;
-            }
-            return lines.slice(start).join("\n");
-          }
-
           const commentBody = stripLeadingBannerArtifacts(review.comment_markdown);
-
-          const body = [
-            "<!-- ai-review -->",
-            `${rejectedBanner}${verdictLine}`,
-            ...(mismatchNote ? [mismatchNote] : []),
-            ...(reasonNote ? [reasonNote] : []),
-            ...(advisoryNote ? [advisoryNote] : []),
-            "",
-            `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
-            `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
-            "",
-            commentBody || "_No review content returned._",
-          ].join("\n");
+          const body = buildReviewBody({
+            verdict,
+            confidence,
+            mergeRisk,
+            counts,
+            intentDeviated,
+            modelVerdict: review.verdict,
+            blockers,
+            commentBody,
+          });
 
           await github.rest.pulls.createReview({
             owner: context.repo.owner,
@@ -1233,80 +1200,9 @@ runs:
               });
               const originalBody = prData.body || "";
 
-              const norm = (s) =>
-                (s || "")
-                  .toLowerCase()
-                  .replace(/[`*_~]/g, "")
-                  .replace(/\s+/g, " ")
-                  .replace(/[.:;,\s]+$/, "")
-                  .trim();
-              // Count verified items per normalized text, so we tick AT MOST as
-              // many boxes as there were verified items with that text. This
-              // stops one verified item from ticking several distinct boxes that
-              // happen to normalize identically (over-tick collision).
-              const verifiedCounts = new Map();
-              for (const i of review.checklist) {
-                if (i && i.status === "verified" && i.text) {
-                  const k = norm(i.text);
-                  verifiedCounts.set(k, (verifiedCounts.get(k) || 0) + 1);
-                }
-              }
-
-              // Tick matching UNCHECKED boxes only; never untick a human's box.
-              const checkboxRe = /^(\s*[-*]\s*)\[ \](\s*)(.+)$/;
-              let ticks = 0;
-              let newBody = originalBody
-                .split("\n")
-                .map((line) => {
-                  const m = line.match(checkboxRe);
-                  if (m) {
-                    const k = norm(m[3]);
-                    const remaining = verifiedCounts.get(k) || 0;
-                    if (remaining > 0) {
-                      verifiedCounts.set(k, remaining - 1);
-                      ticks += 1;
-                      return `${m[1]}[x]${m[2]}${m[3]}`;
-                    }
-                  }
-                  return line;
-                })
-                .join("\n");
-
-              // Build/refresh the managed status block.
-              const icon = (s) =>
-                s === "verified" ? "✅" : s === "failed" ? "❌" : "❔";
-              const itemLines = review.checklist
-                .filter((i) => i && i.text)
-                .map(
-                  (i) =>
-                    `- ${icon(i.status)} ${i.text}${i.evidence ? ` — ${i.evidence}` : ""}`
-                );
-              const evLines = verificationEvidence
-                .filter((e) => e && e.command)
-                .map((e) => `- \`${e.command}\`${e.result ? ` → ${e.result}` : ""}`);
-              const START = "<!-- ai-review-status -->";
-              const END = "<!-- /ai-review-status -->";
-              const blockParts = [
-                START,
-                "#### 🤖 AI Review — checklist verification",
-                ...itemLines,
-              ];
-              if (evLines.length) {
-                blockParts.push("", "_Verification evidence:_", ...evLines);
-              }
-              blockParts.push(
-                "",
-                `_Last updated by ai-review · verdict: ${verdict}._`,
-                END
-              );
-              const block = blockParts.join("\n");
-
-              const blockRe = new RegExp(`${START}[\\s\\S]*?${END}`);
-              if (blockRe.test(newBody)) {
-                newBody = newBody.replace(blockRe, block);
-              } else {
-                newBody = `${newBody.replace(/\s*$/, "")}\n\n${block}\n`;
-              }
+              const { newBody: tickedBody, ticks } = tickVerifiedBoxes(originalBody, review.checklist);
+              const block = buildStatusBlock({ checklist: review.checklist, verificationEvidence, verdict });
+              const newBody = upsertStatusBlock(tickedBody, block);
 
               if (newBody !== originalBody) {
                 await github.rest.pulls.update({
@@ -1330,3 +1226,52 @@ runs:
           core.setOutput("confidence", String(confidence));
           core.setOutput("merge_risk", mergeRisk);
           core.setOutput("review_event", reviewEvent);
+
+    # Per-stage turns / cost / duration, rendered to the job summary. Pure
+    # observation: runs after the verdict is published, never fails the job,
+    # and touches nothing the gate depends on.
+    #
+    # Why this exists: the Review stage was measured at 56m04s of a 59m job
+    # (138 turns, $31.01) while the repair/retry/salvage chain contributed
+    # zero — but that took an archaeology dig through raw runner logs to
+    # establish, and two of the numbers derived that way were wrong. This
+    # step is where every later phase gate in the parallel-review migration
+    # gets its numbers from.
+    - name: Pipeline telemetry
+      id: telemetry
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      continue-on-error: true
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        METRICS_PATH: ${{ github.action_path }}/lib/metrics.js
+        # Snapshots, not the live outputs: claude-code-action writes every
+        # stage's log to the same fixed path, so only the last one survives.
+        CONTEXT_LOG: ${{ runner.temp }}/ai-review-exec-context-snapshot.json
+        REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
+        REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
+        RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
+      with:
+        script: |
+          const fs = require("fs");
+          const { collectMetrics, renderSummary } = require(process.env.METRICS_PATH);
+
+          const read = (p) => {
+            try {
+              return JSON.parse(fs.readFileSync(p, "utf8"));
+            } catch {
+              return null; // absent (stage skipped) or unreadable — both are "not run"
+            }
+          };
+
+          const metrics = collectMetrics([
+            { name: "context", log: read(process.env.CONTEXT_LOG) },
+            { name: "review", log: read(process.env.REVIEW_LOG) },
+            { name: "review_repair", log: read(process.env.REPAIR_LOG) },
+            { name: "review_retry", log: read(process.env.RETRY_LOG) },
+          ]);
+
+          await core.summary.addRaw(renderSummary(metrics)).write();
+
+          // Also in the plain log, so a run's numbers survive summary retention
+          // and can be scraped for the baseline table.
+          core.info(`ai-review-metrics ${JSON.stringify(metrics.totals)}`);
