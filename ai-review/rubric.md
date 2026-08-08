@@ -87,7 +87,13 @@ can't be found: removed guard, dropped error path, narrowed validation, deleted 
 For each function the diff changes, Grep for its callers and check whether the change
 breaks any call site: new precondition, changed return shape, new exception,
 timing/ordering dependency. Check callees too — does a parallel change in the same PR
-make a call unsafe?
+make a call unsafe? This is the one angle with no natural stopping point — bound it by
+risk, not by exhaustiveness: prioritize call sites on security/auth paths, data
+mutation, and public API surface. A Grep match is enough to clear a call site whose
+usage is unambiguous from the match itself (e.g. a simple pass-through); spend a full
+`Read` only where the call site's correctness genuinely can't be judged from the match.
+This angle's bound is the only exception to "no sampling" — every changed file itself
+is still always read in full.
 
 **D — Reuse**
 Flag new code that re-implements something the codebase already has. Grep adjacent files

@@ -584,6 +584,17 @@ runs:
       # session successfully but without emitting structured_output and then
       # exits 1 (upstream flakiness). Don't crash the job — the retry step
       # below re-attempts, and Publish degrades gracefully if both miss.
+      #
+      # --max-turns 200 (in claude_args below): a mechanical backstop for
+      # rubric.md's Angle C bound — that's a prompt-level ask the model can
+      # ignore, this is a hard ceiling. 200 sits well above every observed
+      # legitimate large-diff review (119 turns / 41 files, 78 turns / 70
+      # files) so it shouldn't cut off real work; it exists for pathological
+      # cross-file expansion. Relies on structured-output repair below
+      # (triggers on any empty structured_output with a populated
+      # session_id, regardless of cause) to salvage a max-turns cutoff the
+      # same way it salvages any other missing-output ending — not verified
+      # against a live max-turns exit, since that requires an actual run.
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
@@ -608,6 +619,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
+          --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
@@ -649,10 +661,13 @@ runs:
           at the PR head commit; diff it against the merge-base with the
           repository's default branch (discover the default branch yourself,
           e.g. via `git symbolic-ref refs/remotes/origin/HEAD`). Read the
-          COMPLETE contents of every changed file (and any caller/callee you
-          need to judge correctness) with `Read` — never sample, truncate, or
-          reason from the diff hunks alone. There is no size cap; large files
-          are why this diff was routed to the stronger model.
+          COMPLETE contents of every changed file with `Read` — never sample,
+          truncate, or reason from the diff hunks alone. There is no size cap
+          on changed files; large files are why this diff was routed to the
+          stronger model. For callers/callees outside the diff (Angle C),
+          follow the rubric's risk-based bound instead of reading every call
+          site in full — that angle has no natural stopping point and is the
+          one place exhaustiveness is not the goal.
 
           Perform the full 8-angle scan from the rubric against the diff.
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
@@ -829,6 +844,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
+          --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
@@ -913,6 +929,57 @@ runs:
         fi
         exit 0
 
+    - name: Refresh author token
+      id: author-refresh
+      # The Review stage above can run 30-60+ minutes on a large diff (Opus,
+      # no size cap on file reads — see rubric.md). The Author token minted
+      # at job start is a GitHub App installation token with a fixed ~1-hour
+      # TTL that create-github-app-token cannot extend; reusing it here has
+      # cost a fully-computed review, discarded on a 401 "Bad credentials"
+      # from the Reset/Publish steps below once that hour elapsed. Mint a
+      # fresh one right before they run instead.
+      # continue-on-error: this call itself can transiently fail (5xx, rate
+      # limit) — after an hour of paid Opus review, a hard failure here would
+      # reproduce the exact bug this step exists to prevent, just via a new
+      # trigger. identity-refresh below falls back to the original app token
+      # rather than failing the job.
+      continue-on-error: true
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true' && inputs.app-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        permission-pull-requests: write
+        permission-issues: write
+
+    - name: Resolve fresh author token
+      id: identity-refresh
+      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        FRESH_APP_TOKEN: ${{ steps.author-refresh.outputs.token }}
+        # Fallback tier 2: the original job-start App token. Same bot
+        # identity as AUTHOR_LOGIN below (unlike FALLBACK_TOKEN), so a mint
+        # failure here doesn't post under a different identity than Reset
+        # dismisses — that would orphan a stale review that permanently
+        # blocks merge. Fine on a sub-hour run; on an hour-plus run this
+        # falls through to the same 401 the original bug hit — no worse
+        # than today.
+        ORIGINAL_APP_TOKEN: ${{ steps.author.outputs.token }}
+        FALLBACK_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -n "${FRESH_APP_TOKEN}" ]; then
+          echo "::add-mask::${FRESH_APP_TOKEN}"
+          echo "author-token=${FRESH_APP_TOKEN}" >> "${GITHUB_OUTPUT}"
+        elif [ -n "${ORIGINAL_APP_TOKEN}" ]; then
+          echo "::add-mask::${ORIGINAL_APP_TOKEN}"
+          echo "author-token=${ORIGINAL_APP_TOKEN}" >> "${GITHUB_OUTPUT}"
+        else
+          echo "::add-mask::${FALLBACK_TOKEN}"
+          echo "author-token=${FALLBACK_TOKEN}" >> "${GITHUB_OUTPUT}"
+        fi
+
     - name: Reset prior review and labels
       id: reset
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -925,7 +992,7 @@ runs:
         QA_PASS_LABEL: ${{ inputs.qa-pass-label }}
         QA_FAIL_LABEL: ${{ inputs.qa-fail-label }}
       with:
-        github-token: ${{ steps.identity.outputs.author-token }}
+        github-token: ${{ steps.identity-refresh.outputs.author-token }}
         script: |
           const prNumber = Number(process.env.PR_NUMBER);
           const authorLogin = process.env.AUTHOR_LOGIN;
@@ -1037,7 +1104,7 @@ runs:
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
         PUBLISH_LIB_PATH: ${{ github.action_path }}/lib/publish.js
       with:
-        github-token: ${{ steps.identity.outputs.author-token }}
+        github-token: ${{ steps.identity-refresh.outputs.author-token }}
         script: |
           const fs = require("fs");
           const { recompute } = require(process.env.RECOMPUTE_PATH);
