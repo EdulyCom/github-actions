@@ -53,12 +53,13 @@ injection-safety rule.
 7. **Checkout / compute diff stats and route model** — checks out the PR
    head commit and routes ordinary diffs to `sonnet-model`, escalating to
    `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
-   (15) or `sonnet-churn-threshold` (400). These were briefly 3/60, which
+   (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
    sent nearly every real PR to Opus and moved the review stage from
-   ~10-13 min to a 35-min median; 15/400 is a **stopgap** trading some
-   review depth for wall-clock. The intended fix is reviewing in parallel
-   rather than in series — once that lands, Opus-by-default costs no extra
-   wall-clock and the thresholds should come back down.
+   ~10-13 min to a 35-min median. Widened 15/400 → 25/800 after measuring
+   682 review jobs across the consumer repos: 89% of all traffic still
+   routed to Opus, and Opus runs cost 3x the wall-clock and 4x the spend of
+   Sonnet ones. Still a **stopgap** — the real fix is reviewing in parallel
+   rather than in series, and both thresholds are removed once that lands.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
@@ -138,8 +139,11 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
-| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `15` |
-| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `400` |
+| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `25` |
+| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `800` |
+| `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
+| `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
+| `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
