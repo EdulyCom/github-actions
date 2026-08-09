@@ -36,6 +36,14 @@ jobs:
         id: r
         uses: ./ai-review
         with:
+          # DIAGNOSTIC (2026-08-09): run 31317613715 was killed at 30m17s with
+          # the Haiku context stage holding 100% of model time — 27m27s of
+          # silence, num_turns 1, zero tool calls, and no context.md written.
+          # Disabling it here isolates the review stage so we can see whether
+          # it completes cleanly on its own. Flip back to 'true' once the
+          # stall is understood, or delete the stage outright if the parallel
+          # design folds it into deterministic prep (spec §11 open question 3).
+          enable-context-stage: "false"
           pr-number: ${{ inputs.pr_number }}
           app-id: ${{ vars.MTM_BOT_APP_ID }}
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}

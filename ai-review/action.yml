@@ -142,6 +142,27 @@ inputs:
       parameter, so no stage running this model may pass `--effort`.
     required: false
     default: "claude-haiku-4-5"
+  enable-context-stage:
+    description: >
+      When 'true' (default) the Haiku context stage runs and writes
+      `context.md` for the review stage to read "if present". Set to 'false'
+      to skip it entirely.
+
+      Escape hatch, added after a measured stall: on run 31317613715 this
+      stage sat silent for 27m27s between "Claude Code initialized" and its
+      result, returned `num_turns: 1` with zero tool calls, wrote no
+      `context.md` at all, and consumed 100% of the job's model time before
+      the caller's timeout killed the run. Two earlier 85-min jobs showed the
+      same shape with `duration_ms` within 1.2% of this one, which points at
+      a fixed retry/timeout ceiling rather than ordinary slowness.
+      `--fallback-model` does not rescue it.
+
+      The stage is already best-effort (`continue-on-error`) and its output is
+      already optional, so disabling it removes a wall-clock risk without
+      changing the gate's contract. Defaults to 'true' so no consumer
+      behaviour changes on upgrade.
+    required: false
+    default: "true"
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
@@ -454,7 +475,10 @@ runs:
 
     - name: Context stage (Haiku)
       id: context
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        inputs.enable-context-stage == 'true'
       # continue-on-error: context.md is a non-essential optimization — the
       # Review stage reads it only "if present" and works without it. A flaky
       # Anthropic gateway or plugin-marketplace load can hang/error this cheap
@@ -539,7 +563,10 @@ runs:
 
     - name: Verify context.md handoff
       id: context-verify
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        inputs.enable-context-stage == 'true'
       shell: bash
       run: |
         set -euo pipefail
