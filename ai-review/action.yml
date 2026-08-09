@@ -624,6 +624,11 @@ runs:
       # stages, producing 85-min jobs with turns:3, $0 and zero tool calls.
       # The list is ordered and the primary is re-tried each turn, so a
       # transient overload costs one turn instead of half an hour.
+      #
+      # No entry may equal the routed primary, or that entry is a no-op:
+      # routing picks opus-model OR sonnet-model, so the fallbacks are the
+      # previous generation of each tier (Opus 4.8 first, same tier as the
+      # common Opus primary; then Sonnet 4.6).
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
@@ -648,7 +653,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --fallback-model claude-opus-4-8,claude-sonnet-5
+          --fallback-model claude-opus-4-8,claude-sonnet-4-6
           --effort high
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
@@ -919,7 +924,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --fallback-model claude-opus-4-8,claude-sonnet-5
+          --fallback-model claude-opus-4-8,claude-sonnet-4-6
           --effort high
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
