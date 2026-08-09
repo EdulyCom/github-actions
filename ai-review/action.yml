@@ -163,6 +163,25 @@ inputs:
       behaviour changes on upgrade.
     required: false
     default: "true"
+  api-timeout-ms:
+    description: >-
+      Per-request timeout in milliseconds for every Claude stage, passed to
+      the CLI as `API_TIMEOUT_MS`.
+
+      The CLI default is 600000 (10 min). Because the SDK retries timeouts,
+      wall-clock for a hung request reaches roughly
+      `timeout x (max_retries + 1)` — about 30 min. Three measured runs did
+      exactly that: they hung on their FIRST turn and returned `num_turns: 1`,
+      `$0`, zero tool calls and `is_error: true` after 1647262 ms and
+      1666947 ms x2, a 1.2% spread that indicates a budget expiring rather
+      than variable slowness.
+
+      Default 180000 (3 min) bounds a hang to roughly 9 min instead of 30.
+      Observed turn latency is 4-9s, so this leaves over 20x headroom over a
+      normal turn. Raise it if a legitimate single turn is ever cut off;
+      lower it to fail faster against an unreliable gateway.
+    required: false
+    default: "180000"
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
@@ -493,6 +512,7 @@ runs:
       # ANTHROPIC_CUSTOM_HEADERS carries the real bearer credential used on the wire.
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
@@ -513,16 +533,8 @@ runs:
         # checkout (no container isolation), so once Write is permitted here, the
         # Review stage's relative-path read of `context.md` at the repository root
         # resolves to the same file.
-        #
-        # --fallback-model: when the primary is overloaded (HTTP 529) the CLI
-        # otherwise retries it internally with no exit. Two measured runs burned
-        # ~28 min EACH in that backoff across context/review/retry serially, for
-        # 85-min jobs that did zero work (turns:3, $0, 0 tool calls). The fallback
-        # must name a DIFFERENT model than the primary, so this Haiku stage falls
-        # back to Sonnet. No --effort here: Haiku 4.5 rejects that parameter.
         claude_args: |
           --model ${{ inputs.haiku-model }}
-          --fallback-model claude-sonnet-5
           --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read the PR diff (the working tree is already checked out at the PR head
@@ -638,24 +650,21 @@ runs:
       # this flag has never been observed to terminate a run. Wall-clock is
       # bounded in practice only by the caller's job timeout-minutes.
       #
-      # --effort high: pins what was previously the implicit API default, so
-      # the knob is visible and sweepable. Reviewer effort is deliberately NOT
-      # xhigh/max — effort multiplies turns and duration ~= turns * 24s, so
-      # raising it would spend the wall-clock that parallel fan-out is meant
-      # to buy back. Depth comes from reading every changed file in full,
-      # which is unconditional and unchanged.
+      # API_TIMEOUT_MS (in env: below) is the one lever that bounds the stall
+      # mode this action actually suffers from. Measured: three independent
+      # runs hung on their FIRST turn and returned num_turns 1, $0, zero tool
+      # calls and is_error true after 1647262 ms (selftest 31317613715) and
+      # 1666947 ms x2 (Lagn-App/lagn) — a 1.2% spread, i.e. a budget expiring,
+      # not variable slowness. The CLI default is 600000 (10 min) per request
+      # and the SDK retries timeouts, so wall-clock reaches roughly
+      # timeout x (max_retries + 1) = ~30 min before the stage gives up.
       #
-      # --fallback-model: escape hatch for HTTP 529 (Overloaded). Without it
-      # the CLI retries the primary internally with no exit — two measured
-      # lagn runs spent ~28 min EACH in that backoff across three serial
-      # stages, producing 85-min jobs with turns:3, $0 and zero tool calls.
-      # The list is ordered and the primary is re-tried each turn, so a
-      # transient overload costs one turn instead of half an hour.
-      #
-      # No entry may equal the routed primary, or that entry is a no-op:
-      # routing picks opus-model OR sonnet-model, so the fallbacks are the
-      # previous generation of each tier (Opus 4.8 first, same tier as the
-      # common Opus primary; then Sonnet 4.6).
+      # This is NOT model overload: --fallback-model was tried and did not
+      # help, because a fallback triggers on an overloaded RESPONSE and here
+      # the gateway never answers at all. Shortening the per-request timeout
+      # is what bounds it. Observed turn latency is ~4-9s (28 turns/102s
+      # context, 72 turns/631s review), so this leaves >20x headroom over a
+      # normal turn while cutting a hang from ~30 min to ~9.
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
@@ -665,6 +674,7 @@ runs:
       # the real bearer credential on the wire.
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       with:
@@ -680,8 +690,6 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --fallback-model claude-opus-4-8,claude-sonnet-4-6
-          --effort high
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
@@ -862,6 +870,7 @@ runs:
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
@@ -941,6 +950,7 @@ runs:
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       with:
@@ -951,8 +961,6 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --fallback-model claude-opus-4-8,claude-sonnet-4-6
-          --effort high
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'

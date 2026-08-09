@@ -75,6 +75,8 @@ injection-safety rule.
    cheap Haiku call degrades gracefully instead of sinking the whole review.
    (Composite-action steps cannot set `timeout-minutes`; the caller job's
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
+   Set `enable-context-stage: 'false'` to skip this stage entirely; the
+   review reads `context.md` only "if present", so the gate is unaffected.
 10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
     reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
     `no_ci`) so the Publish step can treat a failing/timed-out required
@@ -98,7 +100,9 @@ injection-safety rule.
     **structured-output repair** step resumes that same session and asks only
     for the JSON (the analysis is already done — this is a cheap ask, not a
     re-review); if that also misses, a 45s back-off then a **retry stage**
-    re-runs the review from scratch; if every attempt misses, a **salvage**
+    re-runs the review from scratch — but only when the first attempt
+    finished inside a budget (a full re-review after a long first attempt
+    cannot complete before the caller's timeout, so it is skipped); if every attempt misses, a **salvage**
     step extracts the model's last prose from the execution log so the
     completed analysis isn't discarded. Publish (below) still degrades
     gracefully in that final case — it posts an explicit "inconclusive —
@@ -144,6 +148,8 @@ injection-safety rule.
 | `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
 | `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
 | `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
+| `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
+| `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS`. The CLI default is `600000`; because the SDK retries timeouts, a hung request can burn ~30 min. `180000` bounds that to ~9 min while leaving >20x headroom over a normal 4-9s turn. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
