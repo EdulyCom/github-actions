@@ -111,35 +111,77 @@ inputs:
       routing step, whose output feeds the Review stage as the model to
       run. Override when a gateway aliases model names.
     required: false
-    default: "claude-opus-4-8"
+    default: "claude-opus-5"
   sonnet-files-threshold:
     description: >
       Max changed-file count for a diff to still be considered "tiny" and
       routed to `sonnet-model`. A diff qualifies for Sonnet only when it
       is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to `opus-model`. Restored to 15 (from the 3 set by
-      7168977) — that narrowing sent nearly every real PR to Opus and moved
-      the review stage from ~10-13 min to a 35-min median / 59-min max, with
-      jobs killed at callers' 60-min cap. Lower it again only once the
-      review stage reviews in parallel, at which point Opus-by-default no
-      longer costs wall-clock.
+      larger routes to `opus-model`. Widened to 25 (from 15) — measured over
+      682 review jobs, 89% of all traffic routed to Opus, and Opus runs cost
+      3x the wall-clock (28.1 min median vs 9.2) and 4x the spend ($13.22 vs
+      $3.27) of Sonnet ones. This is NOT a depth concession: the parallel
+      design puts every coverage reviewer on Sonnet under the approved OSH
+      tiering, so widening early previews that end state. Both thresholds go
+      away entirely once the review stage fans out.
     required: false
-    default: "15"
+    default: "25"
   sonnet-churn-threshold:
     description: >
       Max changed-line count (additions + deletions) for a diff to still
       be considered "tiny" and routed to `sonnet-model`. Applied together
-      with `sonnet-files-threshold` (both must hold for Sonnet). Restored to
-      400 alongside `sonnet-files-threshold` — see the note there.
+      with `sonnet-files-threshold` (both must hold for Sonnet). Widened to
+      800 alongside `sonnet-files-threshold` — see the note there.
     required: false
-    default: "400"
+    default: "800"
   haiku-model:
     description: >
       Model ID used by the context stage (this phase) to read the diff and changed
       files and write context.md for the review stage to consume. Override when a
-      gateway aliases model names.
+      gateway aliases model names. NOTE: Haiku 4.5 does not accept the `effort`
+      parameter, so no stage running this model may pass `--effort`.
     required: false
-    default: "claude-haiku-4-5-20251001"
+    default: "claude-haiku-4-5"
+  enable-context-stage:
+    description: >
+      When 'true' (default) the Haiku context stage runs and writes
+      `context.md` for the review stage to read "if present". Set to 'false'
+      to skip it entirely.
+
+      Escape hatch, added after a measured stall: on run 31317613715 this
+      stage sat silent for 27m27s between "Claude Code initialized" and its
+      result, returned `num_turns: 1` with zero tool calls, wrote no
+      `context.md` at all, and consumed 100% of the job's model time before
+      the caller's timeout killed the run. Two earlier 85-min jobs showed the
+      same shape with `duration_ms` within 1.2% of this one, which points at
+      a fixed retry/timeout ceiling rather than ordinary slowness.
+      `--fallback-model` does not rescue it.
+
+      The stage is already best-effort (`continue-on-error`) and its output is
+      already optional, so disabling it removes a wall-clock risk without
+      changing the gate's contract. Defaults to 'true' so no consumer
+      behaviour changes on upgrade.
+    required: false
+    default: "true"
+  api-timeout-ms:
+    description: >-
+      Per-request timeout in milliseconds for every Claude stage, passed to
+      the CLI as `API_TIMEOUT_MS`.
+
+      The CLI default is 600000 (10 min). Because the SDK retries timeouts,
+      wall-clock for a hung request reaches roughly
+      `timeout x (max_retries + 1)` — about 30 min. Three measured runs did
+      exactly that: they hung on their FIRST turn and returned `num_turns: 1`,
+      `$0`, zero tool calls and `is_error: true` after 1647262 ms and
+      1666947 ms x2, a 1.2% spread that indicates a budget expiring rather
+      than variable slowness.
+
+      Default 180000 (3 min) bounds a hang to roughly 9 min instead of 30.
+      Observed turn latency is 4-9s, so this leaves over 20x headroom over a
+      normal turn. Raise it if a legitimate single turn is ever cut off;
+      lower it to fail faster against an unreliable gateway.
+    required: false
+    default: "180000"
   anthropic-api-key:
     description: >
       Anthropic API key, sent as the `x-api-key` header. Mutually exclusive with
@@ -391,16 +433,23 @@ runs:
         # at callers' 60-min cap). Every consumer picked that up at once
         # because they track this action at @main.
         #
-        # 15/400 is a STOPGAP trading review depth for wall-clock. The real
-        # fix is reviewing in parallel rather than in series — once the
-        # review stage fans out, Opus-by-default costs no extra wall-clock
-        # and these should come back down. Not the long-term answer.
-        FILES_MAX="${FILES_MAX:-15}"
-        CHURN_MAX="${CHURN_MAX:-400}"
+        # Widened 15/400 -> 25/800. Measured across 682 review jobs in 7
+        # consumer repos: 89% of ALL traffic still routed to Opus at 15/400,
+        # and Opus runs cost 3x the wall-clock (28.1 min median vs 9.2) and
+        # 4x the spend ($13.22 vs $3.27) of Sonnet ones.
+        #
+        # This is NOT a depth concession. The approved parallel design puts
+        # every coverage reviewer on Sonnet under the OSH tiering, so this
+        # previews the agreed end state rather than deviating from it.
+        # Still a STOPGAP: the real fix is reviewing in parallel rather than
+        # in series, and BOTH thresholds are deleted when the review stage
+        # fans out. Not the long-term answer.
+        FILES_MAX="${FILES_MAX:-25}"
+        CHURN_MAX="${CHURN_MAX:-800}"
         if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
           MODEL="${SONNET:-claude-sonnet-5}"
         else
-          MODEL="${OPUS:-claude-opus-4-8}"
+          MODEL="${OPUS:-claude-opus-5}"
         fi
         {
           echo "files=${FILES}"
@@ -445,7 +494,10 @@ runs:
 
     - name: Context stage (Haiku)
       id: context
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        inputs.enable-context-stage == 'true'
       # continue-on-error: context.md is a non-essential optimization — the
       # Review stage reads it only "if present" and works without it. A flaky
       # Anthropic gateway or plugin-marketplace load can hang/error this cheap
@@ -454,12 +506,13 @@ runs:
       # cannot set timeout-minutes, so graceful degradation here + the caller's
       # job-level timeout backstop is how we bound this failure mode.
       continue-on-error: true
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       # This action version rejects ANTHROPIC_AUTH_TOKEN alone (anthropics/claude-code-action#1294),
       # so the bearer token also fills anthropic_api_key to pass validation, while
       # ANTHROPIC_CUSTOM_HEADERS carries the real bearer credential used on the wire.
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
@@ -522,7 +575,10 @@ runs:
 
     - name: Verify context.md handoff
       id: context-verify
-      if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      if: >-
+        steps.fork-guard.outputs.is-fork != 'true' &&
+        steps.pr-state.outputs.skip != 'true' &&
+        inputs.enable-context-stage == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -585,25 +641,40 @@ runs:
       # exits 1 (upstream flakiness). Don't crash the job — the retry step
       # below re-attempts, and Publish degrades gracefully if both miss.
       #
-      # --max-turns 200 (in claude_args below): a mechanical backstop for
-      # rubric.md's Angle C bound — that's a prompt-level ask the model can
-      # ignore, this is a hard ceiling. 200 sits well above every observed
-      # legitimate large-diff review (119 turns / 41 files, 78 turns / 70
-      # files) so it shouldn't cut off real work; it exists for pathological
-      # cross-file expansion. Relies on structured-output repair below
-      # (triggers on any empty structured_output with a populated
-      # session_id, regardless of cause) to salvage a max-turns cutoff the
-      # same way it salvages any other missing-output ending — not verified
-      # against a live max-turns exit, since that requires an actual run.
+      # --max-turns 200 (in claude_args below) was intended as a mechanical
+      # backstop for rubric.md's Angle C bound. DO NOT TRUST IT AS A CEILING:
+      # a measured run (EdulyCom/eduly 31294407787) reported num_turns 208
+      # under this cap with subtype "success", and grepping the eight
+      # highest-turn execution logs found zero error_max_turns exits. Whatever
+      # num_turns counts, it is not the same quantity --max-turns budgets, so
+      # this flag has never been observed to terminate a run. Wall-clock is
+      # bounded in practice only by the caller's job timeout-minutes.
+      #
+      # API_TIMEOUT_MS (in env: below) is the one lever that bounds the stall
+      # mode this action actually suffers from. Measured: three independent
+      # runs hung on their FIRST turn and returned num_turns 1, $0, zero tool
+      # calls and is_error true after 1647262 ms (selftest 31317613715) and
+      # 1666947 ms x2 (Lagn-App/lagn) — a 1.2% spread, i.e. a budget expiring,
+      # not variable slowness. The CLI default is 600000 (10 min) per request
+      # and the SDK retries timeouts, so wall-clock reaches roughly
+      # timeout x (max_retries + 1) = ~30 min before the stage gives up.
+      #
+      # This is NOT model overload: --fallback-model was tried and did not
+      # help, because a fallback triggers on an overloaded RESPONSE and here
+      # the gateway never answers at all. Shortening the per-request timeout
+      # is what bounds it. Observed turn latency is ~4-9s (28 turns/102s
+      # context, 72 turns/631s review), so this leaves >20x headroom over a
+      # normal turn while cutting a hang from ~30 min to ~9.
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       # Same anthropics/claude-code-action#1294 workaround as the Context stage above:
       # this action version rejects ANTHROPIC_AUTH_TOKEN alone, so the bearer token also
       # fills anthropic_api_key to pass validation, while ANTHROPIC_CUSTOM_HEADERS carries
       # the real bearer credential on the wire.
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       with:
@@ -738,6 +809,48 @@ runs:
         fi
         exit 0
 
+    # Retry blast-radius gate. The retry below re-runs the ENTIRE review at
+    # --max-turns 200 — it is not a cheap re-emit. After a long first attempt
+    # it cannot finish inside any caller's timeout-minutes, so it only burns
+    # tokens until the job is killed: review-stage durations up to 79.5 min
+    # were measured, and 32 of 682 jobs died on the caller's clock.
+    #
+    # Composite-action steps cannot express elapsed time in an `if:`, so
+    # compute it here from the snapshot taken immediately above and expose a
+    # boolean. Extraction mirrors lib/metrics.js exactly: last `result` entry
+    # wins, and its duration_ms is the stage duration. Best-effort — any
+    # parse failure leaves retry-ok=true, so this can only ever suppress a
+    # retry that is provably too late, never block one on missing data.
+    - name: Gate the review retry on elapsed review time
+      id: retry_budget
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      shell: bash
+      env:
+        # 15 min. A retry starting later than this cannot complete within the
+        # 25-min timeout docs/consumer-integration.md recommends.
+        RETRY_BUDGET_MS: "900000"
+      run: |
+        set -uo pipefail
+        SNAPSHOT="${RUNNER_TEMP}/ai-review-exec-review-snapshot.json"
+        RETRY_OK=true
+        DURATION_MS=0
+        if [ -s "${SNAPSHOT}" ]; then
+          DURATION_MS="$(jq -r '[.[] | select(.type == "result")] | last | .duration_ms // 0' \
+            "${SNAPSHOT}" 2>/dev/null || echo 0)"
+        fi
+        case "${DURATION_MS}" in
+          ''|*[!0-9]*) DURATION_MS=0 ;;
+        esac
+        if [ "${DURATION_MS}" -ge "${RETRY_BUDGET_MS}" ]; then
+          RETRY_OK=false
+          echo "::warning::Review stage ran ${DURATION_MS}ms (>= ${RETRY_BUDGET_MS}ms budget); skipping the full-review retry, which could not finish inside the caller's timeout."
+        fi
+        {
+          echo "retry-ok=${RETRY_OK}"
+          echo "review-duration-ms=${DURATION_MS}"
+        } >> "${GITHUB_OUTPUT}"
+        exit 0
+
     # Cheap structured-output repair. The first attempt frequently completes a
     # full review (observed: 33 turns, $3.76, 5.5 min) and then ends without
     # emitting structured_output — claude-code-action reports subtype "success"
@@ -754,9 +867,10 @@ runs:
         steps.pr-state.outputs.skip != 'true' &&
         steps.review.outputs.structured_output == '' &&
         steps.review.outputs.session_id != ''
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
@@ -811,7 +925,8 @@ runs:
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
         (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
-        steps.review_repair.outputs.structured_output == ''
+        steps.review_repair.outputs.structured_output == '' &&
+        steps.retry_budget.outputs.retry-ok != 'false'
       shell: bash
       run: sleep 45
 
@@ -830,10 +945,12 @@ runs:
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
         (steps.review.outcome == 'failure' || steps.review.outputs.structured_output == '') &&
-        steps.review_repair.outputs.structured_output == ''
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+        steps.review_repair.outputs.structured_output == '' &&
+        steps.retry_budget.outputs.retry-ok != 'false'
+      uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       with:

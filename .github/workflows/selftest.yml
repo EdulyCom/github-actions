@@ -36,6 +36,11 @@ jobs:
         id: r
         uses: ./ai-review
         with:
+          # Deliberately does NOT pass enable-context-stage: this self-test must
+          # exercise the same default configuration consumers get, and the
+          # context stage is on by default. A temporary "false" here during the
+          # 2026-08-09 stall diagnosis meant the default path went untested
+          # while it was live for every consumer — don't reintroduce that.
           pr-number: ${{ inputs.pr_number }}
           app-id: ${{ vars.MTM_BOT_APP_ID }}
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
