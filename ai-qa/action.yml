@@ -302,14 +302,25 @@ runs:
       if: >-
         steps.merge.outputs.skip != 'true' &&
         (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
-      uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
+      uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
+        # --fallback-model: escape hatch for HTTP 529 (Overloaded). Without it
+        # the CLI retries the primary internally with no exit. Measured on the
+        # sibling ai-review action, that backoff ran ~28 min per stage and
+        # produced 85-min jobs that did zero work (turns:3, $0, 0 tool calls).
+        # This action has a single model stage, so the same overload costs it
+        # one long stall rather than three — but it had no exit either.
+        # Neither entry may equal the primary or the fallback is a no-op:
+        # `qa-model` defaults to Sonnet 5, so the list is same-tier first
+        # (Sonnet 4.6), then Opus. The list is ordered and the primary is
+        # re-tried at the start of each turn.
         claude_args: |
           --model ${{ inputs.qa-model }}
+          --fallback-model claude-sonnet-4-6,claude-opus-4-8
           --allowedTools "${{ inputs.allowed-tools }}"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","deploy_status","counts","summary","report_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","medium","high"]},"deploy_status":{"type":"string","enum":["healthy","unhealthy","unknown"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"summary":{"type":"string"},"report_markdown":{"type":"string"},"test_plan":{"type":"object","additionalProperties":false,"required":["present"],"properties":{"present":{"type":"boolean"},"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["passed","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}}}'
         prompt: |
