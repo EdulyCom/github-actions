@@ -29,9 +29,32 @@ const NOT_RUN = Object.freeze({
   model: null,
   numToolCalls: 0,
   toolCalls: {},
+  stalled: false,
 });
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+// A stalled stage hangs on its first turn and returns having done nothing.
+// Six measured occurrences (issue #43) cluster at ~27.6 min: 1647262, 1666947
+// x2, 1656307, 1658923, 1654722 ms — a 1.2% spread across three repos, two
+// model IDs and both the context and review stages.
+//
+// The duration floor is what separates a stall from an ordinary fast failure:
+// the retry stage was once observed returning in 143 ms with the same
+// num_turns 1 / $0 counts. 15 min sits far above any real 1-turn response and
+// far below the observed cluster, so neither side is ambiguous.
+const STALL_MIN_MS = 900000;
+
+function isStalled(stage) {
+  return (
+    stage.ran === true &&
+    (stage.turns === null || stage.turns <= 1) &&
+    stage.numToolCalls === 0 &&
+    (stage.costUsd === null || stage.costUsd === 0) &&
+    typeof stage.durationMs === "number" &&
+    stage.durationMs >= STALL_MIN_MS
+  );
+}
 
 /**
  * @param {unknown} entries parsed execution log — a top-level array of stream
@@ -98,7 +121,9 @@ function collectMetrics(stages) {
   const list = Array.isArray(stages) ? stages : [];
 
   for (const { name, log } of list) {
-    out.stages[name] = log == null ? { ...NOT_RUN } : parseExecutionLog(log);
+    const stage = log == null ? { ...NOT_RUN } : parseExecutionLog(log);
+    stage.stalled = isStalled(stage);
+    out.stages[name] = stage;
   }
 
   const ran = Object.values(out.stages).filter((s) => s.ran);
@@ -126,6 +151,9 @@ function collectMetrics(stages) {
     numToolCalls: sum("numToolCalls"),
     dominantStage,
     dominantShare,
+    stalledStages: Object.entries(out.stages)
+      .filter(([, s]) => s.stalled)
+      .map(([name]) => name),
   };
   return out;
 }
@@ -155,14 +183,28 @@ function renderSummary(metrics) {
       ? `\n\n> Dominant stage: **${t.dominantStage}** — ${t.dominantShare}% of pipeline wall-clock.`
       : "";
 
-  return [
-    "### ai-review telemetry",
-    "",
-    "| stage | turns | cost | duration | model | tool calls |",
-    "| --- | --- | --- | --- | --- | --- |",
-    ...rows,
-    `| **total** | **${t.turns}** | **${formatCost(t.costUsd)}** | **${formatDuration(t.durationMs)}** | | **${t.numToolCalls}** |`,
-  ].join("\n") + dominant;
+  // A stall is called out above the table, not left to be inferred from a row
+  // reading "1 turn / $0 / 27m". The first five were each diagnosed by digging
+  // through raw runner logs; this makes the run say it itself. See issue #43.
+  const stall =
+    t.stalledStages && t.stalledStages.length > 0
+      ? `\n\n> **Stalled: ${t.stalledStages.join(", ")}.** Hung on the first turn and returned` +
+        " no work (1 turn, $0, zero tool calls, >15 min). This is the gateway stall tracked in" +
+        " issue #43 — not a code-quality result. Re-run."
+      : "";
+
+  return (
+    [
+      "### ai-review telemetry",
+      "",
+      "| stage | turns | cost | duration | model | tool calls |",
+      "| --- | --- | --- | --- | --- | --- |",
+      ...rows,
+      `| **total** | **${t.turns}** | **${formatCost(t.costUsd)}** | **${formatDuration(t.durationMs)}** | | **${t.numToolCalls}** |`,
+    ].join("\n") +
+    stall +
+    dominant
+  );
 }
 
-module.exports = { parseExecutionLog, collectMetrics, renderSummary, formatDuration };
+module.exports = { parseExecutionLog, collectMetrics, renderSummary, formatDuration, isStalled, STALL_MIN_MS };

@@ -167,3 +167,72 @@ test("summary renders one row per stage with a totals line", () => {
   assert.match(md, /56m 04s/);
   assert.match(md, /\$31\.00/);
 });
+
+// --- stall fingerprint -------------------------------------------------------
+//
+// Six measured stalls share one shape: the stage hangs on its first turn and
+// returns num_turns 1, $0, zero tool calls, after ~27.6 min (1647262 /
+// 1666947 x2 / 1656307 / 1658923 / 1654722 ms — a 1.2% spread). Detecting it
+// structurally means a run says so in its own summary instead of needing a log
+// dig, which is how the first five were diagnosed. See issue #43.
+
+const stalledLog = (ms = 1654722) => [
+  { type: "system", subtype: "init", model: "claude-sonnet-5" },
+  {
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    num_turns: 1,
+    total_cost_usd: 0,
+    duration_ms: ms,
+  },
+];
+
+test("stall fingerprint: 1 turn, no tools, no cost, ~27.6 min is flagged", () => {
+  const m = collectMetrics([{ name: "review", log: stalledLog() }]);
+  assert.equal(m.stages.review.stalled, true);
+  assert.deepEqual(m.totals.stalledStages, ["review"]);
+});
+
+test("stall fingerprint: every measured duration is caught", () => {
+  for (const ms of [1647262, 1666947, 1656307, 1658923, 1654722]) {
+    const m = collectMetrics([{ name: "context", log: stalledLog(ms) }]);
+    assert.equal(m.stages.context.stalled, true, String(ms));
+  }
+});
+
+test("stall fingerprint: real work is never flagged, however long", () => {
+  // 72 turns / 70 tool calls / 10.2 min — a genuine review (run 31320749279).
+  const real = logFor({ turns: 72, cost: 5.47, ms: 609067, tools: Array(70).fill("Read") });
+  const m = collectMetrics([{ name: "review", log: real }]);
+  assert.equal(m.stages.review.stalled, false);
+  assert.deepEqual(m.totals.stalledStages, []);
+});
+
+test("stall fingerprint: a fast 1-turn failure is not a stall", () => {
+  // The retry stage was once observed returning in 143ms with num_turns 1 and
+  // $0 — same counts, nothing like the same duration. Not a stall.
+  const m = collectMetrics([{ name: "review_retry", log: stalledLog(143) }]);
+  assert.equal(m.stages.review_retry.stalled, false);
+});
+
+test("stall fingerprint: a skipped stage is not a stall", () => {
+  const m = collectMetrics([{ name: "context", log: null }]);
+  assert.equal(m.stages.context.stalled, false);
+  assert.deepEqual(m.totals.stalledStages, []);
+});
+
+test("stall fingerprint: several stalled stages are all named (the lagn shape)", () => {
+  const m = collectMetrics([
+    { name: "context", log: stalledLog(1666947) },
+    { name: "review", log: stalledLog(1666947) },
+    { name: "review_retry", log: stalledLog(1666947) },
+  ]);
+  assert.deepEqual(m.totals.stalledStages, ["context", "review", "review_retry"]);
+});
+
+test("renderSummary surfaces a stall rather than burying it in the table", () => {
+  const md = renderSummary(collectMetrics([{ name: "review", log: stalledLog() }]));
+  assert.match(md, /stall/i);
+  assert.match(md, /review/);
+});
