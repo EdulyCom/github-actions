@@ -65,6 +65,18 @@ function malformed(role, f) {
   if (f.complete !== true) return `malformed:${role}`;
   if (!Array.isArray(f.findings)) return `malformed:${role}`;
   if (!Array.isArray(f.files_reviewed)) return `malformed:${role}`;
+
+  // Validate each finding, not just the envelope. A finding whose severity is
+  // not one of P0-P3 has no entry in CONFIDENCE_FLOOR, so the filter below
+  // would compare against `undefined`, take the false branch, and route it to
+  // dropped[] — silently discarding a finding that might be a P0 because its
+  // label was garbled. That is precisely the "absence must never read as
+  // cleanliness" failure this module exists to prevent, so it is inconclusive.
+  for (const item of f.findings) {
+    if (item === null || typeof item !== "object") return `malformed:${role}`;
+    if (typeof item.id !== "string" || item.id === "") return `malformed:${role}`;
+    if (!SEVERITIES.includes(item.severity)) return `malformed:${role}`;
+  }
   return null;
 }
 
@@ -159,7 +171,12 @@ function aggregate({ manifest, roster, findings, scores }) {
   const dropped = [];
   for (const c of candidates) {
     const sc = scoreById.get(c.id);
-    const severity = moreSevere(c.severity, sc.severity_confirmed || c.severity);
+    // An unusable scorer label falls back to the finder's rather than ranking
+    // as "worse than P3" and silently downgrading a real blocker.
+    const confirmed = SEVERITIES.includes(sc.severity_confirmed)
+      ? sc.severity_confirmed
+      : c.severity;
+    const severity = moreSevere(c.severity, confirmed);
     const confidence = Number(sc.confidence);
     const floor = CONFIDENCE_FLOOR[severity];
     const entry = { ...c, severity, confidence };

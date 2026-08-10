@@ -341,3 +341,46 @@ test("the 41-file heavy shape aggregates without loss", () => {
   assert.equal(out.review.counts.p1, 41);
   assert.equal(out.coverage.reviewed_files, 41);
 });
+
+// --- finding-level validation ------------------------------------------------
+//
+// The envelope check is not enough. A finding with a garbage severity has no
+// entry in CONFIDENCE_FLOOR, so `floor` is undefined and the entry is quietly
+// routed to dropped[] — which is the "absence reads as clean" failure the
+// module header says must never happen. It has to be inconclusive instead.
+
+test("row 5: a finding with an unrecognised severity is malformed, not dropped", () => {
+  for (const sev of [undefined, null, "", "P4", "critical", 1]) {
+    const f = finding({ severity: sev });
+    const out = run({
+      findings: { "review-serial": roleFile({ findings: [f] }) },
+      scores: scoresFor([f.id]),
+    });
+    assert.equal(out.status, "inconclusive", `severity=${String(sev)}`);
+    assert.match(out.reason, /malformed/);
+  }
+});
+
+test("row 5: a finding with no usable id is malformed", () => {
+  for (const id of [undefined, null, "", 42]) {
+    const out = run({
+      findings: { "review-serial": roleFile({ findings: [finding({ id })] }) },
+      scores: scoresFor([]),
+    });
+    assert.equal(out.status, "inconclusive", `id=${String(id)}`);
+    assert.match(out.reason, /malformed/);
+  }
+});
+
+test("a scorer severity_confirmed that is garbage does not silently downgrade", () => {
+  const f = finding({ severity: "P1" });
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: [f] }) },
+    scores: scoresFor([f.id], {
+      scores: [{ id: f.id, confidence: 90, severity_confirmed: "banana" }],
+    }),
+  });
+  // Unusable scorer label must not weaken the finder's; P1 stands.
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.counts.p1, 1);
+});

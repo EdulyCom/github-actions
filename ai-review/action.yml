@@ -1050,6 +1050,34 @@ runs:
           ended without returning the required structured output. Emitting the
           structured output as your FINAL action is mandatory this time.
 
+          ADDITIONALLY, before emitting the structured output, write two files
+          with `Write`. These are SHADOW artifacts: a later non-gating step
+          aggregates them and compares the result against your structured
+          output, so the two can be proven to agree before anything depends on
+          the files. They do not affect this run's verdict. If you cannot
+          produce them, still emit the structured output — that is what counts.
+
+          `.ai-review/findings/review-serial.json`:
+            {"schema":1,"role":"review-serial","complete":true,
+             "model_used":"<the model you are running as>",
+             "assigned_files":[<every path in manifest.changed_files>],
+             "files_reviewed":[<every path you actually read in full>],
+             "intent":"aligned|partial|deviated|skipped",
+             "checklist":[<same items as the structured output>],
+             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
+                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
+                          "failure_scenario":"<inputs -> wrong output>",
+                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
+
+          `.ai-review/scores.json`:
+            {"schema":1,"role":"scorer","complete":true,
+             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
+                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
+
+          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
+          must list every file you read in full — it is cross-checked against the
+          manifest, and a short list reads as incomplete coverage.
+
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + checklist) and `context.md` at the repo root
           if present. The PR number is in the `PR_NUMBER` environment variable;
@@ -1350,6 +1378,7 @@ runs:
           } catch { /* live path already handles its own failures */ }
 
           let shadow = null;
+          let gateResult = null;
           let shadowStatus = missing.length ? `missing: ${missing.join(", ")}` : null;
           if (!missing.length) {
             const gate = aggregate({
@@ -1358,6 +1387,7 @@ runs:
               findings: { "review-serial": findings },
               scores,
             });
+            gateResult = gate;
             shadowStatus = gate.status === "ok" ? "ok" : `inconclusive:${gate.reason}`;
             if (gate.status === "ok") shadow = recompute(gate.review, opts);
           }
@@ -1391,6 +1421,19 @@ runs:
             liveCounts: live ? live.counts : null,
             shadowCounts: shadow ? shadow.counts : null,
           })}`);
+
+          // Log WHY findings were filtered. Without this a count divergence is
+          // visible but not diagnosable, which defeats the point of running the
+          // comparison at all — the first real divergence (a P2 present live,
+          // absent in shadow) could not be explained from the log.
+          if (gateResult && gateResult.dropped.length > 0) {
+            core.info(`ai-review-shadow-dropped ${JSON.stringify(
+              gateResult.dropped.map((d) => ({
+                id: d.id, severity: d.severity, confidence: d.confidence,
+                why: d.dropped_because,
+              })),
+            )}`);
+          }
 
           if (live && shadow && !agree) {
             core.warning(`Shadow aggregation DIVERGED from the live verdict: live=${live.verdict} shadow=${shadow.verdict}. Investigate before PR-C deletes structured_output.`);
