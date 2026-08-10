@@ -24,11 +24,11 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
-// A second, smaller divergence from spec §6 step 2, recorded so it is not read
-// as an oversight: pairwise-disjointness between roles is not asserted, only
-// that every assigned file was reviewed and every changed file was covered by
-// some role. At roster size 1 (PR-C) disjointness is vacuous; PR-D introduces
-// multiple roles and must add it.
+// Spec §6 step 2 is now implemented in full — union equal to changed_files,
+// assigned-implies-reviewed, and pairwise disjointness. Disjointness was
+// vacuous at roster size 1 and is asserted here because `lib/roster.js` can
+// only assert the roster it *emits*; a role file arrives from a model stage and
+// can claim an assignment the roster never made.
 //
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 
@@ -134,15 +134,36 @@ function aggregate({ manifest, roster, findings, scores }) {
     if (bad) return inconclusive(bad);
   }
 
-  // §6 step 2 / §8 row 6 — the partition must cover changed_files exactly, and
-  // each role must have reviewed everything it was assigned. This checks the
-  // *claim*, not comprehension: it is a tripwire against silent truncation, not
-  // proof of reading. Said plainly here so nobody reads more into it.
+  // §6 step 2 / §8 row 6 — the partition must cover changed_files exactly, the
+  // roles' assignments must be pairwise disjoint, and each role must have
+  // reviewed everything it was assigned. This checks the *claim*, not
+  // comprehension: it is a tripwire against silent truncation, not proof of
+  // reading. Said plainly here so nobody reads more into it.
+  //
+  // Only `assigned_files` is a partition. `files_reviewed` may overlap freely —
+  // reading a neighbouring file for context is what a reviewer should do.
   const reviewed = new Set();
+  const assignedBy = new Map();
   for (const role of roles) {
     const f = byRole[role];
     const assigned = (Array.isArray(f.assigned_files) ? f.assigned_files : []).map(normPath);
     const seen = new Set(f.files_reviewed.map(normPath));
+
+    for (const p of assigned) {
+      const owner = assignedBy.get(p);
+      if (owner !== undefined && owner !== role) {
+        // Not a coverage gap: the union still matches and every other assertion
+        // stays green. It means the roster was built wrong — the file is read
+        // twice, and one defect can surface under two ids that the
+        // deterministic dedupe cannot merge when the reported line differs.
+        return inconclusive(
+          `partition:${p} assigned to both ${owner} and ${role}`,
+          { expected_files: changed.length, reviewed_files: reviewed.size },
+        );
+      }
+      assignedBy.set(p, role);
+    }
+
     for (const p of assigned) {
       if (!seen.has(p)) {
         // Name the path. This step's only product is a diagnosable log line,

@@ -419,14 +419,26 @@ runs:
       #   2. Latency. Wall-clock is linear in turns (measured: duration ~=
       #      turns * 24s over 682 jobs), so every re-derivation is pure cost.
       #
-      # All parsing lives in lib/prep.js behind 21 unit tests; this step only
-      # runs git and hands stdout over. Nothing here is model-controlled.
+      # It also emits `.ai-review/assignments.json` — the review roster from
+      # lib/roster.js: which reviewer reads which files, and under which model.
+      # NOTHING CONSUMES IT YET; the review below is still one serial session.
+      # It ships now, and best-effort, so the partition it asserts (bins
+      # pairwise disjoint, union equal to changed_files) is exercised on real
+      # diffs across every consumer before a model stage depends on it. Same
+      # shadow-mode discipline the aggregation step shipped under.
+      #
+      # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
+      # this step only runs git and hands stdout over. Nothing here is
+      # model-controlled.
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
         SONNET: ${{ inputs.sonnet-model }}
         OPUS: ${{ inputs.opus-model }}
+        # Read by lib/roster.js only, to stamp the OSH tiering onto the roster
+        # with the consumer's overrides rather than hardcoded ids.
+        HAIKU: ${{ inputs.haiku-model }}
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
         CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js

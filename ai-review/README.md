@@ -50,8 +50,16 @@ injection-safety rule.
    never lingers next to new commits. Runs even on a draft PR.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
-7. **Checkout / compute diff stats and route model** — checks out the PR
-   head commit and routes ordinary diffs to `sonnet-model`, escalating to
+7. **Checkout / deterministic prep and model routing** — checks out the PR
+   head commit, then resolves the merge base, the changed-file list, each
+   file's full byte size at HEAD, a symbol manifest from the diff hunk
+   headers, and the Conventional-Commits title check into
+   `.ai-review/manifest.json`. The review stage is told to trust those
+   values instead of re-deriving them in paid model turns — a model that
+   derives the diff base from a false premise reviews the wrong range and
+   reports confidently on it.
+
+   The same step routes ordinary diffs to `sonnet-model`, escalating to
    `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
    (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
    sent nearly every real PR to Opus and moved the review stage from
@@ -60,6 +68,15 @@ injection-safety rule.
    routed to Opus, and Opus runs cost 3x the wall-clock and 4x the spend of
    Sonnet ones. Still a **stopgap** — the real fix is reviewing in parallel
    rather than in series, and both thresholds are removed once that lands.
+
+   It also writes `.ai-review/assignments.json`: the review roster —
+   related changed files clustered, packed into `K = clamp(ceil(total
+   bytes / 130 KB), 1, 4)` coverage reviewers, plus the tracer, intent,
+   history and scorer roles. **Nothing reads it yet** — the review below is
+   still one serial session. It ships early, and best-effort, so the
+   partition it asserts (bins pairwise disjoint, union equal to
+   `changed_files`) is exercised on real diffs before any model stage
+   depends on it.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.

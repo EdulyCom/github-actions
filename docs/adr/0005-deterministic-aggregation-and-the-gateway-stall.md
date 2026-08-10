@@ -90,6 +90,9 @@ repos — evidence no design argument substitutes for.
   by a test.
 - **Pairwise-disjointness (§6 step 2) is not implemented.** Vacuous at roster
   size 1; PR-D must add it.
+  *Closed by `lib/roster.js` + `aggregate.js`'s `partition:` check — asserted
+  in both places, because the roster can only assert what it emits and a role
+  file arrives from a model stage that can claim an assignment nobody made.*
 
 ### 6. The P2/P3 confidence floor is 75, set from data
 

@@ -146,6 +146,73 @@ test("row 6: partition integrity — roles must cover changed_files exactly", ()
   assert.match(out.reason, /coverage|partition/);
 });
 
+test("row 6: partition integrity — two roles must not be assigned the same file", () => {
+  // The other half of §6 step 2, vacuous while the roster was size 1. Two roles
+  // holding one path is not a coverage gap — the union still matches, and every
+  // assertion above stays green — so it can only be caught here. It means the
+  // roster was built wrong: the file is read twice, and one defect surfaces
+  // under two ids that the deterministic dedupe cannot merge across roles when
+  // the reported line or reason differs.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/b\.ts/);
+});
+
+test("row 6: disjoint roles that jointly cover changed_files pass", () => {
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+});
+
+test("row 6: overlapping files_reviewed is fine — only assignment must be disjoint", () => {
+  // Reading a neighbour file for context is exactly what a reviewer should do.
+  // Only the assignment is a partition.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts", "src/a.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+});
+
 test("row 8: scorer file missing or incomplete", () => {
   for (const bad of [null, { schema: 1, role: "scorer", complete: false, scores: [] }]) {
     const f = finding();
