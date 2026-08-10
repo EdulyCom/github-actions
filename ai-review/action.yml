@@ -401,8 +401,23 @@ runs:
         fetch-depth: 0
         persist-credentials: false
 
-    - name: Compute diff stats and route model
+    - name: Deterministic prep and model routing
       id: route
+      # PR-B: the diff base, changed-file list, full-file byte sizes, symbol
+      # manifest, and Conventional-Commits title check are all computed here and
+      # staged to `.ai-review/manifest.json`, instead of being re-derived by the
+      # model in paid turns.
+      #
+      # Two reasons, in order of importance:
+      #   1. Correctness. The review prompt used to instruct the model to
+      #      "discover the default branch yourself" and diff against it. A model
+      #      deriving the base from a false premise reviews the wrong range and
+      #      reports confidently on it. A staged, asserted base cannot.
+      #   2. Latency. Wall-clock is linear in turns (measured: duration ~=
+      #      turns * 24s over 682 jobs), so every re-derivation is pure cost.
+      #
+      # All parsing lives in lib/prep.js behind 21 unit tests; this step only
+      # runs git and hands stdout over. Nothing here is model-controlled.
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
@@ -411,21 +426,38 @@ runs:
         OPUS: ${{ inputs.opus-model }}
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
         CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
+        MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       run: |
         set -euo pipefail
-        NUMSTAT="$(git diff --numstat "origin/${BASE_REF}...HEAD")"
-        if [ -z "${NUMSTAT}" ]; then
-          FILES=0
-          CHURN=0
-        else
-          FILES="$(printf '%s\n' "${NUMSTAT}" | wc -l | tr -d ' ')"
-          # Binary-file numstat rows report "-" for added/removed instead of a
-          # number (e.g. "-\t-\tpath"); awk coerces non-numeric fields to 0,
-          # so binary churn is intentionally counted as 0 here. This is an
-          # accepted limitation matching the task brief's own formula, not a
-          # bug — do not re-flag it.
-          CHURN="$(printf '%s\n' "${NUMSTAT}" | awk '{a+=$1; r+=$2} END {print a+r+0}')"
-        fi
+        mkdir -p .ai-review
+
+        # Resolve the review range once, deterministically. `git diff A...B`
+        # already means "merge base of A and B", but resolving the SHA
+        # explicitly puts it in the manifest and the job log, so a wrong-range
+        # review becomes diagnosable after the fact instead of invisible.
+        BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+        HEAD_SHA="$(git rev-parse HEAD)"
+        echo "prep: range ${BASE_SHA}..${HEAD_SHA}"
+
+        git diff --numstat "${BASE_SHA}" HEAD > .ai-review/numstat.txt
+        # -U0 keeps the hunk headers (which carry the enclosing declaration)
+        # without any body lines; only `diff --git` and `@@` lines are parsed.
+        git diff -U0 "${BASE_SHA}" HEAD \
+          | grep -E '^(diff --git|@@)' > .ai-review/diff-headers.txt || true
+        # Written to a file, never a step output: a PR title is attacker-
+        # influenceable text and can contain newlines, which $GITHUB_OUTPUT
+        # cannot carry without a delimiter dance.
+        gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title \
+          --jq '.title' > .ai-review/pr-title.txt
+
+        BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" node "${MANIFEST_CLI}"
+
+        FILES="$(jq -r '.file_count' .ai-review/manifest.json)"
+        CHURN="$(jq -r '.churn' .ai-review/manifest.json)"
+
         # Sonnet for ordinary diffs; Opus once a diff exceeds EITHER
         # threshold. 7168977 narrowed the Sonnet band from 15/400 to 3/60,
         # which routed nearly every real PR to Opus and took the review
@@ -537,10 +569,11 @@ runs:
           --model ${{ inputs.haiku-model }}
           --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
-          Read the PR diff (the working tree is already checked out at the PR head
-          commit; diff it against the merge-base with the repository's default
-          branch — discover the default branch yourself, e.g. via `git remote show
-          origin` or `git symbolic-ref refs/remotes/origin/HEAD`, if you need it) and
+          Read `.ai-review/manifest.json` first: a prior deterministic step
+          already staged `base_sha`, `head_sha` and `changed_files`. Trust them —
+          do not run `git symbolic-ref`, `git merge-base` or `git remote show` to
+          rediscover the default branch or the diff base. Diff with
+          `git diff <base_sha> HEAD` using the staged SHA, then read
           the full contents of every changed file. Grep the repository for callers,
           callees, and helper functions related to the changed code, so a reviewer
           has the surrounding context without re-deriving it.
@@ -728,17 +761,28 @@ runs:
           context-gathering stage) for a summary of what changed and its
           callers/callees/related helpers.
 
-          Read the PR diff yourself: the working tree is already checked out
-          at the PR head commit; diff it against the merge-base with the
-          repository's default branch (discover the default branch yourself,
-          e.g. via `git symbolic-ref refs/remotes/origin/HEAD`). Read the
-          COMPLETE contents of every changed file with `Read` — never sample,
-          truncate, or reason from the diff hunks alone. There is no size cap
-          on changed files; large files are why this diff was routed to the
-          stronger model. For callers/callees outside the diff (Angle C),
-          follow the rubric's risk-based bound instead of reading every call
-          site in full — that angle has no natural stopping point and is the
-          one place exhaustiveness is not the goal.
+          Read `.ai-review/manifest.json` FIRST. A prior deterministic step
+          already resolved the review range and staged the facts you would
+          otherwise re-derive: `base_sha` and `head_sha` (the exact range),
+          `changed_files` (the authoritative list), `symbol_manifest`
+          (declarations touched by the diff), plus `title_ok`,
+          `has_test_change` and `no_tests_for_changed_logic`.
+
+          TRUST THOSE VALUES. Do NOT run `git symbolic-ref`, `git merge-base`,
+          `git remote show`, or `gh pr view` to work out the default branch,
+          the diff base, or the changed-file list — they are already settled,
+          and re-deriving them costs turns and risks reviewing the wrong range.
+          Diff with `git diff <base_sha> HEAD` using the staged SHA.
+
+          Read the COMPLETE contents of every file in `changed_files` with
+          `Read` — never sample, truncate, or reason from the diff hunks alone.
+          There is no size cap on changed files; large files are why this diff
+          was routed to the stronger model. `changed_files` is the coverage
+          contract: every entry gets read in full. For callers/callees outside
+          the diff (Angle C), start from `symbol_manifest` and follow the
+          rubric's risk-based bound instead of reading every call site in
+          full — that angle has no natural stopping point and is the one place
+          exhaustiveness is not the goal.
 
           Perform the full 8-angle scan from the rubric against the diff.
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
@@ -972,9 +1016,12 @@ runs:
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + checklist) and `context.md` at the repo root
           if present. The PR number is in the `PR_NUMBER` environment variable;
-          the PR head is already checked out. Run
-          `gh pr view "$PR_NUMBER" --json title,body,url,number` and `git diff`
-          against the merge base to get the change under review. Read
+          the PR head is already checked out. Read `.ai-review/manifest.json`
+          for the staged `base_sha`/`head_sha`/`changed_files` and trust them
+          rather than re-deriving the range; diff with
+          `git diff <base_sha> HEAD`. Run
+          `gh pr view "$PR_NUMBER" --json title,body,url,number` for the PR
+          description only. Read
           `.ai-review/linked-issues.json` (repo root) if present and use each
           linked issue's acceptance criteria as the intent contract for Angle
           H. Attempt to load `/verification-before-completion` and
