@@ -144,25 +144,32 @@ inputs:
     default: "claude-haiku-4-5"
   enable-context-stage:
     description: >
-      When 'true' (default) the Haiku context stage runs and writes
-      `context.md` for the review stage to read "if present". Set to 'false'
-      to skip it entirely.
+      When 'true' the Haiku context stage runs and writes `context.md` for the
+      review stage to read "if present". DEFAULTS TO 'false' — the stage is
+      disabled because it is where this pipeline's dominant failure occurs.
 
-      Escape hatch, added after a measured stall: on run 31317613715 this
-      stage sat silent for 27m27s between "Claude Code initialized" and its
-      result, returned `num_turns: 1` with zero tool calls, wrote no
-      `context.md` at all, and consumed 100% of the job's model time before
-      the caller's timeout killed the run. Two earlier 85-min jobs showed the
-      same shape with `duration_ms` within 1.2% of this one, which points at
-      a fixed retry/timeout ceiling rather than ordinary slowness.
-      `--fallback-model` does not rescue it.
+      Five stalls have been measured. FOUR of them were this stage. Each hung
+      on its first turn and returned `num_turns: 1`, `$0`, zero tool calls and
+      `is_error: true`, after 1647262 / 1666947 / 1666947 / 1656307 /
+      1658923 ms — a 1.2% spread across different repos and days, i.e. a fixed
+      ceiling rather than ordinary slowness. Each one consumed ~100% of its
+      job's model time and left the review stage to be killed by the caller's
+      timeout. Three selftest runs died this way in a single day.
 
-      The stage is already best-effort (`continue-on-error`) and its output is
-      already optional, so disabling it removes a wall-clock risk without
-      changing the gate's contract. Defaults to 'true' so no consumer
-      behaviour changes on upgrade.
+      Two attempts to BOUND the stall were both falsified by measurement and
+      must not be re-tried without new evidence: `--fallback-model` (a
+      fallback needs an overloaded RESPONSE; this gateway never answers) and
+      `API_TIMEOUT_MS` (a run with it set to 180000 still stalled 27m36s).
+      Skipping the stage is the only measure ever shown to AVOID the failure.
+
+      What this costs, stated plainly: `context.md` gave the reviewer a
+      callers/callees summary that `manifest.json` does not fully replace, so
+      review depth may drop somewhat. The manifest does now supply
+      `changed_files` and `symbol_manifest`, which covered much of the same
+      ground. Set this to 'true' to restore the previous behaviour and accept
+      the stall risk.
     required: false
-    default: "true"
+    default: "false"
   api-timeout-ms:
     description: >-
       Per-request timeout in milliseconds for every Claude stage, passed to

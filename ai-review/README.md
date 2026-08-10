@@ -75,8 +75,10 @@ injection-safety rule.
    cheap Haiku call degrades gracefully instead of sinking the whole review.
    (Composite-action steps cannot set `timeout-minutes`; the caller job's
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
-   Set `enable-context-stage: 'false'` to skip this stage entirely; the
-   review reads `context.md` only "if present", so the gate is unaffected.
+   **Disabled by default** (`enable-context-stage: 'false'`): 4 of 5 measured
+   stalls occurred here, each hanging ~27.6 min and getting the job killed.
+   The review reads `context.md` only "if present", so the gate is unaffected
+   by its absence. Set the input to `'true'` to restore it.
 10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
     reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
     `no_ci`) so the Publish step can treat a failing/timed-out required
@@ -148,7 +150,7 @@ injection-safety rule.
 | `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
 | `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
 | `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
-| `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
+| `enable-context-stage` | Runs the Haiku context stage when `true`. **Defaults to `false`**: 4 of 5 measured stalls occurred in this stage, each hanging ~27.6 min on its first turn and getting the job killed by the caller's timeout. Set to `true` to restore it and accept that risk. | No | `false` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
