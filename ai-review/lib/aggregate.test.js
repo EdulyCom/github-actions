@@ -146,6 +146,83 @@ test("row 6: partition integrity — roles must cover changed_files exactly", ()
   assert.match(out.reason, /coverage|partition/);
 });
 
+test("finding ids must be unique ACROSS roles, not just within one", () => {
+  // The score join is a Map keyed by id, so a collision silently keeps one
+  // finding and discards the other while every set-equality assertion stays
+  // green — reproduced earlier as a P0@100 colliding with a P3@25 yielding
+  // verdict pass. Ids are model-invented and `derive-findings.js` uses the
+  // model's own string when present, so nothing namespaces them by role.
+  const f = finding({ id: "collide", severity: "P0" });
+  const g = finding({ id: "collide", severity: "P3", file: "src/b.ts" });
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts"],
+        findings: [f],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+        findings: [g],
+      }),
+    },
+    scores: scoresFor(["collide"]),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /duplicate finding id collide/);
+});
+
+test("row 6: a role assigned a file nobody changed is a partition error", () => {
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts", "src/b.ts", "src/ghost.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts", "src/ghost.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/ghost\.ts/);
+});
+
+test("row 6: a changed file assigned to no role is a partition error", () => {
+  // Distinct from the reviewed-by-nobody case: a file can be incidentally read
+  // by a role it was never assigned to, which would satisfy a files_reviewed
+  // union while nobody actually owned it.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/b\.ts/);
+});
+
+test("a partition failure does not report a misleading reviewed count", () => {
+  // The count is of files verified as reviewed; at the point a partition breaks,
+  // nothing has been verified. Reporting a partial tally reads as a coverage
+  // shortfall, which is exactly what a partition error is NOT.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts", "src/b.ts"], files_reviewed: ["src/a.ts", "src/b.ts"] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"] }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.equal(out.coverage.reviewed_files, 0);
+  assert.equal(out.coverage.expected_files, 2);
+});
+
 test("row 6: partition integrity — two roles must not be assigned the same file", () => {
   // The other half of §6 step 2, vacuous while the roster was size 1. Two roles
   // holding one path is not a coverage gap — the union still matches, and every

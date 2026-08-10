@@ -88,11 +88,11 @@ repos — evidence no design argument substitutes for.
   filtered on the finder's original P2 label — the strictest threshold applied
   to the least severe reading, fail-**open** on gate-blocking findings. Pinned
   by a test.
-- **Pairwise-disjointness (§6 step 2) is not implemented.** Vacuous at roster
-  size 1; PR-D must add it.
-  *Closed by `lib/roster.js` + `aggregate.js`'s `partition:` check — asserted
-  in both places, because the roster can only assert what it emits and a role
-  file arrives from a model stage that can claim an assignment nobody made.*
+- **Pairwise-disjointness (§6 step 2) shipped one release late — now closed.**
+  It was vacuous at roster size 1, so it was deferred; `lib/roster.js` and
+  `aggregate.js`'s `partition:` checks now assert it in both places, because
+  the roster can only assert what it emits and a role file arrives from a model
+  stage that can claim an assignment nobody made.
 
 ### 6. The P2/P3 confidence floor is 75, set from data
 

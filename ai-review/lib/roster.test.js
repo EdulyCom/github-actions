@@ -7,6 +7,7 @@ const {
   computeK,
   clusterFiles,
   packClusters,
+  splitOversized,
   assertPartition,
   extractImports,
   resolveImportEdges,
@@ -54,10 +55,31 @@ test("computeK: never returns 0 or a fraction", () => {
 
 // --- clusterFiles (spec §4) --------------------------------------------------
 
-test("clusterFiles: same directory subtree joins", () => {
+test("clusterFiles: files in the same immediate directory join", () => {
   const cs = clusterFiles([f("src/a.ts", 10), f("src/b.ts", 10), f("docs/x.md", 10)]);
   assert.equal(cs.length, 2);
   assert.deepEqual(cs.find((c) => c.paths.includes("src/a.ts")).paths.sort(), ["src/a.ts", "src/b.ts"]);
+});
+
+test("clusterFiles: the edge is immediate-directory, not subtree", () => {
+  // Joining on any shared prefix would collapse everything under `src/` into
+  // one cluster on the most common diff shape there is.
+  const cs = clusterFiles([f("src/a/x.ts", 10), f("src/b/y.ts", 10)]);
+  assert.equal(cs.length, 2);
+});
+
+test("clusterFiles: a test pairs with the nearest source, not the first seen", () => {
+  // The pair key is stem+ext with no directory component, so with two
+  // same-named sources the tie has to break on path proximity or the edge
+  // wires a test to an unrelated file in another package.
+  const cs = clusterFiles([
+    f("pkg-a/foo.ts", 10),
+    f("pkg-b/foo.ts", 10),
+    f("pkg-b/foo.test.ts", 10),
+  ]);
+  const withTest = cs.find((c) => c.paths.includes("pkg-b/foo.test.ts"));
+  assert.ok(withTest.paths.includes("pkg-b/foo.ts"), "paired across packages");
+  assert.ok(!withTest.paths.includes("pkg-a/foo.ts"));
 });
 
 test("clusterFiles: test<->source naming pairs join across directories", () => {
@@ -142,6 +164,60 @@ test("packClusters: never emits an empty bin", () => {
   const bins = packClusters(cs, 4);
   assert.ok(bins.every((b) => b.length > 0));
   assert.equal(bins.length, 1);
+});
+
+// --- splitOversized (spec §4 step 4) -----------------------------------------
+//
+// Without this, the most common diff shape there is — every changed file in one
+// directory — unions into a single cluster, `packClusters` has one thing to
+// place, and K collapses to 1 no matter what `computeK` returned. The partition
+// stays valid, so nothing catches it, and one reviewer silently holds the whole
+// diff while the emitted `k` says otherwise.
+
+test("splitOversized: a cluster over budget is split at file boundaries", () => {
+  const big = { paths: ["a", "b", "c", "d"], bytes: BUDGET_BYTES * 2 };
+  const out = splitOversized([{ ...big, sizes: { a: 70000, b: 70000, c: 70000, d: 70000 } }]);
+  assert.ok(out.clusters.length > 1, "not split");
+  assert.deepEqual(out.clusters.flatMap((c) => c.paths).sort(), ["a", "b", "c", "d"]);
+});
+
+test("splitOversized: each split piece stays under budget where it can", () => {
+  const sizes = { a: 100000, b: 100000, c: 100000 };
+  const out = splitOversized([{ paths: ["a", "b", "c"], bytes: 300000, sizes }]);
+  for (const c of out.clusters) assert.ok(c.bytes <= BUDGET_BYTES, `${c.paths} = ${c.bytes}`);
+});
+
+test("splitOversized: a single file bigger than budget is never split", () => {
+  // There is no byte-range field in the schema; a file is atomic by design.
+  const out = splitOversized([{ paths: ["huge"], bytes: BUDGET_BYTES * 3, sizes: { huge: BUDGET_BYTES * 3 } }]);
+  assert.equal(out.clusters.length, 1);
+  assert.deepEqual(out.clusters[0].paths, ["huge"]);
+});
+
+test("splitOversized: a cluster under budget is untouched and unflagged", () => {
+  const cs = [{ paths: ["a", "b"], bytes: 100, sizes: { a: 50, b: 50 } }];
+  const out = splitOversized(cs);
+  assert.equal(out.clusters.length, 1);
+  assert.deepEqual(out.splitGroups, []);
+});
+
+test("splitOversized: split clusters are flagged for the tracer", () => {
+  // Spec §4 step 4 — the tracer has to know that cluster's internal edges are
+  // still its responsibility, because no reviewer holds them any more.
+  const sizes = { a: 100000, b: 100000, c: 100000 };
+  const out = splitOversized([{ paths: ["a", "b", "c"], bytes: 300000, sizes }]);
+  assert.equal(out.splitGroups.length, 1);
+  assert.deepEqual(out.splitGroups[0].sort(), ["a", "b", "c"]);
+});
+
+test("buildRoster: a one-directory diff still fans out", () => {
+  // The reported regression, end to end: ten 100 KB files in one directory.
+  const files = Array.from({ length: 10 }, (_, i) => f(`src/f${i}.ts`, 100000));
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 4, "collapsed to one reviewer");
+  assert.equal(r.split_clusters.length, 1);
+  const covered = r.roles.filter((x) => x.kind === "coverage").flatMap((x) => x.assigned_files);
+  assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
 });
 
 // --- import edges (spec §4 step 2, third edge kind) --------------------------
@@ -266,6 +342,20 @@ test("buildRoster: Haiku roles carry no effort — the API rejects it", () => {
       assert.equal("effort" in role, false, `${role.role} must not set effort`);
     }
   }
+});
+
+test("buildRoster: effort is withheld from ANY role that lands on Haiku", () => {
+  // The guard resolves against the model that actually runs, not the tier name,
+  // so a consumer pointing sonnet-model at a Haiku id cannot reintroduce a
+  // parameter the API rejects. Without this test, deleting the guard is free.
+  const r = buildRoster({
+    files: [f("a.ts", 5)],
+    models: { opus: "claude-opus-5", sonnet: "claude-haiku-4-5", haiku: "claude-haiku-4-5" },
+  });
+  const by = Object.fromEntries(r.roles.map((x) => [x.role, x]));
+  assert.equal("effort" in by["reviewer-1"], false, "reviewer-1 kept effort on Haiku");
+  assert.equal("effort" in by.tracer, false, "tracer kept effort on Haiku");
+  assert.equal(by.intent.effort, "high", "Opus role lost its effort");
 });
 
 test("buildRoster: an empty diff yields no coverage roles", () => {

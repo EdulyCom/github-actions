@@ -61,6 +61,15 @@ const dirName = (p) => {
   return i === -1 ? "" : p.slice(0, i);
 };
 
+/** Number of leading directory segments two paths share. */
+function sharedDirDepth(a, b) {
+  const x = dirName(a).split("/");
+  const y = dirName(b).split("/");
+  let n = 0;
+  while (n < x.length && n < y.length && x[n] === y[n] && x[n] !== "") n += 1;
+  return n;
+}
+
 const baseName = (p) => {
   const i = p.lastIndexOf("/");
   return i === -1 ? p : p.slice(i + 1);
@@ -139,7 +148,11 @@ function makeUnionFind(n) {
  * The naming edge requires one side to actually be a test. Matching on
  * basename alone would join every `index.ts` in the repo into a single cluster
  * and leave packing nothing to balance — the failure is silent, since the
- * result is still a valid partition, just a useless one.
+ * result is still a valid partition, just a useless one. For the same reason a
+ * test pairs with its *nearest* same-named source rather than the first one
+ * seen: with `pkg-a/foo.ts` and `pkg-b/foo.ts` both in the diff, first-writer
+ * -wins would wire `pkg-b/foo.test.ts` across the package boundary and drag
+ * both packages into one cluster.
  *
  * Clusters, not files, are the packing unit: keeping related files with one
  * reviewer is what makes each reviewer's local comprehension possible. It does
@@ -174,17 +187,27 @@ function clusterFiles(files, extraEdges) {
     const { stem, ext, isTest } = nameParts(f.path);
     if (stem === "") return;
     const key = `${stem}\u0000${ext}`;
-    const slot = byPair.get(key) || { test: null, source: null };
-    if (isTest) {
-      if (slot.test === null) slot.test = i;
-    } else if (slot.source === null) {
-      slot.source = i;
-    }
+    const slot = byPair.get(key) || { tests: [], sources: [] };
+    (isTest ? slot.tests : slot.sources).push(i);
     byPair.set(key, slot);
   });
 
   for (const slot of byPair.values()) {
-    if (slot.test !== null && slot.source !== null) uf.union(slot.test, slot.source);
+    if (slot.tests.length === 0 || slot.sources.length === 0) continue;
+    for (const t of slot.tests) {
+      let best = slot.sources[0];
+      let bestDepth = -1;
+      for (const s of slot.sources) {
+        const depth = sharedDirDepth(list[t].path, list[s].path);
+        // Strict `>` keeps the first source on a tie, so the roster is stable
+        // across runs on the same diff.
+        if (depth > bestDepth) {
+          bestDepth = depth;
+          best = s;
+        }
+      }
+      uf.union(t, best);
+    }
   }
 
   for (const edge of Array.isArray(extraEdges) ? extraEdges : []) {
@@ -196,15 +219,90 @@ function clusterFiles(files, extraEdges) {
   const groups = new Map();
   list.forEach((f, i) => {
     const root = uf.find(i);
-    const g = groups.get(root) || { paths: [], bytes: 0 };
+    const g = groups.get(root) || { paths: [], bytes: 0, sizes: Object.create(null) };
     g.paths.push(f.path);
     g.bytes += f.bytes;
+    g.sizes[f.path] = f.bytes;
     groups.set(root, g);
   });
 
+  // `sizes` rides along so splitOversized can chunk at file boundaries without
+  // re-deriving what this pass already knows.
   return [...groups.values()]
-    .map((g) => ({ paths: g.paths.slice().sort(), bytes: g.bytes }))
+    .map((g) => ({ paths: g.paths.slice().sort(), bytes: g.bytes, sizes: g.sizes }))
     .sort((a, b) => (a.paths[0] < b.paths[0] ? -1 : a.paths[0] > b.paths[0] ? 1 : 0));
+}
+
+/**
+ * Split any cluster that alone exceeds the per-reviewer budget (spec §4 step 4).
+ *
+ * Without this the most ordinary diff shape there is — every changed file in
+ * one directory — unions into a single cluster, `packClusters` has exactly one
+ * thing to place, and K collapses to 1 no matter what `computeK` returned. The
+ * partition is still valid, so `assertPartition` says nothing, and one reviewer
+ * silently holds the whole diff while the emitted `k` claims otherwise.
+ *
+ * Splitting is **at file boundaries only** — a file is atomic, so a single file
+ * larger than the budget is left whole rather than truncated. That is the
+ * "must read all" constraint winning over the budget, which is the correct
+ * direction for it to lose.
+ *
+ * @returns {{clusters: Array<{paths, bytes, sizes}>, splitGroups: string[][]}}
+ *   `splitGroups` lists the full membership of each cluster that had to be
+ *   broken up. It is emitted to the roster because those internal edges no
+ *   longer live with one reviewer, and the tracer owns them instead.
+ */
+function splitOversized(clusters, budget) {
+  const cap = Number.isFinite(budget) && budget > 0 ? budget : BUDGET_BYTES;
+  const out = [];
+  const splitGroups = [];
+
+  for (const c of Array.isArray(clusters) ? clusters : []) {
+    const paths = Array.isArray(c?.paths) ? c.paths : [];
+    const bytes = Number.isFinite(c?.bytes) ? c.bytes : 0;
+    const sizes = c?.sizes;
+
+    if (paths.length < 2 || bytes <= cap || !sizes) {
+      out.push(c);
+      continue;
+    }
+
+    const sizeOf = (p) => {
+      const n = Number(sizes[p]);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    // Largest file first, so a big one opens its own piece instead of landing
+    // last and stranding a piece it cannot fit into.
+    const ordered = paths
+      .slice()
+      .sort((a, b) => sizeOf(b) - sizeOf(a) || (a < b ? -1 : a > b ? 1 : 0));
+
+    const pieces = [];
+    for (const p of ordered) {
+      const size = sizeOf(p);
+      let target = pieces.find((x) => x.bytes + size <= cap);
+      if (!target) {
+        target = { paths: [], bytes: 0, sizes: Object.create(null) };
+        pieces.push(target);
+      }
+      target.paths.push(p);
+      target.bytes += size;
+      target.sizes[p] = size;
+    }
+
+    if (pieces.length <= 1) {
+      out.push(c);
+      continue;
+    }
+    for (const piece of pieces) {
+      piece.paths.sort();
+      out.push(piece);
+    }
+    splitGroups.push(paths.slice().sort());
+  }
+
+  return { clusters: out, splitGroups };
 }
 
 /**
@@ -434,7 +532,8 @@ function buildRoster({
   }, 0);
 
   const k = computeK({ totalBytes, fileCount: changed.length });
-  const bins = packClusters(clusterFiles(list, importEdges), k);
+  const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES);
+  const bins = packClusters(split.clusters, k);
   assertPartition(bins, changed);
 
   // Defensive, not cosmetic: a consumer is free to point `sonnet-model` at a
@@ -463,6 +562,9 @@ function buildRoster({
     k: bins.length,
     roles,
     changed_files: changed,
+    // Clusters that had to be broken across reviewers: their internal edges are
+    // the tracer's responsibility now, since no single reviewer holds them.
+    split_clusters: split.splitGroups,
     symbol_manifest: Array.isArray(symbolManifest) ? symbolManifest : [],
     has_test_change: hasTestChange === true,
     has_logic_change: hasLogicChange === true,
@@ -477,6 +579,7 @@ module.exports = {
   computeK,
   clusterFiles,
   packClusters,
+  splitOversized,
   extractImports,
   resolveImportEdges,
   assertPartition,

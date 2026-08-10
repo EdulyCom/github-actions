@@ -24,11 +24,12 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
-// Spec §6 step 2 is now implemented in full — union equal to changed_files,
-// assigned-implies-reviewed, and pairwise disjointness. Disjointness was
-// vacuous at roster size 1 and is asserted here because `lib/roster.js` can
-// only assert the roster it *emits*; a role file arrives from a model stage and
-// can claim an assignment the roster never made.
+// Spec §6 step 2 is now implemented in full, over `assigned_files`: pairwise
+// disjoint, no stray path, union equal to `changed_files`, and every assigned
+// file claimed as reviewed. Disjointness was vacuous at roster size 1. All four
+// are asserted here as well as in `lib/roster.js` because that module can only
+// assert the roster it *emits*; a role file arrives from a model stage and can
+// claim an assignment the roster never made.
 //
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 
@@ -76,8 +77,13 @@ function inconclusive(reason, coverage) {
   };
 }
 
-/** A role file is usable only if it is the shape we froze. */
-function malformed(role, f) {
+/**
+ * A role file is usable only if it is the shape we froze.
+ *
+ * `ids` is supplied by the caller and shared across every role on purpose —
+ * see the duplicate check below.
+ */
+function malformed(role, f, ids) {
   if (f === null || typeof f !== "object") return `malformed:${role}`;
   if (f.schema !== 1) return `malformed:${role}`;
   if (f.complete !== true) return `malformed:${role}`;
@@ -90,7 +96,6 @@ function malformed(role, f) {
   // dropped[] — silently discarding a finding that might be a P0 because its
   // label was garbled. That is precisely the "absence must never read as
   // cleanliness" failure this module exists to prevent, so it is inconclusive.
-  const ids = new Set();
   for (const item of f.findings) {
     if (item === null || typeof item !== "object") return `malformed:${role}`;
     if (typeof item.id !== "string" || item.id === "") return `malformed:${role}`;
@@ -99,6 +104,13 @@ function malformed(role, f) {
     // collision would collapse the score join below (Map, last wins) while the
     // set-equality assertions stayed green, because Sets are duplicate-blind —
     // reproduced as a P0@100 colliding with a P3@25 yielding verdict pass.
+    //
+    // The set spans ALL roles, not one. `derive-findings.js` uses the model's
+    // own id string verbatim whenever it supplies one, so nothing namespaces
+    // ids by role, and two coverage reviewers can independently mint the same
+    // one. A per-role set would validate each file happily and let the
+    // collision through to the join — the identical fail-open, reached from the
+    // direction fan-out opens up.
     if (ids.has(item.id)) return `malformed:${role}:duplicate finding id ${item.id}`;
     ids.add(item.id);
   }
@@ -128,27 +140,37 @@ function aggregate({ manifest, roster, findings, scores }) {
 
   // §6 step 1 / §8 rows 4-5 — every rostered role produced a parseable,
   // complete file. A dead role is named rather than averaged away.
+  const findingIds = new Set();
   for (const role of roles) {
     if (byRole[role] === undefined) return inconclusive(`missing-role:${role}`);
-    const bad = malformed(role, byRole[role]);
+    const bad = malformed(role, byRole[role], findingIds);
     if (bad) return inconclusive(bad);
   }
 
-  // §6 step 2 / §8 row 6 — the partition must cover changed_files exactly, the
-  // roles' assignments must be pairwise disjoint, and each role must have
-  // reviewed everything it was assigned. This checks the *claim*, not
-  // comprehension: it is a tripwire against silent truncation, not proof of
-  // reading. Said plainly here so nobody reads more into it.
+  // §6 step 2 / §8 row 6, in two passes over two different properties.
   //
-  // Only `assigned_files` is a partition. `files_reviewed` may overlap freely —
-  // reading a neighbouring file for context is what a reviewer should do.
-  const reviewed = new Set();
+  // PASS 1 — the ASSIGNMENT is a partition of changed_files: pairwise disjoint,
+  // no stray path, nothing left unowned. Only `assigned_files` is a partition;
+  // `files_reviewed` may overlap freely and may range outside the diff, since
+  // reading a neighbouring file for context is what a reviewer should do. That
+  // is exactly why coverage cannot be argued from `files_reviewed` alone — a
+  // file assigned to nobody but incidentally opened by somebody would satisfy a
+  // reviewed-union while no role ever owned it.
+  //
+  // `lib/roster.js` asserts the same three properties on the roster it emits.
+  // Repeating them here is not belt-and-braces: a role file arrives from a model
+  // stage and can claim an assignment the roster never made, so this module has
+  // to validate review output independently of the roster that produced it.
+  //
+  // The coverage payload reports `reviewed_files: 0` on these failures because
+  // nothing has been verified as reviewed yet — a partial tally would read as a
+  // coverage shortfall, which is precisely what a partition error is not.
+  const partitionCoverage = { expected_files: changed.length, reviewed_files: 0 };
+  const changedSet = new Set(changed.map(normPath));
   const assignedBy = new Map();
   for (const role of roles) {
-    const f = byRole[role];
-    const assigned = (Array.isArray(f.assigned_files) ? f.assigned_files : []).map(normPath);
-    const seen = new Set(f.files_reviewed.map(normPath));
-
+    const assigned = (Array.isArray(byRole[role].assigned_files) ? byRole[role].assigned_files : [])
+      .map(normPath);
     for (const p of assigned) {
       const owner = assignedBy.get(p);
       if (owner !== undefined && owner !== role) {
@@ -156,14 +178,33 @@ function aggregate({ manifest, roster, findings, scores }) {
         // stays green. It means the roster was built wrong — the file is read
         // twice, and one defect can surface under two ids that the
         // deterministic dedupe cannot merge when the reported line differs.
+        return inconclusive(`partition:${p} assigned to both ${owner} and ${role}`, partitionCoverage);
+      }
+      if (!changedSet.has(p)) {
+        // The role was built against a different diff than the one being gated.
         return inconclusive(
-          `partition:${p} assigned to both ${owner} and ${role}`,
-          { expected_files: changed.length, reviewed_files: reviewed.size },
+          `partition:${p} assigned to ${role} but is not in changed_files`,
+          partitionCoverage,
         );
       }
       assignedBy.set(p, role);
     }
+  }
+  for (const p of changedSet) {
+    if (!assignedBy.has(p)) {
+      return inconclusive(`partition:${p} was assigned to no role`, partitionCoverage);
+    }
+  }
 
+  // PASS 2 — each role reviewed everything it was assigned. This checks the
+  // *claim*, not comprehension: a tripwire against silent truncation, not proof
+  // of reading. Said plainly here so nobody reads more into it. Combined with
+  // pass 1, every changed file is now owned by a role that says it read it.
+  const reviewed = new Set();
+  for (const role of roles) {
+    const f = byRole[role];
+    const assigned = (Array.isArray(f.assigned_files) ? f.assigned_files : []).map(normPath);
+    const seen = new Set(f.files_reviewed.map(normPath));
     for (const p of assigned) {
       if (!seen.has(p)) {
         // Name the path. This step's only product is a diagnosable log line,
@@ -180,11 +221,6 @@ function aggregate({ manifest, roster, findings, scores }) {
     expected_files: changed.length,
     reviewed_files: reviewed.size,
   };
-  for (const p of changed.map(normPath)) {
-    if (!reviewed.has(p)) {
-      return inconclusive(`coverage:${p} was not reviewed by any role`, coverage);
-    }
-  }
 
   // §6 step 9 / §8 row 10 — intent is owned by exactly one role and a verdict
   // cannot be reached without it.
