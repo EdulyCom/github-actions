@@ -733,7 +733,7 @@ runs:
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
           live `/requesting-code-review` and `/verification-before-completion`
@@ -836,6 +836,15 @@ runs:
           marker comment in `comment_markdown` — the caller deterministically
           recomputes the verdict and prepends its own banner separately.
 
+          Populate the optional `findings` and `files_reviewed` fields of the
+          structured output as well. `findings` is one entry per finding you
+          report, with your own confidence 0/25/50/75/100 and, where you would
+          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          you read in full — it is cross-checked against the staged manifest, so
+          a short list reads as incomplete coverage. A later non-gating step
+          aggregates these deterministically and compares the result against
+          your own `counts`; they do not affect this run's verdict.
+
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
           recomputes the actual pass/fail decision from `counts` alone and
@@ -932,7 +941,7 @@ runs:
           --resume ${{ steps.review.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
           --allowedTools "Read"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           Your previous turn in this session finished the review but ended
           without emitting the required structured output.
@@ -944,6 +953,12 @@ runs:
           review body you already composed (findings grouped P0-P3 with
           "_None._" for empty sections, plus strengths; no leading verdict
           token, confidence line, or HTML marker).
+
+          Populate the optional `findings` and `files_reviewed` fields too, from
+          the analysis you already completed — one `findings` entry per finding
+          you reported with your own confidence 0/25/50/75/100, and every file
+          you read in full in `files_reviewed`. This is transcription of work
+          already done, not re-analysis.
 
           Emitting the structured output is your only remaining task.
 
@@ -1015,11 +1030,20 @@ runs:
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
           ended without returning the required structured output. Emitting the
           structured output as your FINAL action is mandatory this time.
+
+          Populate the optional `findings` and `files_reviewed` fields of the
+          structured output as well. `findings` is one entry per finding you
+          report, with your own confidence 0/25/50/75/100 and, where you would
+          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          you read in full — it is cross-checked against the staged manifest, so
+          a short list reads as incomplete coverage. A later non-gating step
+          aggregates these deterministically and compares the result against
+          your own `counts`; they do not affect this run's verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + checklist) and `context.md` at the repo root
@@ -1256,6 +1280,196 @@ runs:
                 throw err;
               }
             }
+          }
+
+    # Derive the findings artifacts from the schema-validated structured
+    # output, rather than asking the model to write them itself.
+    #
+    # Two reasons, both learned the hard way on this branch:
+    #   1. Enforcement. --json-schema constrains the shape at the point of
+    #      generation. A prose "also write these two files" instruction has
+    #      nothing behind it — on run 31360398002 the instruction had landed on
+    #      a Read-only step and no file was ever written on any path.
+    #   2. Blast radius. Emitting the files from the model needs `Write` on a
+    #      session that ingests the PR diff, PR body and linked-issue bodies,
+    #      while Publish later require()s JS from github.action_path in-process
+    #      with a write-scoped App token. Deriving here removes the write
+    #      primitive instead of fencing it — and fencing it is not simple:
+    #      Claude Code accepts a Write(path) permission rule and never consults
+    #      it (only Edit(path)/Read(path) are checked), so the obvious scoping
+    #      would look right in review and enforce nothing.
+    - name: Derive findings artifacts
+      id: derive
+      continue-on-error: true
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        DERIVE_PATH: ${{ github.action_path }}/lib/derive-findings.js
+        MODEL: ${{ steps.route.outputs.model }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
+      with:
+        script: |
+          const fs = require("fs");
+          const { deriveArtifacts } = require(process.env.DERIVE_PATH);
+
+          let review = null;
+          try { review = JSON.parse(process.env.REVIEW_JSON || "null"); } catch { /* handled below */ }
+          if (!review) { core.info("derive: no structured output to derive from"); return; }
+
+          let assignedFiles;
+          try {
+            assignedFiles = JSON.parse(fs.readFileSync(".ai-review/manifest.json", "utf8")).changed_files;
+          } catch { /* fall back to the model's own list inside deriveArtifacts */ }
+
+          const out = deriveArtifacts(review, {
+            role: "review-serial",
+            assignedFiles,
+            model: process.env.MODEL,
+          });
+          if (!out) {
+            core.info("derive: structured output has no findings/files_reviewed block — nothing to write");
+            return;
+          }
+
+          fs.mkdirSync(".ai-review/findings", { recursive: true });
+          fs.writeFileSync(".ai-review/findings/review-serial.json", JSON.stringify(out.findings, null, 2));
+          fs.writeFileSync(".ai-review/scores.json", JSON.stringify(out.scores, null, 2));
+          core.info(`derive: wrote ${out.findings.findings.length} findings and ${out.scores.scores.length} scores`);
+
+    # Shadow aggregation — OBSERVATION ONLY, gates nothing.
+    #
+    # PR-C's plan is to replace structured_output with findings files on disk
+    # and delete the repair/back-off/retry/salvage chain. That is the first
+    # change in this migration that can wrongly BLOCK a developer's PR, and it
+    # lands on 7 consumer repos at once with no staging ring, so it is not
+    # something to ship on a design argument alone.
+    #
+    # This step runs the new deterministic aggregation next to the live path
+    # and records whether the two agree. It reads the files the Derive step
+    # above produces from the schema-validated structured output (the model
+    # holds no Write grant — see that step's comment), runs lib/aggregate.js, feeds the result through the
+    # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
+    # is a warning in the log and a row in the job summary.
+    #
+    # Deliberately non-gating: `continue-on-error`, no outputs consumed by any
+    # later step, and Publish below is untouched. Deleting --json-schema and the
+    # recovery chain waits until this has agreed on real PRs — the evidence this
+    # step exists to collect.
+    - name: Shadow aggregation (non-gating)
+      id: shadow
+      continue-on-error: true
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        AGGREGATE_PATH: ${{ github.action_path }}/lib/aggregate.js
+        RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
+        CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
+        CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
+      with:
+        script: |
+          const fs = require("fs");
+          const { aggregate } = require(process.env.AGGREGATE_PATH);
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
+
+          const readJson = (p) => {
+            try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+          };
+
+          const manifest = readJson(".ai-review/manifest.json");
+          const findings = readJson(".ai-review/findings/review-serial.json");
+          const scores = readJson(".ai-review/scores.json");
+
+          const missing = [];
+          if (!manifest) missing.push("manifest.json");
+          if (!findings) missing.push("findings/review-serial.json");
+          if (!scores) missing.push("scores.json");
+
+          const opts = {
+            confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD),
+            ciSignal: process.env.CI_SIGNAL || "no_ci",
+          };
+
+          let live = null;
+          try {
+            const parsed = JSON.parse(process.env.REVIEW_JSON || "null");
+            if (parsed) live = recompute(parsed, opts);
+          } catch { /* live path already handles its own failures */ }
+
+          let shadow = null;
+          let gateResult = null;
+          let shadowStatus = missing.length ? `missing: ${missing.join(", ")}` : null;
+          if (!missing.length) {
+            // Spec §8 row 13: aggregation throwing must be a recorded outcome,
+            // not a silent hole. continue-on-error would otherwise keep the job
+            // green and produce no data point at all.
+            try {
+              const gate = aggregate({
+                manifest,
+                roster: ["review-serial"],
+                findings: { "review-serial": findings },
+                scores,
+              });
+              gateResult = gate;
+              shadowStatus = gate.status === "ok" ? "ok" : `inconclusive:${gate.reason}`;
+              if (gate.status === "ok") shadow = recompute(gate.review, opts);
+            } catch (err) {
+              shadowStatus = `aggregator-error: ${err && err.message}`;
+            }
+          }
+
+          const cell = (v) => (v === null || v === undefined ? "—" : String(v));
+          const agree = live && shadow
+            && live.verdict === shadow.verdict
+            && JSON.stringify(live.counts) === JSON.stringify(shadow.counts);
+
+          const rows = [
+            ["verdict", cell(live && live.verdict), cell(shadow && shadow.verdict)],
+            ["confidence", cell(live && live.confidence), cell(shadow && shadow.confidence)],
+            ["merge risk", cell(live && live.mergeRisk), cell(shadow && shadow.mergeRisk)],
+            ["counts", cell(live && JSON.stringify(live.counts)), cell(shadow && JSON.stringify(shadow.counts))],
+          ];
+
+          core.info(`ai-review-shadow ${JSON.stringify({
+            status: shadowStatus,
+            agree: Boolean(agree),
+            liveVerdict: live ? live.verdict : null,
+            shadowVerdict: shadow ? shadow.verdict : null,
+            liveCounts: live ? live.counts : null,
+            shadowCounts: shadow ? shadow.counts : null,
+          })}`);
+
+          // Log WHY findings were filtered. Without this a count divergence is
+          // visible but not diagnosable, which defeats the point of running the
+          // comparison at all — the first real divergence (a P2 present live,
+          // absent in shadow) could not be explained from the log.
+          if (gateResult && gateResult.dropped.length > 0) {
+            core.info(`ai-review-shadow-dropped ${JSON.stringify(
+              gateResult.dropped.map((d) => ({
+                id: d.id, severity: d.severity, confidence: d.confidence,
+                why: d.dropped_because,
+              })),
+            )}`);
+          }
+
+          await core.summary
+            .addHeading("Shadow aggregation (non-gating)", 3)
+            .addRaw(`Shadow status: \`${shadowStatus}\` — agreement: **${agree ? "YES" : "NO"}**\n\n`)
+            .addTable([
+              [{ data: "field", header: true }, { data: "live (structured_output)", header: true }, { data: "shadow (findings files)", header: true }],
+              ...rows.map((r) => r.map((c) => ({ data: c }))),
+            ])
+            .write();
+
+
+          if (live && shadow && !agree) {
+            core.warning(`Shadow aggregation DIVERGED from the live verdict: live=${live.verdict} shadow=${shadow.verdict}. Investigate before PR-C deletes structured_output.`);
           }
 
     - name: Publish review
