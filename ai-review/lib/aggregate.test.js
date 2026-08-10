@@ -213,12 +213,14 @@ test("§7a: a P3 at confidence 60 is DROPPED (noise control), never silently", (
   assert.equal(out.status, "ok");
 });
 
-test("§7a: thresholds are >=50 for P0/P1 and >=80 for P2/P3", () => {
+test("§7a: thresholds are >=50 for P0/P1 and >=75 for P2/P3", () => {
+  // 75, not 80: confidence is a 0/25/50/75/100 enum, so an 80 floor admitted
+  // only 100 for P2/P3. See the CONFIDENCE_FLOOR comment.
   const cases = [
     ["P0", 50, true], ["P0", 49, false],
     ["P1", 50, true], ["P1", 49, false],
-    ["P2", 80, true], ["P2", 79, false],
-    ["P3", 80, true], ["P3", 79, false],
+    ["P2", 75, true], ["P2", 74, false],
+    ["P3", 75, true], ["P3", 74, false],
   ];
   for (const [sev, conf, keep] of cases) {
     const f = finding({ severity: sev });
@@ -428,4 +430,97 @@ test("a confirmed P0 with a missing confidence can NEVER produce a pass", () => 
   });
   assert.equal(out.status, "inconclusive");
   assert.equal(out.review, null);
+});
+
+// --- duplicate ids -----------------------------------------------------------
+//
+// The schema does not require id uniqueness and the model invents the ids.
+// scoreById is a Map (last wins) and the join asserts SET equality, which is
+// duplicate-blind — so two findings sharing an id both take the last score.
+// Reproduced before the fix: a P0 at confidence 100 colliding with a P3 at 25
+// produced counts {p0:0,...}, status ok, verdict PASS.
+
+test("row 5: duplicate finding ids are malformed, never a silent collapse", () => {
+  const dup = [finding({ id: "f1", severity: "P0" }), finding({ id: "f1", severity: "P3" })];
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: dup }) },
+    scores: scoresFor([], {
+      scores: [
+        { id: "f1", confidence: 100, severity_confirmed: "P0" },
+        { id: "f1", confidence: 25, severity_confirmed: "P3" },
+      ],
+    }),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /duplicate/);
+});
+
+test("a colliding P0 can NEVER be laundered into a pass", () => {
+  const dup = [finding({ id: "f1", severity: "P0" }), finding({ id: "f1", severity: "P3" })];
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: dup }) },
+    scores: scoresFor([], {
+      scores: [
+        { id: "f1", confidence: 100, severity_confirmed: "P0" },
+        { id: "f1", confidence: 25, severity_confirmed: "P3" },
+      ],
+    }),
+  });
+  assert.equal(out.review, null);
+});
+
+test("row 5: duplicate score ids are malformed too", () => {
+  const f = finding({ id: "f1" });
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: [f] }) },
+    scores: scoresFor([], {
+      scores: [
+        { id: "f1", confidence: 90, severity_confirmed: "P1" },
+        { id: "f1", confidence: 25, severity_confirmed: "P3" },
+      ],
+    }),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /duplicate/);
+});
+
+// --- threshold granularity ---------------------------------------------------
+
+test("§7a floors land ON rungs of the 0/25/50/75/100 confidence enum", () => {
+  const { CONFIDENCE_FLOOR } = require("./aggregate.js");
+  const ENUM = [0, 25, 50, 75, 100];
+  for (const [sev, floor] of Object.entries(CONFIDENCE_FLOOR)) {
+    assert.ok(ENUM.includes(floor), `${sev} floor ${floor} is not an admissible confidence`);
+  }
+});
+
+test("a P2 at 75 now survives; at 50 it still drops", () => {
+  for (const [conf, keep] of [[75, true], [50, false]]) {
+    const f = finding({ severity: "P2" });
+    const out = run({
+      findings: { "review-serial": roleFile({ findings: [f] }) },
+      scores: scoresFor([f.id], {
+        scores: [{ id: f.id, confidence: conf, severity_confirmed: "P2" }],
+      }),
+    });
+    assert.equal(out.kept.length, keep ? 1 : 0, `P2@${conf}`);
+  }
+});
+
+// --- coverage diagnostics ----------------------------------------------------
+
+test("a coverage failure names the offending path", () => {
+  const out = run({
+    findings: { "review-serial": roleFile({ files_reviewed: ["src/a.ts"] }) },
+  });
+  assert.match(out.reason, /src\/b\.ts/);
+});
+
+test("a leading ./ on a model-typed path is not a coverage failure", () => {
+  const out = run({
+    findings: {
+      "review-serial": roleFile({ files_reviewed: ["./src/a.ts", "src/b.ts"] }),
+    },
+  });
+  assert.equal(out.status, "ok");
 });

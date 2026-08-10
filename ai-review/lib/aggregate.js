@@ -24,6 +24,12 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
+// A second, smaller divergence from spec §6 step 2, recorded so it is not read
+// as an oversight: pairwise-disjointness between roles is not asserted, only
+// that every assigned file was reviewed and every changed file was covered by
+// some role. At roster size 1 (PR-C) disjointness is vacuous; PR-D introduces
+// multiple roles and must add it.
+//
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 
 const SEVERITIES = ["P0", "P1", "P2", "P3"];
@@ -35,7 +41,19 @@ const VALID_INTENT = new Set(["aligned", "partial", "deviated", "skipped"]);
 // an unexcluded boundary. A flat <80 filter would silently drop that class,
 // which is the one the "we had enough of broken apps" stance cares about most.
 // P2/P3 keep the stricter bar, where false-positive discipline is noise control.
-const CONFIDENCE_FLOOR = { P0: 50, P1: 50, P2: 80, P3: 80 };
+// The floors must land ON a rung of that enum. 80 was the spec's starting
+// number, but no admissible value lies in [80,100), so it silently meant
+// "exactly 100" — and measured runs bore that out: 8 of 8 dropped findings
+// across three shadow runs were P2/P3 at 50 or 75, never a marginal case.
+// That is threshold granularity, not aggregation, polluting the very evidence
+// the shadow step exists to collect. 75 keeps the "might be real, wasn't able
+// to verify" band the rubric's recall bias cares about and still drops 50.
+// Spec §7a and §11 q2 asked for exactly this to be tuned from observed data.
+const CONFIDENCE_FLOOR = { P0: 50, P1: 50, P2: 75, P3: 75 };
+
+// `assigned_files` is git output; `files_reviewed` is model-typed text. A
+// leading "./" is the drift seen in practice and is not a coverage failure.
+const normPath = (p) => String(p ?? "").trim().replace(/^\.\//, "");
 
 const rank = (sev) => {
   const i = SEVERITIES.indexOf(sev);
@@ -72,10 +90,17 @@ function malformed(role, f) {
   // dropped[] — silently discarding a finding that might be a P0 because its
   // label was garbled. That is precisely the "absence must never read as
   // cleanliness" failure this module exists to prevent, so it is inconclusive.
+  const ids = new Set();
   for (const item of f.findings) {
     if (item === null || typeof item !== "object") return `malformed:${role}`;
     if (typeof item.id !== "string" || item.id === "") return `malformed:${role}`;
     if (!SEVERITIES.includes(item.severity)) return `malformed:${role}`;
+    // Ids are model-invented and the schema does not require uniqueness. A
+    // collision would collapse the score join below (Map, last wins) while the
+    // set-equality assertions stayed green, because Sets are duplicate-blind —
+    // reproduced as a P0@100 colliding with a P3@25 yielding verdict pass.
+    if (ids.has(item.id)) return `malformed:${role}:duplicate finding id ${item.id}`;
+    ids.add(item.id);
   }
   return null;
 }
@@ -116,23 +141,25 @@ function aggregate({ manifest, roster, findings, scores }) {
   const reviewed = new Set();
   for (const role of roles) {
     const f = byRole[role];
-    const assigned = Array.isArray(f.assigned_files) ? f.assigned_files : [];
-    const seen = new Set(f.files_reviewed);
+    const assigned = (Array.isArray(f.assigned_files) ? f.assigned_files : []).map(normPath);
+    const seen = new Set(f.files_reviewed.map(normPath));
     for (const p of assigned) {
       if (!seen.has(p)) {
-        return inconclusive(`coverage:${role} assigned ${assigned.length}, reviewed ${seen.size}`, {
-          expected_files: changed.length,
-          reviewed_files: seen.size,
-        });
+        // Name the path. This step's only product is a diagnosable log line,
+        // and "assigned 11, reviewed 8" cannot be acted on.
+        return inconclusive(
+          `coverage:${role} did not review ${p} (assigned ${assigned.length}, reviewed ${seen.size})`,
+          { expected_files: changed.length, reviewed_files: seen.size },
+        );
       }
     }
-    for (const p of f.files_reviewed) reviewed.add(p);
+    for (const p of seen) reviewed.add(p);
   }
   const coverage = {
     expected_files: changed.length,
     reviewed_files: reviewed.size,
   };
-  for (const p of changed) {
+  for (const p of changed.map(normPath)) {
     if (!reviewed.has(p)) {
       return inconclusive(`coverage:${p} was not reviewed by any role`, coverage);
     }
@@ -162,9 +189,14 @@ function aggregate({ manifest, roster, findings, scores }) {
   // the drop branch below — so a P0 the scorer CONFIRMED as P0 would land in
   // dropped[], counts.p0 would be 0, and recompute() would return pass. A
   // missing number must be inconclusive, never a silent acquittal.
+  const scoreIds = new Set();
   for (const x of scoreList) {
     if (x === null || typeof x !== "object") return inconclusive("malformed:scorer", coverage);
     if (typeof x.id !== "string" || x.id === "") return inconclusive("malformed:scorer", coverage);
+    if (scoreIds.has(x.id)) {
+      return inconclusive(`malformed:scorer:duplicate score id ${x.id}`, coverage);
+    }
+    scoreIds.add(x.id);
     if (typeof x.confidence !== "number" || !Number.isFinite(x.confidence)) {
       return inconclusive(`malformed:scorer:${x.id} has no usable confidence`, coverage);
     }

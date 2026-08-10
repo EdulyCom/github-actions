@@ -954,6 +954,12 @@ runs:
           "_None._" for empty sections, plus strengths; no leading verdict
           token, confidence line, or HTML marker).
 
+          Populate the optional `findings` and `files_reviewed` fields too, from
+          the analysis you already completed — one `findings` entry per finding
+          you reported with your own confidence 0/25/50/75/100, and every file
+          you read in full in `files_reviewed`. This is transcription of work
+          already done, not re-analysis.
+
           Emitting the structured output is your only remaining task.
 
     # Snapshot for the same shared-path reason as the two above. Repair's log
@@ -1342,8 +1348,9 @@ runs:
     # something to ship on a design argument alone.
     #
     # This step runs the new deterministic aggregation next to the live path
-    # and records whether the two agree. It reads the shadow files the review
-    # stage now writes, runs lib/aggregate.js, feeds the result through the
+    # and records whether the two agree. It reads the files the Derive step
+    # above produces from the schema-validated structured output (the model
+    # holds no Write grant — see that step's comment), runs lib/aggregate.js, feeds the result through the
     # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
     # is a warning in the log and a row in the job summary.
     #
@@ -1399,15 +1406,22 @@ runs:
           let gateResult = null;
           let shadowStatus = missing.length ? `missing: ${missing.join(", ")}` : null;
           if (!missing.length) {
-            const gate = aggregate({
-              manifest,
-              roster: ["review-serial"],
-              findings: { "review-serial": findings },
-              scores,
-            });
-            gateResult = gate;
-            shadowStatus = gate.status === "ok" ? "ok" : `inconclusive:${gate.reason}`;
-            if (gate.status === "ok") shadow = recompute(gate.review, opts);
+            // Spec §8 row 13: aggregation throwing must be a recorded outcome,
+            // not a silent hole. continue-on-error would otherwise keep the job
+            // green and produce no data point at all.
+            try {
+              const gate = aggregate({
+                manifest,
+                roster: ["review-serial"],
+                findings: { "review-serial": findings },
+                scores,
+              });
+              gateResult = gate;
+              shadowStatus = gate.status === "ok" ? "ok" : `inconclusive:${gate.reason}`;
+              if (gate.status === "ok") shadow = recompute(gate.review, opts);
+            } catch (err) {
+              shadowStatus = `aggregator-error: ${err && err.message}`;
+            }
           }
 
           const cell = (v) => (v === null || v === undefined ? "—" : String(v));
@@ -1421,15 +1435,6 @@ runs:
             ["merge risk", cell(live && live.mergeRisk), cell(shadow && shadow.mergeRisk)],
             ["counts", cell(live && JSON.stringify(live.counts)), cell(shadow && JSON.stringify(shadow.counts))],
           ];
-
-          await core.summary
-            .addHeading("Shadow aggregation (non-gating)", 3)
-            .addRaw(`Shadow status: \`${shadowStatus}\` — agreement: **${agree ? "YES" : "NO"}**\n\n`)
-            .addTable([
-              [{ data: "field", header: true }, { data: "live (structured_output)", header: true }, { data: "shadow (findings files)", header: true }],
-              ...rows.map((r) => r.map((c) => ({ data: c }))),
-            ])
-            .write();
 
           core.info(`ai-review-shadow ${JSON.stringify({
             status: shadowStatus,
@@ -1452,6 +1457,16 @@ runs:
               })),
             )}`);
           }
+
+          await core.summary
+            .addHeading("Shadow aggregation (non-gating)", 3)
+            .addRaw(`Shadow status: \`${shadowStatus}\` — agreement: **${agree ? "YES" : "NO"}**\n\n`)
+            .addTable([
+              [{ data: "field", header: true }, { data: "live (structured_output)", header: true }, { data: "shadow (findings files)", header: true }],
+              ...rows.map((r) => r.map((c) => ({ data: c }))),
+            ])
+            .write();
+
 
           if (live && shadow && !agree) {
             core.warning(`Shadow aggregation DIVERGED from the live verdict: live=${live.verdict} shadow=${shadow.verdict}. Investigate before PR-C deletes structured_output.`);
