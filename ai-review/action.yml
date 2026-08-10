@@ -168,18 +168,21 @@ inputs:
       Per-request timeout in milliseconds for every Claude stage, passed to
       the CLI as `API_TIMEOUT_MS`.
 
-      The CLI default is 600000 (10 min). Because the SDK retries timeouts,
-      wall-clock for a hung request reaches roughly
-      `timeout x (max_retries + 1)` — about 30 min. Three measured runs did
-      exactly that: they hung on their FIRST turn and returned `num_turns: 1`,
-      `$0`, zero tool calls and `is_error: true` after 1647262 ms and
-      1666947 ms x2, a 1.2% spread that indicates a budget expiring rather
-      than variable slowness.
+      DOES NOT BOUND THE ~27.5-MINUTE STALL. This input was introduced on the
+      theory that the stall was the CLI default (600000, 10 min) multiplied by
+      the SDK's timeout retries — `timeout x (max_retries + 1)` ~= 30 min.
+      Run 31356469199 falsified that: with this input set to 180000 the
+      context stage still hung for 1656307 ms (27m36s) on a single turn,
+      landing in the same tight cluster as the three stalls observed before it
+      (1647262, 1666947 x2 — a 1.2% spread). A 3-minute per-request timeout
+      producing a 27.6-minute stall means the ceiling is enforced somewhere
+      this setting does not reach.
 
-      Default 180000 (3 min) bounds a hang to roughly 9 min instead of 30.
-      Observed turn latency is 4-9s, so this leaves over 20x headroom over a
-      normal turn. Raise it if a legitimate single turn is ever cut off;
-      lower it to fail faster against an unreliable gateway.
+      What it is still good for: a genuine per-request bound. No run has shown
+      it clipping legitimate work (observed turn latency is 4-9s, so 180000
+      leaves >20x headroom), and it fails a wedged request faster than the
+      10-minute default would. Raise it if a legitimate single turn is ever
+      cut off. Do not rely on it to bound a stall.
     required: false
     default: "180000"
   anthropic-api-key:
@@ -683,21 +686,26 @@ runs:
       # this flag has never been observed to terminate a run. Wall-clock is
       # bounded in practice only by the caller's job timeout-minutes.
       #
-      # API_TIMEOUT_MS (in env: below) is the one lever that bounds the stall
-      # mode this action actually suffers from. Measured: three independent
-      # runs hung on their FIRST turn and returned num_turns 1, $0, zero tool
-      # calls and is_error true after 1647262 ms (selftest 31317613715) and
-      # 1666947 ms x2 (Lagn-App/lagn) — a 1.2% spread, i.e. a budget expiring,
-      # not variable slowness. The CLI default is 600000 (10 min) per request
-      # and the SDK retries timeouts, so wall-clock reaches roughly
-      # timeout x (max_retries + 1) = ~30 min before the stage gives up.
+      # THE ~27.5-MINUTE STALL IS STILL UNSOLVED. Four runs have hung on their
+      # FIRST turn and returned num_turns 1, $0, zero tool calls, is_error
+      # true, after 1647262 / 1666947 / 1666947 / 1656307 ms — a 1.2% spread
+      # across different repos and days, i.e. a fixed ceiling, not variable
+      # slowness. Two fixes were tried against it and BOTH were falsified by
+      # measurement; do not re-add either without new evidence:
       #
-      # This is NOT model overload: --fallback-model was tried and did not
-      # help, because a fallback triggers on an overloaded RESPONSE and here
-      # the gateway never answers at all. Shortening the per-request timeout
-      # is what bounds it. Observed turn latency is ~4-9s (28 turns/102s
-      # context, 72 turns/631s review), so this leaves >20x headroom over a
-      # normal turn while cutting a hang from ~30 min to ~9.
+      #   --fallback-model   A fallback triggers on an overloaded RESPONSE.
+      #                      Here the gateway never answers, so nothing fires.
+      #                      It was live during run 31317613715 and the stall
+      #                      happened anyway.
+      #   API_TIMEOUT_MS     Run 31356469199 stalled for 1656307 ms WITH this
+      #                      set to 180000. A 3-minute per-request timeout
+      #                      cannot produce a 27.6-minute stall, so the
+      #                      ceiling lives somewhere this does not reach.
+      #
+      # Three of the four stalls hit the Context stage, which is why
+      # `enable-context-stage` exists: removing the stage is the only measure
+      # so far shown to avoid the failure, as opposed to bounding it.
+      # The cause is upstream of this action — investigate the gateway.
       continue-on-error: true
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
