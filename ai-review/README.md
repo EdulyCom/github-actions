@@ -149,7 +149,7 @@ injection-safety rule.
 | `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
 | `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
-| `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS`. The CLI default is `600000`; because the SDK retries timeouts, a hung request can burn ~30 min. `180000` bounds that to ~9 min while leaving >20x headroom over a normal 4-9s turn. | No | `180000` |
+| `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
