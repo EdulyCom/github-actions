@@ -1514,3 +1514,16 @@ runs:
           // Also in the plain log, so a run's numbers survive summary retention
           // and can be scraped for the baseline table.
           core.info(`ai-review-metrics ${JSON.stringify(metrics.totals)}`);
+
+          // Say it out loud. The first five stalls were each diagnosed by
+          // digging through raw runner logs after the fact; a warning here
+          // means the run diagnoses itself. Observation only — the stage is
+          // already continue-on-error and Publish already fails closed.
+          const stalled = metrics.totals.stalledStages || [];
+          if (stalled.length > 0) {
+            core.warning(
+              `Stage(s) ${stalled.join(", ")} stalled: hung on the first turn and returned no work ` +
+              `(1 turn, $0, zero tool calls, >15 min). This is the gateway stall tracked in issue #43, ` +
+              `not a code-quality result — re-run. Six prior occurrences clustered at ~27.6 min.`
+            );
+          }
