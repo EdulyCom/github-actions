@@ -384,3 +384,48 @@ test("a scorer severity_confirmed that is garbage does not silently downgrade", 
   assert.equal(out.status, "ok");
   assert.equal(out.review.counts.p1, 1);
 });
+
+// --- scorer-side validation --------------------------------------------------
+//
+// Symmetric to the finding-level checks. Without this, Number(undefined) is NaN
+// and Number(null) is 0 — both take the drop branch — so a P0 the scorer
+// CONFIRMED as P0 lands in dropped[], counts.p0 is 0, and recompute() returns
+// pass. Reproduced before the fix: status ok, counts all zero, verdict pass.
+
+test("row 5: a score entry with no usable confidence is malformed, not a silent drop", () => {
+  for (const conf of [undefined, null, "", "high", NaN]) {
+    const f = finding({ severity: "P0" });
+    const out = run({
+      findings: { "review-serial": roleFile({ findings: [f] }) },
+      scores: scoresFor([f.id], {
+        scores: [{ id: f.id, confidence: conf, severity_confirmed: "P0" }],
+      }),
+    });
+    assert.equal(out.status, "inconclusive", `confidence=${String(conf)}`);
+    assert.match(out.reason, /malformed|score/);
+  }
+});
+
+test("row 5: a score entry with no usable id is malformed", () => {
+  const f = finding();
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: [f] }) },
+    scores: scoresFor([f.id], {
+      scores: [{ id: null, confidence: 90, severity_confirmed: "P1" }],
+    }),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /malformed|score/);
+});
+
+test("a confirmed P0 with a missing confidence can NEVER produce a pass", () => {
+  const f = finding({ severity: "P0" });
+  const out = run({
+    findings: { "review-serial": roleFile({ findings: [f] }) },
+    scores: scoresFor([f.id], {
+      scores: [{ id: f.id, severity_confirmed: "P0", rationale: "real" }],
+    }),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.equal(out.review, null);
+});

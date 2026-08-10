@@ -156,6 +156,19 @@ function aggregate({ manifest, roster, findings, scores }) {
     if (candidates.length > 0) return inconclusive("missing-scores", coverage);
   }
   const scoreList = s && Array.isArray(s.scores) ? s.scores : [];
+
+  // Validate each score entry, symmetric to the finding-level checks above.
+  // Without this, Number(undefined) is NaN and Number(null) is 0 — both take
+  // the drop branch below — so a P0 the scorer CONFIRMED as P0 would land in
+  // dropped[], counts.p0 would be 0, and recompute() would return pass. A
+  // missing number must be inconclusive, never a silent acquittal.
+  for (const x of scoreList) {
+    if (x === null || typeof x !== "object") return inconclusive("malformed:scorer", coverage);
+    if (typeof x.id !== "string" || x.id === "") return inconclusive("malformed:scorer", coverage);
+    if (typeof x.confidence !== "number" || !Number.isFinite(x.confidence)) {
+      return inconclusive(`malformed:scorer:${x.id} has no usable confidence`, coverage);
+    }
+  }
   const scoreById = new Map(scoreList.map((x) => [x.id, x]));
   const candIds = new Set(candidates.map((c) => c.id));
   for (const c of candidates) {
