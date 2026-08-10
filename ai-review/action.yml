@@ -732,8 +732,8 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Write,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
           live `/requesting-code-review` and `/verification-before-completion`
@@ -836,33 +836,14 @@ runs:
           marker comment in `comment_markdown` — the caller deterministically
           recomputes the verdict and prepends its own banner separately.
 
-          ADDITIONALLY, before emitting the structured output, write two files
-          with `Write`. These are SHADOW artifacts: a later non-gating step
-          aggregates them and compares the result against your structured
-          output, so the two can be proven to agree before anything depends on
-          the files. They do not affect this run's verdict. If you cannot
-          produce them, still emit the structured output — that is what counts.
-
-          `.ai-review/findings/review-serial.json`:
-            {"schema":1,"role":"review-serial","complete":true,
-             "model_used":"<the model you are running as>",
-             "assigned_files":[<every path in manifest.changed_files>],
-             "files_reviewed":[<every path you actually read in full>],
-             "intent":"aligned|partial|deviated|skipped",
-             "checklist":[<same items as the structured output>],
-             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
-                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
-                          "failure_scenario":"<inputs -> wrong output>",
-                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
-
-          `.ai-review/scores.json`:
-            {"schema":1,"role":"scorer","complete":true,
-             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
-                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
-
-          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
-          must list every file you read in full — it is cross-checked against the
-          manifest, and a short list reads as incomplete coverage.
+          Populate the optional `findings` and `files_reviewed` fields of the
+          structured output as well. `findings` is one entry per finding you
+          report, with your own confidence 0/25/50/75/100 and, where you would
+          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          you read in full — it is cross-checked against the staged manifest, so
+          a short list reads as incomplete coverage. A later non-gating step
+          aggregates these deterministically and compares the result against
+          your own `counts`; they do not affect this run's verdict.
 
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
@@ -960,7 +941,7 @@ runs:
           --resume ${{ steps.review.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
           --allowedTools "Read"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           Your previous turn in this session finished the review but ended
           without emitting the required structured output.
@@ -972,7 +953,6 @@ runs:
           review body you already composed (findings grouped P0-P3 with
           "_None._" for empty sections, plus strengths; no leading verdict
           token, confidence line, or HTML marker).
-
 
           Emitting the structured output is your only remaining task.
 
@@ -1043,40 +1023,21 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Write,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
-          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
+          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
           ended without returning the required structured output. Emitting the
           structured output as your FINAL action is mandatory this time.
 
-          ADDITIONALLY, before emitting the structured output, write two files
-          with `Write`. These are SHADOW artifacts: a later non-gating step
-          aggregates them and compares the result against your structured
-          output, so the two can be proven to agree before anything depends on
-          the files. They do not affect this run's verdict. If you cannot
-          produce them, still emit the structured output — that is what counts.
-
-          `.ai-review/findings/review-serial.json`:
-            {"schema":1,"role":"review-serial","complete":true,
-             "model_used":"<the model you are running as>",
-             "assigned_files":[<every path in manifest.changed_files>],
-             "files_reviewed":[<every path you actually read in full>],
-             "intent":"aligned|partial|deviated|skipped",
-             "checklist":[<same items as the structured output>],
-             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
-                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
-                          "failure_scenario":"<inputs -> wrong output>",
-                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
-
-          `.ai-review/scores.json`:
-            {"schema":1,"role":"scorer","complete":true,
-             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
-                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
-
-          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
-          must list every file you read in full — it is cross-checked against the
-          manifest, and a short list reads as incomplete coverage.
+          Populate the optional `findings` and `files_reviewed` fields of the
+          structured output as well. `findings` is one entry per finding you
+          report, with your own confidence 0/25/50/75/100 and, where you would
+          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          you read in full — it is cross-checked against the staged manifest, so
+          a short list reads as incomplete coverage. A later non-gating step
+          aggregates these deterministically and compares the result against
+          your own `counts`; they do not affect this run's verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + checklist) and `context.md` at the repo root
@@ -1314,6 +1275,63 @@ runs:
               }
             }
           }
+
+    # Derive the findings artifacts from the schema-validated structured
+    # output, rather than asking the model to write them itself.
+    #
+    # Two reasons, both learned the hard way on this branch:
+    #   1. Enforcement. --json-schema constrains the shape at the point of
+    #      generation. A prose "also write these two files" instruction has
+    #      nothing behind it — on run 31360398002 the instruction had landed on
+    #      a Read-only step and no file was ever written on any path.
+    #   2. Blast radius. Emitting the files from the model needs `Write` on a
+    #      session that ingests the PR diff, PR body and linked-issue bodies,
+    #      while Publish later require()s JS from github.action_path in-process
+    #      with a write-scoped App token. Deriving here removes the write
+    #      primitive instead of fencing it — and fencing it is not simple:
+    #      Claude Code accepts a Write(path) permission rule and never consults
+    #      it (only Edit(path)/Read(path) are checked), so the obvious scoping
+    #      would look right in review and enforce nothing.
+    - name: Derive findings artifacts
+      id: derive
+      continue-on-error: true
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        DERIVE_PATH: ${{ github.action_path }}/lib/derive-findings.js
+        MODEL: ${{ steps.route.outputs.model }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
+      with:
+        script: |
+          const fs = require("fs");
+          const { deriveArtifacts } = require(process.env.DERIVE_PATH);
+
+          let review = null;
+          try { review = JSON.parse(process.env.REVIEW_JSON || "null"); } catch { /* handled below */ }
+          if (!review) { core.info("derive: no structured output to derive from"); return; }
+
+          let assignedFiles;
+          try {
+            assignedFiles = JSON.parse(fs.readFileSync(".ai-review/manifest.json", "utf8")).changed_files;
+          } catch { /* fall back to the model's own list inside deriveArtifacts */ }
+
+          const out = deriveArtifacts(review, {
+            role: "review-serial",
+            assignedFiles,
+            model: process.env.MODEL,
+          });
+          if (!out) {
+            core.info("derive: structured output has no findings/files_reviewed block — nothing to write");
+            return;
+          }
+
+          fs.mkdirSync(".ai-review/findings", { recursive: true });
+          fs.writeFileSync(".ai-review/findings/review-serial.json", JSON.stringify(out.findings, null, 2));
+          fs.writeFileSync(".ai-review/scores.json", JSON.stringify(out.scores, null, 2));
+          core.info(`derive: wrote ${out.findings.findings.length} findings and ${out.scores.scores.length} scores`);
 
     # Shadow aggregation — OBSERVATION ONLY, gates nothing.
     #
