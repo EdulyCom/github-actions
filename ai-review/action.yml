@@ -836,6 +836,34 @@ runs:
           marker comment in `comment_markdown` — the caller deterministically
           recomputes the verdict and prepends its own banner separately.
 
+          ADDITIONALLY, before emitting the structured output, write two files
+          with `Write`. These are SHADOW artifacts: a later non-gating step
+          aggregates them and compares the result against your structured
+          output, so the two can be proven to agree before anything depends on
+          the files. They do not affect this run's verdict. If you cannot
+          produce them, still emit the structured output — that is what counts.
+
+          `.ai-review/findings/review-serial.json`:
+            {"schema":1,"role":"review-serial","complete":true,
+             "model_used":"<the model you are running as>",
+             "assigned_files":[<every path in manifest.changed_files>],
+             "files_reviewed":[<every path you actually read in full>],
+             "intent":"aligned|partial|deviated|skipped",
+             "checklist":[<same items as the structured output>],
+             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
+                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
+                          "failure_scenario":"<inputs -> wrong output>",
+                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
+
+          `.ai-review/scores.json`:
+            {"schema":1,"role":"scorer","complete":true,
+             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
+                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
+
+          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
+          must list every file you read in full — it is cross-checked against the
+          manifest, and a short list reads as incomplete coverage.
+
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
           recomputes the actual pass/fail decision from `counts` alone and
@@ -945,34 +973,6 @@ runs:
           "_None._" for empty sections, plus strengths; no leading verdict
           token, confidence line, or HTML marker).
 
-
-          ADDITIONALLY, before emitting the structured output, write two files
-          with `Write`. These are SHADOW artifacts: a later non-gating step
-          aggregates them and compares the result against your structured
-          output, so the two can be proven to agree before anything depends on
-          the files. They do not affect this run's verdict. If you cannot
-          produce them, still emit the structured output — that is what counts.
-
-          `.ai-review/findings/review-serial.json`:
-            {"schema":1,"role":"review-serial","complete":true,
-             "model_used":"<the model you are running as>",
-             "assigned_files":[<every path in manifest.changed_files>],
-             "files_reviewed":[<every path you actually read in full>],
-             "intent":"aligned|partial|deviated|skipped",
-             "checklist":[<same items as the structured output>],
-             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
-                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
-                          "failure_scenario":"<inputs -> wrong output>",
-                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
-
-          `.ai-review/scores.json`:
-            {"schema":1,"role":"scorer","complete":true,
-             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
-                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
-
-          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
-          must list every file you read in full — it is cross-checked against the
-          manifest, and a short list reads as incomplete coverage.
 
           Emitting the structured output is your only remaining task.
 
