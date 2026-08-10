@@ -32,6 +32,26 @@ jobs:
         with:
           persist-credentials: false
 
+      # Exercises auto-assign in its documented preferred shape — inlined as the
+      # first step of the ai-review job, before the review runs — rather than as
+      # a standalone workflow. That is the integration consumers actually use,
+      # so it is the one worth covering.
+      #
+      # Ordered first deliberately: it is the cheap step, so a break surfaces in
+      # seconds instead of after a 10-16 min review. It is also safe to couple
+      # here because the action no-ops on a bot author, an already-assigned PR,
+      # or a missing pull_request context (a workflow_dispatch re-run), and its
+      # assign call is wrapped in try/catch — a failure warns rather than
+      # failing the job the review depends on.
+      #
+      # No `if:` guard: exercising the no-op paths on workflow_dispatch is part
+      # of what this covers.
+      - name: Run auto-assign
+        uses: ./auto-assign
+        with:
+          app-id: ${{ vars.MTM_BOT_APP_ID }}
+          private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
+
       - name: Run ai-review
         id: r
         uses: ./ai-review
