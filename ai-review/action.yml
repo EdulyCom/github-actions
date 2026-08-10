@@ -732,7 +732,7 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "Read,Grep,Glob,Write,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -945,6 +945,35 @@ runs:
           "_None._" for empty sections, plus strengths; no leading verdict
           token, confidence line, or HTML marker).
 
+
+          ADDITIONALLY, before emitting the structured output, write two files
+          with `Write`. These are SHADOW artifacts: a later non-gating step
+          aggregates them and compares the result against your structured
+          output, so the two can be proven to agree before anything depends on
+          the files. They do not affect this run's verdict. If you cannot
+          produce them, still emit the structured output — that is what counts.
+
+          `.ai-review/findings/review-serial.json`:
+            {"schema":1,"role":"review-serial","complete":true,
+             "model_used":"<the model you are running as>",
+             "assigned_files":[<every path in manifest.changed_files>],
+             "files_reviewed":[<every path you actually read in full>],
+             "intent":"aligned|partial|deviated|skipped",
+             "checklist":[<same items as the structured output>],
+             "findings":[{"id":"review-serial/0001","file":"<path>","line":<n>,
+                          "severity":"P0|P1|P2|P3","summary":"<one sentence>",
+                          "failure_scenario":"<inputs -> wrong output>",
+                          "reason":"<short category slug>","evidence":"<quoted line or grep>"}]}
+
+          `.ai-review/scores.json`:
+            {"schema":1,"role":"scorer","complete":true,
+             "scores":[{"id":"<matching finding id>","confidence":0|25|50|75|100,
+                        "severity_confirmed":"P0|P1|P2|P3","rationale":"<why>"}]}
+
+          Every finding id MUST appear exactly once in `scores`. `files_reviewed`
+          must list every file you read in full — it is cross-checked against the
+          manifest, and a short list reads as incomplete coverage.
+
           Emitting the structured output is your only remaining task.
 
     # Snapshot for the same shared-path reason as the two above. Repair's log
@@ -1014,7 +1043,7 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "Read,Grep,Glob,Write,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
@@ -1256,6 +1285,115 @@ runs:
                 throw err;
               }
             }
+          }
+
+    # Shadow aggregation — OBSERVATION ONLY, gates nothing.
+    #
+    # PR-C's plan is to replace structured_output with findings files on disk
+    # and delete the repair/back-off/retry/salvage chain. That is the first
+    # change in this migration that can wrongly BLOCK a developer's PR, and it
+    # lands on 7 consumer repos at once with no staging ring, so it is not
+    # something to ship on a design argument alone.
+    #
+    # This step runs the new deterministic aggregation next to the live path
+    # and records whether the two agree. It reads the shadow files the review
+    # stage now writes, runs lib/aggregate.js, feeds the result through the
+    # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
+    # is a warning in the log and a row in the job summary.
+    #
+    # Deliberately non-gating: `continue-on-error`, no outputs consumed by any
+    # later step, and Publish below is untouched. Deleting --json-schema and the
+    # recovery chain waits until this has agreed on real PRs — the evidence this
+    # step exists to collect.
+    - name: Shadow aggregation (non-gating)
+      id: shadow
+      continue-on-error: true
+      if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        AGGREGATE_PATH: ${{ github.action_path }}/lib/aggregate.js
+        RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
+        CONFIDENCE_THRESHOLD: ${{ steps.pr.outputs.confidence-threshold }}
+        CI_SIGNAL: ${{ steps.ci-signal.outputs.signal }}
+        REVIEW_JSON: >-
+          ${{ steps.review_retry.outputs.structured_output != '' && steps.review_retry.outputs.structured_output
+          || (steps.review_repair.outputs.structured_output != '' && steps.review_repair.outputs.structured_output
+          || steps.review.outputs.structured_output) }}
+      with:
+        script: |
+          const fs = require("fs");
+          const { aggregate } = require(process.env.AGGREGATE_PATH);
+          const { recompute } = require(process.env.RECOMPUTE_PATH);
+
+          const readJson = (p) => {
+            try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+          };
+
+          const manifest = readJson(".ai-review/manifest.json");
+          const findings = readJson(".ai-review/findings/review-serial.json");
+          const scores = readJson(".ai-review/scores.json");
+
+          const missing = [];
+          if (!manifest) missing.push("manifest.json");
+          if (!findings) missing.push("findings/review-serial.json");
+          if (!scores) missing.push("scores.json");
+
+          const opts = {
+            confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD),
+            ciSignal: process.env.CI_SIGNAL || "no_ci",
+          };
+
+          let live = null;
+          try {
+            const parsed = JSON.parse(process.env.REVIEW_JSON || "null");
+            if (parsed) live = recompute(parsed, opts);
+          } catch { /* live path already handles its own failures */ }
+
+          let shadow = null;
+          let shadowStatus = missing.length ? `missing: ${missing.join(", ")}` : null;
+          if (!missing.length) {
+            const gate = aggregate({
+              manifest,
+              roster: ["review-serial"],
+              findings: { "review-serial": findings },
+              scores,
+            });
+            shadowStatus = gate.status === "ok" ? "ok" : `inconclusive:${gate.reason}`;
+            if (gate.status === "ok") shadow = recompute(gate.review, opts);
+          }
+
+          const cell = (v) => (v === null || v === undefined ? "—" : String(v));
+          const agree = live && shadow
+            && live.verdict === shadow.verdict
+            && JSON.stringify(live.counts) === JSON.stringify(shadow.counts);
+
+          const rows = [
+            ["verdict", cell(live && live.verdict), cell(shadow && shadow.verdict)],
+            ["confidence", cell(live && live.confidence), cell(shadow && shadow.confidence)],
+            ["merge risk", cell(live && live.mergeRisk), cell(shadow && shadow.mergeRisk)],
+            ["counts", cell(live && JSON.stringify(live.counts)), cell(shadow && JSON.stringify(shadow.counts))],
+          ];
+
+          await core.summary
+            .addHeading("Shadow aggregation (non-gating)", 3)
+            .addRaw(`Shadow status: \`${shadowStatus}\` — agreement: **${agree ? "YES" : "NO"}**\n\n`)
+            .addTable([
+              [{ data: "field", header: true }, { data: "live (structured_output)", header: true }, { data: "shadow (findings files)", header: true }],
+              ...rows.map((r) => r.map((c) => ({ data: c }))),
+            ])
+            .write();
+
+          core.info(`ai-review-shadow ${JSON.stringify({
+            status: shadowStatus,
+            agree: Boolean(agree),
+            liveVerdict: live ? live.verdict : null,
+            shadowVerdict: shadow ? shadow.verdict : null,
+            liveCounts: live ? live.counts : null,
+            shadowCounts: shadow ? shadow.counts : null,
+          })}`);
+
+          if (live && shadow && !agree) {
+            core.warning(`Shadow aggregation DIVERGED from the live verdict: live=${live.verdict} shadow=${shadow.verdict}. Investigate before PR-C deletes structured_output.`);
           }
 
     - name: Publish review
