@@ -578,6 +578,20 @@ function buildRoster({
   const bins = packClusters(split.clusters, k);
   assertPartition(bins, changed);
 
+  // `splitOversized` guarantees each *piece* fits the budget; `packClusters` has
+  // no per-bin ceiling, so once MAX_K binds a bin legitimately exceeds it — ten
+  // 100 KB files give K=4 and ~250 KB per reviewer, roughly 2x the budget. That
+  // tradeoff is deliberate (MAX_K is rate-limit exposure, not an arbitrary
+  // number). Stamping it makes it visible: a consumer reading `assigned_files`
+  // could not otherwise tell a within-budget bin from a doubled one.
+  const byPath = new Map(list.map((f) => [String(f.path), Number(f.bytes) || 0]));
+  const binBytes = bins.map((paths) => paths.reduce((sum, p) => sum + (byPath.get(p) || 0), 0));
+  const uncappedK = Math.max(
+    1,
+    Math.ceil(totalBytes / BUDGET_BYTES),
+    Math.ceil(changed.length / FILES_PER_REVIEWER),
+  );
+
   // Defensive, not cosmetic: a consumer is free to point `sonnet-model` at a
   // Haiku id, and the effort key would then be rejected by the API on a role
   // the table thinks is safe. Resolve effort against the model that actually
@@ -607,6 +621,9 @@ function buildRoster({
     // Clusters that had to be broken across reviewers: their internal edges are
     // the tracer's responsibility now, since no single reviewer holds them.
     split_clusters: split.splitGroups,
+    budget_bytes: BUDGET_BYTES,
+    max_bin_bytes: binBytes.length > 0 ? Math.max(...binBytes) : 0,
+    k_capped: changed.length > 0 && uncappedK > MAX_K,
     symbol_manifest: Array.isArray(symbolManifest) ? symbolManifest : [],
     has_test_change: hasTestChange === true,
     has_logic_change: hasLogicChange === true,

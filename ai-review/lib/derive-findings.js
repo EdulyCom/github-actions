@@ -78,9 +78,14 @@ function deriveArtifacts(review, opts) {
       role,
       complete: true,
       model_used: o.model || null,
-      assigned_files: Array.isArray(o.assignedFiles)
-        ? o.assignedFiles
-        : review.files_reviewed,
+      // No fallback to `review.files_reviewed`. That would hand aggregate.js a
+      // model claim to compare against another copy of the same claim, which is
+      // exactly what the JSDoc above says this field exists to avoid — and it
+      // breaks aggregation's partition check, which requires assigned_files to
+      // be a subset of changed_files while files_reviewed is explicitly allowed
+      // to range outside the diff (a reviewer reading a neighbour for context).
+      // An empty assignment fails closed with a diagnosable reason instead.
+      assigned_files: Array.isArray(o.assignedFiles) ? o.assignedFiles : [],
       files_reviewed: review.files_reviewed,
       intent: review.intent ?? null,
       checklist: Array.isArray(review.checklist) ? review.checklist : [],

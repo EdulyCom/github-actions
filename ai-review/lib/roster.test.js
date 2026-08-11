@@ -405,6 +405,26 @@ test("buildRoster: effort is withheld from ANY role that lands on Haiku", () => 
   assert.equal(by.intent.effort, "high", "Opus role lost its effort");
 });
 
+test("buildRoster: a binding MAX_K is stamped on the roster, not left implicit", () => {
+  // splitOversized guarantees each PIECE fits the budget; packClusters has no
+  // per-bin ceiling, so when MAX_K binds a bin legitimately exceeds it. The
+  // tradeoff is deliberate — the gap was that nothing said so, and a consumer
+  // reading assigned_files could not tell a within-budget bin from a 2x one.
+  const files = Array.from({ length: 10 }, (_, i) => f(`src/f${i}.ts`, 100000));
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 4);
+  assert.equal(r.k_capped, true);
+  assert.equal(r.budget_bytes, BUDGET_BYTES);
+  assert.ok(r.max_bin_bytes > BUDGET_BYTES, `max_bin_bytes=${r.max_bin_bytes}`);
+});
+
+test("buildRoster: an uncapped roster reports k_capped false and a bin within budget", () => {
+  const files = [f("src/a.ts", 1000), f("lib/b.ts", 2000)];
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k_capped, false);
+  assert.equal(r.max_bin_bytes, 3000);
+});
+
 test("buildRoster: an empty diff yields no coverage roles", () => {
   const r = buildRoster({ files: [], models: { opus: "o", sonnet: "s", haiku: "h" } });
   assert.equal(r.roles.filter((x) => x.kind === "coverage").length, 0);

@@ -232,22 +232,32 @@ function aggregate({ manifest, roster, findings, scores }) {
   // §6 step 9 / §8 row 10 — intent is owned by exactly one role and a verdict
   // cannot be reached without it.
   //
-  // The FRAME role is preferred over roster order, not merely found within it.
-  // Selecting on array position made the "exactly one role" claim false as soon
-  // as the roster emitted coverage reviewers ahead of the frame role, and
-  // `derive-findings.js` stamps `intent` onto every role file unconditionally —
-  // so a reviewer that saw one slice of the diff, and structurally cannot judge
-  // the PR's goal, would shadow the role whose entire mandate that is. If it
-  // says `aligned` where the frame role says `deviated`, the gate reads
-  // `aligned` and passes: fail-open, in the direction step 9 exists to close.
+  // "Exactly one role" is enforced two ways, because selecting on array position
+  // satisfies neither. `derive-findings.js` stamps `intent` onto every role file
+  // unconditionally, so a reviewer that saw one slice of the diff — and
+  // structurally cannot judge the PR's goal — would shadow the role whose entire
+  // mandate that is. If it says `aligned` where the frame role says `deviated`,
+  // the gate reads `aligned` and passes: fail-open, in the direction step 9
+  // exists to close.
   //
-  // Coupled by name to `roster.js`'s frame role. The fallback keeps the serial
-  // roster working, where a single `review-serial` role owns intent itself.
+  //   1. If the frame role is ROSTERED, its value is the only one consulted. An
+  //      unusable value from it is `no-intent`, never a licence to poll the
+  //      coverage roles — a garbled frame answer is exactly when the fallback is
+  //      most likely to substitute a slice-local opinion for a whole-PR one.
+  //   2. Only when no frame role is rostered does first-valid-wins apply. That
+  //      is the serial roster, where one `review-serial` role owns intent itself.
+  //
+  // Membership in `roles` is what makes a file eligible, not presence in
+  // `byRole`: an entry the roster never declared was never seen by malformed(),
+  // so preferring one would route an unvalidated value into the verdict.
   const validIntent = (v) => typeof v === "string" && VALID_INTENT.has(v);
-  const intent = validIntent(byRole[FRAME_ROLE]?.intent)
-    ? byRole[FRAME_ROLE].intent
+  const hasFrame = roles.includes(FRAME_ROLE) && byRole[FRAME_ROLE] !== undefined;
+  const intent = hasFrame
+    ? (validIntent(byRole[FRAME_ROLE].intent) ? byRole[FRAME_ROLE].intent : null)
     : roles.map((r) => byRole[r].intent).find(validIntent);
-  if (!intent) return inconclusive("no-intent", coverage);
+  if (!intent) {
+    return inconclusive(hasFrame ? `no-intent:${FRAME_ROLE} value unusable` : "no-intent", coverage);
+  }
 
   // §6 step 3 / §8 rows 8-9 — join scores by id and require set equality both
   // ways, so "unscored => dropped => clean" is unreachable.
@@ -354,9 +364,17 @@ function aggregate({ manifest, roster, findings, scores }) {
     if (k in counts) counts[k] += 1;
   }
 
-  const checklist = roles.flatMap((r) =>
-    Array.isArray(byRole[r].checklist) ? byRole[r].checklist : [],
-  );
+  // Single-owner, for the same reason as intent and with a sharper downstream
+  // consequence. `derive-findings.js` stamps `checklist` onto every role file,
+  // so concatenating gives K copies of each item, possibly with conflicting
+  // statuses. `publish.js` counts verified items per normalized text precisely
+  // so one verified item cannot tick several boxes that normalize identically —
+  // inflating that count to K reopens the collision the counter exists to
+  // prevent. The frame role owns the checklist because it owns the intent
+  // contract the checklist is derived from.
+  const checklist = hasFrame
+    ? (Array.isArray(byRole[FRAME_ROLE].checklist) ? byRole[FRAME_ROLE].checklist : [])
+    : roles.flatMap((r) => (Array.isArray(byRole[r].checklist) ? byRole[r].checklist : []));
 
   return {
     status: "ok",

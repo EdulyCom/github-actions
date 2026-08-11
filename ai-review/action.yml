@@ -1334,7 +1334,16 @@ runs:
           let assignedFiles;
           try {
             assignedFiles = JSON.parse(fs.readFileSync(".ai-review/manifest.json", "utf8")).changed_files;
-          } catch { /* fall back to the model's own list inside deriveArtifacts */ }
+          } catch {
+            // Leave undefined. deriveArtifacts emits an EMPTY assigned_files
+            // rather than substituting the model's own files_reviewed — that
+            // would compare a model claim against another copy of itself, and
+            // files_reviewed is allowed to range outside the diff, which the
+            // partition check forbids for an assignment. Empty makes
+            // aggregation fail closed with a named path instead. In practice the
+            // shadow step below reads the same manifest and reports
+            // `missing: manifest.json`, so it never reaches aggregate() anyway.
+          }
 
           const out = deriveArtifacts(review, {
             role: "review-serial",

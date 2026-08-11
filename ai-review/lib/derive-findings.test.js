@@ -60,6 +60,19 @@ test("assigned_files comes from the manifest, not the model", () => {
   assert.deepEqual(out.findings.assigned_files, ["src/a.ts", "src/b.ts", "src/c.ts"]);
 });
 
+test("assigned_files never falls back to the model's own files_reviewed", () => {
+  // The fallback contradicted this module's whole purpose — aggregate.js is
+  // supposed to compare a model claim against a deterministic fact, not against
+  // another copy of the same claim. It also broke the newer partition check,
+  // which requires assigned_files to be a subset of changed_files while
+  // files_reviewed is explicitly allowed to range outside the diff (a reviewer
+  // reading a neighbouring file for context). An empty assignment makes
+  // aggregation fail closed with a diagnosable reason instead.
+  const out = deriveArtifacts(review(), { role: "review-serial" });
+  assert.deepEqual(out.findings.assigned_files, []);
+  assert.deepEqual(out.findings.files_reviewed, ["src/a.ts", "src/b.ts"]);
+});
+
 test("every finding gets a score entry — the join can never be short", () => {
   const r = review({
     findings: [

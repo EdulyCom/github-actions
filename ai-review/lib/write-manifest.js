@@ -136,6 +136,20 @@ function writeRoster(manifest, sizes) {
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
         `${roster.roles.map((r) => `${r.role}:${r.assigned_files.length}`).join(" ")}\n`,
     );
+    if (roster.k_capped) {
+      // Deliberate, not a defect: MAX_K is rate-limit exposure. Logged so a slow
+      // reviewer stage on a huge diff is explainable from the job log alone.
+      process.stdout.write(
+        `roster: MAX_K bound — largest bin is ${roster.max_bin_bytes} bytes ` +
+          `against a ${roster.budget_bytes}-byte per-reviewer budget\n`,
+      );
+    }
+    if (roster.split_clusters.length > 0) {
+      process.stdout.write(
+        `roster: ${roster.split_clusters.length} cluster(s) split across reviewers; ` +
+          `their internal edges belong to the tracer\n`,
+      );
+    }
   } catch (err) {
     process.stdout.write(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
   }

@@ -325,21 +325,67 @@ test("intent falls back to any valid value when no frame role is rostered", () =
   assert.equal(out.review.intent, "aligned");
 });
 
-test("intent still fails closed when the frame role supplies garbage", () => {
+test("a rostered frame role with an unusable intent fails closed — no fallback", () => {
+  // The previous version of this test set reviewer-1's intent to null too, so
+  // it only pinned "inconclusive when EVERY role is invalid" and left the real
+  // hole open: a garbled frame value fell through to whichever coverage role
+  // answered first. reviewer-1 says `aligned` here deliberately.
+  for (const bad of ["sideways", null, 42, ""]) {
+    const out = run({
+      roster: ["reviewer-1", "intent"],
+      findings: {
+        "reviewer-1": roleFile({
+          role: "reviewer-1",
+          assigned_files: ["src/a.ts", "src/b.ts"],
+          files_reviewed: ["src/a.ts", "src/b.ts"],
+          intent: "aligned",
+        }),
+        intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], intent: bad }),
+      },
+    });
+    assert.equal(out.status, "inconclusive", `frame intent ${JSON.stringify(bad)}`);
+    assert.match(out.reason, /no-intent/);
+  }
+});
+
+test("an intent file absent from the roster is never preferred over a rostered role", () => {
+  // byRole is keyed by role name and can carry entries the roster never
+  // declared. Those are never validated by malformed(), so preferring one would
+  // route an unvalidated value straight into the verdict.
   const out = run({
-    roster: ["reviewer-1", "intent"],
+    roster: ["review-serial"],
     findings: {
-      "reviewer-1": roleFile({
-        role: "reviewer-1",
-        assigned_files: ["src/a.ts", "src/b.ts"],
-        files_reviewed: ["src/a.ts", "src/b.ts"],
-        intent: null,
-      }),
-      intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], intent: "sideways" }),
+      "review-serial": roleFile({ intent: "deviated" }),
+      intent: { schema: 1, role: "intent", intent: "aligned" },
     },
   });
-  assert.equal(out.status, "inconclusive");
-  assert.match(out.reason, /no-intent/);
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "deviated");
+});
+
+test("checklist is owned by the frame role, not concatenated across roles", () => {
+  // Same property the intent fix is about. derive-findings.js stamps `checklist`
+  // onto every role file, so flatMap duplicates each item K times — and
+  // publish.js counts verified items per normalized text precisely so one
+  // verified item cannot tick several identically-normalizing boxes. Inflating
+  // that count to K reopens the collision the counter exists to prevent.
+  const item = { text: "Adds a test", status: "verified" };
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2", "intent"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts"], files_reviewed: ["src/a.ts"], checklist: [item] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"], checklist: [item] }),
+      intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], checklist: [item] }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.deepEqual(out.review.checklist, [item]);
+});
+
+test("checklist still concatenates when no frame role is rostered", () => {
+  const item = { text: "Adds a test", status: "verified" };
+  const out = run({ findings: { "review-serial": roleFile({ checklist: [item] }) } });
+  assert.deepEqual(out.review.checklist, [item]);
 });
 
 test("row 8: scorer file missing or incomplete", () => {
