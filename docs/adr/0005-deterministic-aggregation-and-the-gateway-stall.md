@@ -93,6 +93,16 @@ repos — evidence no design argument substitutes for.
   `aggregate.js`'s `partition:` checks now assert it in both places, because
   the roster can only assert what it emits and a role file arrives from a model
   stage that can claim an assignment nobody made.
+- **`assignments.json` extends spec §6's frozen example rather than matching
+  it byte-for-byte.** Each role additionally carries `artifact` (the file path
+  the role writes — needed once `scorer` sits in `roles[]` alongside the
+  findings-writing roles, since it writes a different one) and `effort`;
+  top-level `findings_roles` is the pre-filtered list to pass as `aggregate()`'s
+  `roster` (excludes `scorer`); and `modifies_reviewer_guidance` replaces the
+  spec's `modifies_claude_md`, matching the field name `lib/prep.js`'s manifest
+  already uses rather than introducing a second name for the same fact. All
+  additive or a rename to match existing code, never a narrowing of the frozen
+  shape.
 
 ### 6. The P2/P3 confidence floor is 75, set from data
 

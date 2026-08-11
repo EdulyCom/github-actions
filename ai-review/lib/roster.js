@@ -700,6 +700,12 @@ function buildRoster({
       artifact: artifactFor(spec.role, spec.kind),
       assigned_files: assigned,
     };
+    // A literal substring match, not full gateway-alias resolution: it catches
+    // a consumer override that names Haiku directly (e.g. `sonnet-model:
+    // claude-haiku-4-5`), but not a gateway alias that ROUTES to Haiku under an
+    // unrelated string (e.g. `gw-fast-1`) — `anthropic-base-url`'s own
+    // description documents that such aliases exist. No live effect either way:
+    // nothing consumes the roster yet, so nothing reads `effort`.
     if (spec.effort && !/haiku/i.test(String(model ?? ""))) out.effort = spec.effort;
     return out;
   };
