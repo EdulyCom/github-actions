@@ -156,8 +156,11 @@ function writeRoster(manifest, sizes, io) {
     // every non-MAX_K case, which was flatly false for a file-count overflow:
     // splitOversized's per-cluster piece count doesn't know K, so a large
     // cluster CAN be cut finer than it was, the splitter just wasn't asked to.
-    const { filesOver, bytesOver, any: isOverBudget } = overBudget(roster);
+    const { filesOver, any: isOverBudget } = overBudget(roster);
     if (isOverBudget) {
+      // filesOver picks out the one axis that's separable (see buildRoster's
+      // header); everything else — including a plain byte-axis overflow —
+      // falls through to the "not distinguishable" case.
       const why = roster.k_capped
         ? `MAX_K bound at K=${roster.k}`
         : filesOver
@@ -241,6 +244,17 @@ function collectSpecifiers(changedFiles, sizes, readText) {
 }
 
 /**
+ * Which axis, if either, put the largest bin over its budget — computed once
+ * and shared between the job-log line and the scraped telemetry, so the two
+ * cannot silently disagree about whether a run was over budget.
+ */
+function overBudget(roster) {
+  const filesOver = roster.max_bin_files > roster.budget_files;
+  const bytesOver = roster.max_bin_bytes > roster.budget_bytes;
+  return { filesOver, bytesOver, any: filesOver || bytesOver };
+}
+
+/**
  * One scrapable line per run, in the `ai-review-metrics {json}` shape.
  *
  * The case for shipping the roster before anything reads it rests entirely on
@@ -253,17 +267,6 @@ function collectSpecifiers(changedFiles, sizes, readText) {
  * Failure is a record, not a blank — absence and cleanliness must never be the
  * same byte pattern.
  */
-/**
- * Which axis, if either, put the largest bin over its budget — computed once
- * and shared between the job-log line and the scraped telemetry, so the two
- * cannot silently disagree about whether a run was over budget.
- */
-function overBudget(roster) {
-  const filesOver = roster.max_bin_files > roster.budget_files;
-  const bytesOver = roster.max_bin_bytes > roster.budget_bytes;
-  return { filesOver, bytesOver, any: filesOver || bytesOver };
-}
-
 function rosterTelemetry(roster, err) {
   const payload = roster
     ? {
