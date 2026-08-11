@@ -53,16 +53,35 @@ test("collectSpecifiers: skips a path with no recorded size (deleted at HEAD)", 
   assert.deepEqual(Object.keys(out), []);
 });
 
-test("collectSpecifiers: an unreadable file is skipped, never fatal", () => {
-  // Binary, or vanished between stat and read. Falls back to directory and
-  // test-pair edges — a weaker cluster, never a coverage gap.
+test("collectSpecifiers: a file that fails to read is skipped, never fatal", () => {
+  // Vanished between stat and read, or a permission error. Falls back to
+  // directory and test-pair edges — a weaker cluster, never a coverage gap.
   const read = (p) => {
-    if (p === "bad.ts") throw new Error("EILSEQ");
+    if (p === "bad.ts") throw new Error("ENOENT");
     return `require("./x")`;
   };
   const out = collectSpecifiers(["bad.ts", "ok.ts"], { "bad.ts": 10, "ok.ts": 10 }, read);
   assert.equal("bad.ts" in out, false);
   assert.deepEqual(out["ok.ts"], ["./x"]);
+});
+
+test("collectSpecifiers: binary is skipped by extension, not by hoping read throws", () => {
+  // The catch above was documented as covering binary, but the production reader
+  // is readFileSync(p, "utf8"), which substitutes U+FFFD for invalid sequences
+  // rather than throwing. A changed 200 KB PNG is under the size ceiling, so it
+  // was decoded and regex-scanned. extractImports is JS/TS-only by construction,
+  // so the extension is the honest gate.
+  let opened = [];
+  const read = (p) => {
+    opened.push(p);
+    return "";
+  };
+  collectSpecifiers(
+    ["logo.png", "notes.md", "src/a.ts", "src/b.mjs", "Makefile"],
+    { "logo.png": 200000, "notes.md": 10, "src/a.ts": 10, "src/b.mjs": 10, Makefile: 10 },
+    read,
+  );
+  assert.deepEqual(opened.sort(), ["src/a.ts", "src/b.mjs"]);
 });
 
 // --- rosterTelemetry ---------------------------------------------------------

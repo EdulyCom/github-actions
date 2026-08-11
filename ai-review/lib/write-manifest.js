@@ -38,6 +38,20 @@ const DIR = ".ai-review";
  */
 const IMPORT_SCAN_MAX_BYTES = 512 * 1024;
 
+/**
+ * Extensions worth scanning for import edges.
+ *
+ * `extractImports` only understands JS/TS spellings, so anything else is read
+ * for nothing. More to the point, the catch below used to be documented as the
+ * binary guard — but the real reader is `readFileSync(p, "utf8")`, which
+ * substitutes U+FFFD for invalid sequences instead of throwing, so a changed
+ * 200 KB PNG sailed under the size ceiling and got decoded and regex-scanned.
+ * The extension is the honest gate.
+ */
+const IMPORT_SCAN_EXTS = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte",
+]);
+
 function read(name) {
   try {
     return fs.readFileSync(path.join(DIR, name), "utf8");
@@ -183,11 +197,15 @@ function collectSpecifiers(changedFiles, sizes, readText) {
     // Either way the file is still assigned and still read in full by its
     // reviewer — only the clustering hint is skipped.
     if (size === undefined || size > IMPORT_SCAN_MAX_BYTES) continue;
+    const dot = p.lastIndexOf(".");
+    const slash = p.lastIndexOf("/");
+    const ext = dot > slash + 1 ? p.slice(dot + 1).toLowerCase() : "";
+    if (!IMPORT_SCAN_EXTS.has(ext)) continue;
     try {
       out[p] = extractImports(readText(p));
     } catch {
-      // Binary, unreadable, or vanished between stat and read. Falls back to
-      // directory and test-pair edges — a weaker cluster, never a coverage gap.
+      // Vanished between stat and read, or unreadable. Falls back to directory
+      // and test-pair edges — a weaker cluster, never a coverage gap.
     }
   }
   return out;

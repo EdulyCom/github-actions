@@ -236,6 +236,26 @@ test("a dead or malformed role reports the real file count, not an empty diff's"
   assert.equal(bad.coverage.expected_files, 2);
 });
 
+test("dedupe normalises the path, so './x' and 'x' are one finding", () => {
+  // finding.file is model-typed text and malformed() never touches it, while
+  // every partition and coverage comparison in the module goes through
+  // normPath. Two roles spelling the same path differently counted the same
+  // defect twice. It fails closed, so this is a weaker-than-intended §6.6
+  // rather than a fail-open — but the fix costs nothing.
+  const a = finding({ id: "r1/1", file: "src/a.ts", line: 84, reason: "bug" });
+  const b = finding({ id: "r2/1", file: "./src/a.ts", line: 84, reason: "bug" });
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts"], files_reviewed: ["src/a.ts"], findings: [a] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"], findings: [b] }),
+    },
+    scores: scoresFor(["r1/1", "r2/1"]),
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.counts.p1, 1, "the same defect counted twice");
+});
+
 test("a partition failure does not report a misleading reviewed count", () => {
   // The count is of files verified as reviewed; at the point a partition breaks,
   // nothing has been verified. Reporting a partial tally reads as a coverage
@@ -415,6 +435,22 @@ test("checklist still concatenates when no frame role is rostered", () => {
   const item = { text: "Adds a test", status: "verified" };
   const out = run({ findings: { "review-serial": roleFile({ checklist: [item] }) } });
   assert.deepEqual(out.review.checklist, [item]);
+});
+
+test("row 8: a dead scorer is inconclusive even when nobody found anything", () => {
+  // The guard was conditional on candidates.length > 0, so: scorer dies, every
+  // coverage reviewer legitimately returns zero findings, the guard doesn't
+  // fire, scoreList falls back to [], both set-equality loops iterate nothing,
+  // and a clean verdict comes out of a run with a dead role. Every other dead
+  // role is named by the roster loop; the scorer alone was exempt. Unreachable
+  // today — action.yml null-checks scores.json first — but this is the PR that
+  // puts a scorer on the roster with its own artifact path, which is what makes
+  // it reachable at PR-D/2.
+  for (const bad of [null, undefined, { schema: 1, role: "scorer", complete: false, scores: [] }]) {
+    const out = run({ scores: bad });
+    assert.equal(out.status, "inconclusive", String(bad));
+    assert.match(out.reason, /scores/);
+  }
 });
 
 test("row 8: scorer file missing or incomplete", () => {

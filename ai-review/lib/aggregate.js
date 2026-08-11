@@ -274,9 +274,16 @@ function aggregate({ manifest, roster, findings, scores }) {
   for (const role of roles) {
     for (const f of byRole[role].findings) candidates.push(f);
   }
+  // Unconditional. This used to fire only when `candidates.length > 0`, so a
+  // dead scorer plus a run where every coverage reviewer legitimately found
+  // nothing produced a CLEAN verdict: the guard stayed quiet, `scoreList` fell
+  // back to `[]`, and both set-equality loops iterated nothing. §8 treats a dead
+  // role as inconclusive regardless of what the other roles found, and the
+  // roster loop above already names every other one — the scorer was the single
+  // exemption, on the one artifact that arrives outside that loop.
   const s = scores;
   if (!s || typeof s !== "object" || s.complete !== true || !Array.isArray(s.scores)) {
-    if (candidates.length > 0) return inconclusive("missing-scores", coverage);
+    return inconclusive("missing-scores", coverage);
   }
   const scoreList = s && Array.isArray(s.scores) ? s.scores : [];
 
@@ -335,7 +342,12 @@ function aggregate({ manifest, roster, findings, scores }) {
   const deduped = [];
   const seenKeys = new Set();
   for (const f of kept) {
-    const key = `${f.file}\u0000${f.line}\u0000${f.reason}`;
+    // normPath, like every other path comparison here. `finding.file` is
+    // model-typed text and `malformed()` never validates it, so two roles
+    // spelling one path "./src/a.ts" and "src/a.ts" counted the same defect
+    // twice. Over-counting fails closed, so this was a weaker-than-intended
+    // §6.6 rather than a fail-open — and the fix costs nothing.
+    const key = `${normPath(f.file)}\u0000${f.line}\u0000${f.reason}`;
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
     deduped.push(f);

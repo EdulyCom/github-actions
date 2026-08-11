@@ -389,8 +389,16 @@ function packClusters(clusters, k, budget, maxFiles) {
 
   const bins = Math.max(1, Math.min(Number.isFinite(k) ? Math.floor(k) : 1, list.length));
 
+  // Ordered by the SAME blended cost used to place, not by bytes. Decreasing
+  // greedy only bounds imbalance when the two agree: with a bytes-only sort a
+  // large zero-byte cluster (20 deletions) sorts last and lands on a bin that is
+  // already occupied, giving [1, 21] when [20, 2] was legal on both axes and
+  // never considered.
+  const clusterCost = (c) =>
+    (Number.isFinite(c.bytes) ? c.bytes : 0) / cap + c.paths.length / capFiles;
   const sorted = list.slice().sort((a, b) => {
-    if (b.bytes !== a.bytes) return b.bytes - a.bytes;
+    const d = clusterCost(b) - clusterCost(a);
+    if (d !== 0) return d;
     return a.paths[0] < b.paths[0] ? -1 : a.paths[0] > b.paths[0] ? 1 : 0;
   });
 
@@ -672,9 +680,14 @@ function buildRoster({
     max_bin_bytes: binBytes.length > 0 ? Math.max(...binBytes) : 0,
     budget_files: FILES_PER_REVIEWER,
     max_bin_files: bins.length > 0 ? Math.max(...bins.map((b) => b.length)) : 0,
-    // `bins.length >= MAX_K` is what distinguishes limiter 1 from limiter 2: the
-    // cap only bound if the roster actually reached it.
-    k_capped: uncappedK > MAX_K && bins.length >= MAX_K,
+    // True only when raising MAX_K could actually have changed this roster.
+    // `bins.length >= MAX_K` separates limiter 1 from limiter 2 but not from a
+    // third binder: with 4 pieces and MAX_K 4, `min(k, pieces)` is 4 either way,
+    // so a higher cap yields the identical roster and reporting "MAX_K bound"
+    // sends whoever reads the telemetry to raise a cap that is not the
+    // constraint. There must be more pieces than the cap for it to bind.
+    k_capped:
+      uncappedK > MAX_K && bins.length >= MAX_K && split.clusters.length > MAX_K,
     symbol_manifest: Array.isArray(symbolManifest) ? symbolManifest : [],
     has_test_change: hasTestChange === true,
     has_logic_change: hasLogicChange === true,

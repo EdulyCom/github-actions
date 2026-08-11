@@ -160,6 +160,46 @@ test("packClusters: least-loaded greedy places the largest cluster first", () =>
   assert.deepEqual(bins[1].sort(), ["mid", "small"]);
 });
 
+test("packClusters: clusters are ORDERED by the same blended cost they are placed by", () => {
+  // Decreasing-greedy only bounds imbalance when items are ordered by the cost
+  // used to place them. Placement was blended; the sort was left on bytes, so a
+  // large zero-byte cluster sorted LAST and landed on whichever bin was already
+  // occupied. 20 deletions plus two edits gave [1, 21] — over the file budget —
+  // while [20, 2] was legal on both axes and never considered.
+  const cs = [
+    { paths: Array.from({ length: 20 }, (_, i) => `del${i}`), bytes: 0 },
+    { paths: ["edit-big"], bytes: 40000 },
+    { paths: ["edit-small"], bytes: 10000 },
+  ];
+  const bins = packClusters(cs, 2);
+  assert.deepEqual(bins.map((b) => b.length).sort((a, b) => a - b), [2, 20]);
+});
+
+test("buildRoster: 20 deletions plus two edits stays inside the file budget", () => {
+  const files = [
+    ...Array.from({ length: 20 }, (_, i) => f(`src/legacy/d${i}.ts`, 0)),
+    f("src/app.ts", 40000),
+    f("lib/util.ts", 10000),
+  ];
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.ok(r.max_bin_files <= FILES_PER_REVIEWER, `max_bin_files=${r.max_bin_files}`);
+  const covered = r.roles.filter((x) => x.kind === "coverage").flatMap((x) => x.assigned_files);
+  assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
+});
+
+test("buildRoster: k_capped is false when raising MAX_K would change nothing", () => {
+  // One indivisible 600 KB file plus three small clusters: uncappedK is 5 and
+  // bins reach MAX_K, but there are only 4 pieces to place, so a higher cap
+  // would produce the identical roster. Reporting "MAX_K bound" sends whoever
+  // reads the telemetry to raise a cap that is not the constraint.
+  const r = buildRoster({
+    files: [f("src/huge.ts", 600000), f("a/x.ts", 10), f("b/y.ts", 10), f("c/z.ts", 10)],
+    models: { opus: "o", sonnet: "s", haiku: "h" },
+  });
+  assert.equal(r.k, 4);
+  assert.equal(r.k_capped, false);
+});
+
 test("packClusters: budgets are parameters, symmetric with splitOversized", () => {
   // Both are exported. splitOversized takes budget/maxFiles; packClusters used
   // to divide by the module constants directly, so a caller who tuned the split
