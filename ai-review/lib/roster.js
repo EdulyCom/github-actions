@@ -4,8 +4,8 @@
 //
 // This module answers one question — *who reads what* — before any model turn
 // runs. Nothing here is behavioural yet: the review stage is still serial, and
-// the roster it emits is written to `.ai-review/assignments.json` and read only
-// by the shadow aggregation. Fan-out consumes it unchanged.
+// the roster it emits is written to `.ai-review/assignments.json`; nothing
+// reads it yet. Fan-out consumes it unchanged when it lands.
 //
 // Two properties are load-bearing and are the reason this is a tested module
 // rather than a jq pipeline in the composite action:

@@ -92,8 +92,9 @@ injection-safety rule.
    `min(formula, piece count after splitting)`, and `0` on an empty diff —
    not the raw formula value: one 600 KB file computes `K=4` but is a
    single unsplittable cluster, so `k: 1`; 25 small files in one directory
-   compute `K=2` but split into more than two pieces, so `k` can exceed
-   the *cluster* count too.
+   compute `K=2` but split into two pieces, so `k` can exceed the
+   *cluster* count too — one cluster split into two pieces still emits
+   `k: 2`.
 
    Because that soak *is* the justification for shipping early, the step
    emits one scrapable `ai-review-roster {json}` line per run — the same
