@@ -144,7 +144,12 @@ test("packClusters: partition is exact — disjoint and complete", () => {
   }
 });
 
-test("packClusters: first-fit-decreasing balances the largest first", () => {
+test("packClusters: least-loaded greedy places the largest cluster first", () => {
+  // Deliberately NOT first-fit-decreasing: at fixed K with no per-bin capacity
+  // nothing can fail to fit, so literal first-fit piles everything into bin 0.
+  // The name matters more than the body here — this assertion would pass under
+  // several wrong packers, so a name pointing at the algorithm the code exists
+  // to avoid is the misleading part.
   const cs = [
     { paths: ["big"], bytes: 100 },
     { paths: ["mid"], bytes: 60 },
@@ -561,9 +566,13 @@ test("buildRoster: an uncapped roster reports k_capped false and a bin within bu
   assert.equal(r.max_bin_bytes, 3000);
 });
 
-test("buildRoster: an empty diff yields no coverage roles", () => {
+test("buildRoster: an empty diff yields no coverage roles, and k says 0", () => {
   const r = buildRoster({ files: [], models: { opus: "o", sonnet: "s", haiku: "h" } });
   assert.equal(r.roles.filter((x) => x.kind === "coverage").length, 0);
+  // `k` counts the coverage roles that exist, so it is 0 here — a value the
+  // clamp(...,1,4) formula cannot produce. Pinned so the discrepancy is a
+  // recorded decision rather than something a reader has to re-derive.
+  assert.equal(r.k, 0);
 });
 
 test("buildRoster: output is JSON-serialisable and stable", () => {

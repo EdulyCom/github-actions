@@ -207,6 +207,35 @@ test("row 6: a changed file assigned to no role is a partition error", () => {
   assert.match(out.reason, /src\/b\.ts/);
 });
 
+test("reviewed_files counts the diff, so it can never exceed expected_files", () => {
+  // files_reviewed is explicitly allowed to range outside the diff — reading a
+  // neighbour for context is what a reviewer should do — so a raw tally gives
+  // "expected 2, reviewed 5", which reads as nonsense and is the number fan-out
+  // will scrape per role.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        files_reviewed: ["src/a.ts", "src/b.ts", "vendor/x.ts", "vendor/y.ts", "vendor/z.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.coverage.expected_files, 2);
+  assert.equal(out.coverage.reviewed_files, 2);
+});
+
+test("a dead or malformed role reports the real file count, not an empty diff's", () => {
+  // inconclusive() defaults to expected_files: 0, so these exits logged the same
+  // tally an empty diff logs. Every other exit passes coverage explicitly.
+  const dead = run({ roster: ["review-serial", "tracer"] });
+  assert.match(dead.reason, /missing-role:tracer/);
+  assert.equal(dead.coverage.expected_files, 2);
+
+  const bad = run({ findings: { "review-serial": roleFile({ schema: 2 }) } });
+  assert.match(bad.reason, /malformed/);
+  assert.equal(bad.coverage.expected_files, 2);
+});
+
 test("a partition failure does not report a misleading reviewed count", () => {
   // The count is of files verified as reviewed; at the point a partition breaks,
   // nothing has been verified. Reporting a partial tally reads as a coverage

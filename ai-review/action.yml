@@ -137,9 +137,13 @@ inputs:
   haiku-model:
     description: >
       Model ID used by the context stage (this phase) to read the diff and changed
-      files and write context.md for the review stage to consume. Override when a
-      gateway aliases model names. NOTE: Haiku 4.5 does not accept the `effort`
-      parameter, so no stage running this model may pass `--effort`.
+      files and write context.md for the review stage to consume. Also stamped by
+      the deterministic-prep step onto the roster's `history` and `scorer` roles,
+      so an override here reaches those too. Override when a gateway aliases model
+      names. NOTE: Haiku 4.5 does not accept the `effort` parameter, so no stage
+      running this model may pass `--effort` — the roster resolves that against
+      the model id rather than the tier, so pointing another tier at a Haiku id is
+      covered as well.
     required: false
     default: "claude-haiku-4-5"
   enable-context-stage:

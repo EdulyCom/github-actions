@@ -147,11 +147,16 @@ function aggregate({ manifest, roster, findings, scores }) {
 
   // §6 step 1 / §8 rows 4-5 — every rostered role produced a parseable,
   // complete file. A dead role is named rather than averaged away.
+  // Coverage is passed explicitly on every exit — `inconclusive()` defaults to
+  // `expected_files: 0`, which is an empty diff's tally, and a dead role on a
+  // 12-file PR logging the same numbers as an empty diff is exactly the
+  // absence-reads-as-cleanliness confusion this module exists to prevent.
+  const nothingVerified = { expected_files: changed.length, reviewed_files: 0 };
   const findingIds = new Set();
   for (const role of roles) {
-    if (byRole[role] === undefined) return inconclusive(`missing-role:${role}`);
+    if (byRole[role] === undefined) return inconclusive(`missing-role:${role}`, nothingVerified);
     const bad = malformed(role, byRole[role], findingIds);
-    if (bad) return inconclusive(bad);
+    if (bad) return inconclusive(bad, nothingVerified);
   }
 
   // §6 step 2 / §8 row 6, in two passes over two different properties.
@@ -172,7 +177,7 @@ function aggregate({ manifest, roster, findings, scores }) {
   // The coverage payload reports `reviewed_files: 0` on these failures because
   // nothing has been verified as reviewed yet — a partial tally would read as a
   // coverage shortfall, which is precisely what a partition error is not.
-  const partitionCoverage = { expected_files: changed.length, reviewed_files: 0 };
+  const partitionCoverage = nothingVerified;
   const changedSet = new Set(changed.map(normPath));
   const assignedBy = new Map();
   for (const role of roles) {
@@ -226,7 +231,11 @@ function aggregate({ manifest, roster, findings, scores }) {
   }
   const coverage = {
     expected_files: changed.length,
-    reviewed_files: reviewed.size,
+    // Intersected with the diff, not the raw union. `files_reviewed` is allowed
+    // to range outside `changed_files`, so a reviewer assigned 3 files that opens
+    // 5 neighbours would otherwise report "expected 3, reviewed 8" — a ratio that
+    // reads as nonsense and is the per-role tally fan-out will scrape.
+    reviewed_files: [...reviewed].filter((p) => changedSet.has(p)).length,
   };
 
   // §6 step 9 / §8 row 10 — intent is owned by exactly one role and a verdict
