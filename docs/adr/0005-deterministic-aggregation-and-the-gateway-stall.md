@@ -81,7 +81,7 @@ Divergences were advisory-only and each explained by the confidence filter.
 Deleting `structured_output` waits on that agreement holding across other
 repos — evidence no design argument substitutes for.
 
-### 5. Two deviations from the frozen spec, recorded not silent
+### 5. One open deviation from the frozen spec, recorded not silent
 
 - **Reconciliation runs before the confidence filter** (spec §6 orders 4 then
   5). In the spec's order a finding the scorer *upgrades* to P1 is still
