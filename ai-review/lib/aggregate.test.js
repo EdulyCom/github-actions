@@ -121,6 +121,18 @@ test("row 5: malformed role file — bad schema, missing complete, complete:fals
   }
 });
 
+test("row 5: an assigned_files that isn't an array is malformed, not a partition gap", () => {
+  // Without this check, a string or null degrades to [] at the partition
+  // check (still fails closed) but blames "assigned to no role" on the
+  // CHANGED FILE instead of naming the role whose envelope was actually bad —
+  // correct direction, wrong suspect.
+  for (const bad of ["a,b", null, 42, {}]) {
+    const out = run({ findings: { "review-serial": roleFile({ assigned_files: bad }) } });
+    assert.equal(out.status, "inconclusive", JSON.stringify(bad));
+    assert.match(out.reason, /malformed:review-serial/, `${JSON.stringify(bad)} -> ${out.reason}`);
+  }
+});
+
 test("row 6: coverage mismatch reports reviewed_files intersected with the diff", () => {
   // `seen` is the failing role's raw files_reviewed, which is allowed to range
   // outside the diff — so unfiltered it could report MORE reviewed files than

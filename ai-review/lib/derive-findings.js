@@ -69,17 +69,24 @@ function deriveArtifacts(review, opts) {
   const namespaced = (raw) => `${role}/${raw}`;
 
   // The `auto-` stem keeps the generated fallback out of the space a model id
-  // can land in. Unconditional prefixing was made injective on the prefix; it
-  // says nothing about the VALUE being prefixed, and four-digit zero-padded ids
-  // are this system's own house style (the id schema requires a string but sets
-  // no format) — a model returning "0002" for one finding while another finding
-  // in the same response falls back to index 2's generated "0002" collided
-  // under the same role, in exactly the shape the shared `ids` Set in
-  // aggregate.js was built to reject as `malformed:role:duplicate finding id`.
+  // can land in — narrows the collision window, but "auto-" is only a
+  // convention, not reserved: a model that happens to emit the literal string
+  // "auto-0002" would still collide with whatever finding's OWN generated
+  // fallback that is. RESERVED is what makes the invariant hold by
+  // construction: a raw id matching the generated shape is never trusted as a
+  // model value — it is always replaced by THIS finding's own generatedId(i).
+  // generatedId is injective over the array index, so two different findings
+  // can never be forced to the same reserved-pattern id, however a model
+  // spells its own.
+  const GENERATED_ID_RE = /^auto-\d{4}$/;
   const generatedId = (i) => `auto-${String(i + 1).padStart(4, "0")}`;
 
   const findings = review.findings.map((f, i) => ({
-    id: namespaced(typeof f.id === "string" && f.id !== "" ? f.id : generatedId(i)),
+    id: namespaced(
+      typeof f.id === "string" && f.id !== "" && !GENERATED_ID_RE.test(f.id)
+        ? f.id
+        : generatedId(i),
+    ),
     file: f.file ?? null,
     line: typeof f.line === "number" ? f.line : null,
     severity: f.severity,

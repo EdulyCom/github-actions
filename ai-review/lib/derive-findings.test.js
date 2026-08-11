@@ -151,6 +151,26 @@ test("a model id and a generated fallback id in the same role cannot collide", (
   assert.deepEqual(ids, ["review-serial/0002", "review-serial/auto-0002"]);
 });
 
+test("a model id that literally matches the generated shape is reserved, not trusted", () => {
+  // "auto-" narrows the collision window but isn't reserved on its own — a
+  // model that happens to emit the literal string "auto-0002" would still
+  // collide with whichever finding's OWN fallback that is. Any raw id shaped
+  // like a generated one is never trusted as a model value: it is always
+  // replaced by THIS finding's own generatedId(i), which is injective over
+  // index, so two findings can never be forced to the same id however a model
+  // spells its own.
+  const r = review({
+    findings: [
+      { id: "auto-0002", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 },
+      { id: "", file: "b", line: 2, severity: "P2", summary: "s", failure_scenario: "f", reason: "perf", evidence: "e", confidence: 75 },
+    ],
+  });
+  const out = deriveArtifacts(r, { role: "review-serial" });
+  const ids = out.findings.findings.map((f) => f.id);
+  assert.equal(new Set(ids).size, 2, `collided: ${ids}`);
+  assert.deepEqual(ids, ["review-serial/auto-0001", "review-serial/auto-0002"]);
+});
+
 test("severity_confirmed defaults to the finding's own severity when absent", () => {
   const r = review({
     findings: [{ id: "x/1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],

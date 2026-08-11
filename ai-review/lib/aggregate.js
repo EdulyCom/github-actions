@@ -100,6 +100,11 @@ function malformed(role, f, ids) {
   if (f.complete !== true) return `malformed:${role}`;
   if (!Array.isArray(f.findings)) return `malformed:${role}`;
   if (!Array.isArray(f.files_reviewed)) return `malformed:${role}`;
+  // Load-bearing for PASS 1 below (the assignment partition), and unchecked
+  // until now: a string or null here degrades to `[]` at the partition check,
+  // which still fails closed but reports the wrong file as "assigned to no
+  // role" instead of naming the role whose envelope was actually malformed.
+  if (!Array.isArray(f.assigned_files)) return `malformed:${role}`;
 
   // Validate each finding, not just the envelope. A finding whose severity is
   // not one of P0-P3 has no entry in CONFIDENCE_FLOOR, so the filter below
