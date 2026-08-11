@@ -440,8 +440,8 @@ function splitOversized(clusters, budget, maxFiles, pairs) {
       let best = null;
       for (const piece of pieces) {
         // A group larger than the whole budget fits nowhere as a unit and is
-        // split below; a lone oversized file opens its own piece and is never
-        // split — it is never split, and never crowds another file.
+        // split below; a lone oversized file opens its own piece there and is
+        // never crowded by anything else, since that piece is already over cap.
         if (
           piece.bytes + group.bytes > cap ||
           piece.paths.length + group.paths.length > capFiles

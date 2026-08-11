@@ -440,7 +440,8 @@ runs:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
         SONNET: ${{ inputs.sonnet-model }}
         OPUS: ${{ inputs.opus-model }}
-        # Read by lib/roster.js only, to stamp the OSH tiering onto the roster
+        # Read by lib/write-manifest.js only (lib/roster.js is pure and never
+        # touches the environment), to stamp the OSH tiering onto the roster
         # with the consumer's overrides rather than hardcoded ids.
         HAIKU: ${{ inputs.haiku-model }}
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
