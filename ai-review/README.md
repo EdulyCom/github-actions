@@ -103,6 +103,13 @@ injection-safety rule.
    for three distinct reasons — `MAX_K` binding, a single file larger than
    the budget, or atomic clusters that cannot balance — and the fields
    tell them apart, since they call for different responses.
+
+   Two output contracts live in `roles[]`: every role writes
+   `.ai-review/findings/<role>.json` **except** `scorer`, which writes
+   `.ai-review/scores.json`. Each role states its own path in `artifact`,
+   and `findings_roles` is the pre-filtered list to hand aggregation as its
+   `roster` — passing all of `roles[]` would demand a findings file from
+   the scorer and fail every run.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.

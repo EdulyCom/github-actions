@@ -354,12 +354,20 @@ function splitOversized(clusters, budget, maxFiles) {
  * into bin 0; the correct reading at fixed K is decreasing-size greedy into the
  * least-loaded bin (LPT).
  *
- * "Least loaded" compares bytes first and **file count second**, because a
- * strict byte comparison never advances past bin 0 when every load is equal —
- * which is exactly a delete-only diff, where every path is 0 bytes at HEAD. All
- * 40 removed files would land on one reviewer while `k` claimed two. Ties then
- * break on bin index, and cluster order breaks on first path, so the roster is
- * byte-identical across runs on the same diff.
+ * "Least loaded" is a BLENDED cost — each axis as a fraction of its own budget,
+ * summed — not bytes with file count as a tiebreak. Bytes-first with a tiebreak
+ * on exact equality means a bin holding any non-zero-byte cluster is never
+ * chosen again while a zero-byte bin exists, and deleted paths are all zero
+ * bytes (they have no size at HEAD). One 4 KB edit plus 25 deletions therefore
+ * put 1 file on the first reviewer and 25 on the second, while `{edit + 12}` and
+ * `{13}` sat inside both budgets and was never reached. Whichever axis reads
+ * zero would starve the other; blending is what makes both count.
+ *
+ * It is also the honest cost model: reading N files of B total bytes costs
+ * per-file attention *and* bytes, so a sum of the two normalised loads tracks
+ * what a reviewer actually spends. Ties break on bin index, and cluster order
+ * breaks on first path, so the roster is byte-identical across runs on the same
+ * diff.
  *
  * Empty bins are dropped: a reviewer with nothing to read is a model stage that
  * costs wall-clock and can only report "nothing to review".
@@ -381,12 +389,12 @@ function packClusters(clusters, k) {
 
   const loads = new Array(bins).fill(0);
   const out = Array.from({ length: bins }, () => []);
+  const cost = (i) => loads[i] / BUDGET_BYTES + out[i].length / FILES_PER_REVIEWER;
 
   for (const cluster of sorted) {
     let target = 0;
     for (let i = 1; i < bins; i += 1) {
-      if (loads[i] < loads[target]) target = i;
-      else if (loads[i] === loads[target] && out[i].length < out[target].length) target = i;
+      if (cost(i) < cost(target)) target = i;
     }
     out[target].push(...cluster.paths);
     loads[target] += Number.isFinite(cluster.bytes) ? cluster.bytes : 0;
@@ -544,6 +552,18 @@ const SUPPORT_ROLES = [
 ];
 
 /**
+ * `roles[]` carries TWO output contracts, and that has to be stated in the data
+ * rather than inferred from a `kind` string. Every role but `scorer` writes
+ * `findings/<role>.json`; `scorer` writes `scores.json`. A consumer wiring the
+ * roster the obvious way — `roster: roles.map(r => r.role)` — would hand
+ * `aggregate()` a role it then demands a findings file from, and get
+ * `missing-role:scorer` on every single run. Each role names its own artifact,
+ * and `findings_roles` is the list that actually belongs in `roster`.
+ */
+const artifactFor = (role, kind) =>
+  kind === "scoring" ? ".ai-review/scores.json" : `.ai-review/findings/${role}.json`;
+
+/**
  * Assemble `.ai-review/assignments.json` (schema 1, frozen by spec §6).
  *
  * @param {object} args
@@ -617,6 +637,7 @@ function buildRoster({
       role: spec.role,
       kind: spec.kind,
       model,
+      artifact: artifactFor(spec.role, spec.kind),
       assigned_files: assigned,
     };
     if (spec.effort && !/haiku/i.test(String(model ?? ""))) out.effort = spec.effort;
@@ -632,6 +653,9 @@ function buildRoster({
     schema: 1,
     k: bins.length,
     roles,
+    // The list to pass as aggregate()'s `roster`. Precomputed rather than left as
+    // a filter for the caller to remember, because forgetting it fails every run.
+    findings_roles: roles.filter((r) => r.kind !== "scoring").map((r) => r.role),
     changed_files: changed,
     // Clusters that had to be broken across reviewers: their internal edges are
     // the tracer's responsibility now, since no single reviewer holds them.

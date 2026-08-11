@@ -232,6 +232,52 @@ test("buildRoster: a delete-only diff fans out even though every file is 0 bytes
   assert.deepEqual(bins, [20, 20]);
 });
 
+test("packClusters: a bin holding bytes is still reachable by zero-byte clusters", () => {
+  // The file-count comparison used to be a tiebreak on EXACT byte equality, so a
+  // bin holding any non-zero-byte cluster was never chosen again while a
+  // zero-byte bin existed. Deleted paths are all zero bytes (no statSync entry
+  // at HEAD), so one edit plus 25 deletions piled all 25 onto one reviewer.
+  // The all-zero and all-equal cases were both pinned; the MIXED case — which is
+  // where it breaks — was the test that was missing.
+  const cs = [
+    { paths: ["src/app.ts"], bytes: 4096 },
+    { paths: Array.from({ length: 13 }, (_, i) => `d${i}`), bytes: 0 },
+    { paths: Array.from({ length: 12 }, (_, i) => `e${i}`), bytes: 0 },
+  ];
+  const bins = packClusters(cs, 2).map((b) => b.length);
+  assert.deepEqual(bins.slice().sort((a, b) => a - b), [13, 13]);
+});
+
+test("buildRoster: one edit plus 25 deletions does not pile onto one reviewer", () => {
+  const files = [
+    f("src/app.ts", 4096),
+    ...Array.from({ length: 25 }, (_, i) => f(`src/legacy/f${i}.ts`, 0)),
+  ];
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 2);
+  assert.ok(
+    r.max_bin_files <= FILES_PER_REVIEWER,
+    `max_bin_files=${r.max_bin_files} exceeds the budget a valid packing could have met`,
+  );
+  const covered = r.roles.filter((x) => x.kind === "coverage").flatMap((x) => x.assigned_files);
+  assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
+});
+
+test("packClusters: cost blends both axes, so neither can be starved", () => {
+  // A bin loaded only on bytes and a bin loaded only on file count must both
+  // look expensive. Otherwise whichever axis is zero reads as an empty bin.
+  const cs = [
+    { paths: ["heavy"], bytes: BUDGET_BYTES },
+    { paths: Array.from({ length: FILES_PER_REVIEWER }, (_, i) => `many${i}`), bytes: 0 },
+    { paths: ["next"], bytes: 1 },
+  ];
+  const bins = packClusters(cs, 2);
+  // "next" must not join either full bin ahead of the other on a single axis;
+  // with two bins it joins the cheaper blended one, and both stay non-empty.
+  assert.equal(bins.length, 2);
+  assert.equal(bins.flat().length, FILES_PER_REVIEWER + 2);
+});
+
 test("packClusters: equal byte loads break the tie on file count, not bin 0", () => {
   const cs = [
     { paths: ["a", "b"], bytes: 0 },
@@ -353,6 +399,30 @@ test("buildRoster: OSH tiering — Opus orchestrates and frames, Sonnet reads, H
   assert.equal(by.tracer.model, "claude-sonnet-5");
   assert.equal(by.intent.model, "claude-opus-5");
   assert.equal(by.scorer.model, "claude-haiku-4-5");
+});
+
+test("buildRoster: every role names the artifact it writes", () => {
+  // `roles[]` holds two different output contracts: `scorer` writes scores.json,
+  // everything else writes findings/<role>.json. `kind: "scoring"` was the only
+  // thing separating them and nothing said so, so the obvious PR-D/2 wiring —
+  // roster: roles.map(r => r.role) — would hand aggregate() a scorer it expects
+  // a findings file from, and get missing-role:scorer on every single run.
+  const r = buildRoster({ files: [f("a.ts", 5)], models: { opus: "o", sonnet: "s", haiku: "h" } });
+  const by = Object.fromEntries(r.roles.map((x) => [x.role, x]));
+  assert.equal(by.scorer.artifact, ".ai-review/scores.json");
+  assert.equal(by["reviewer-1"].artifact, ".ai-review/findings/reviewer-1.json");
+  assert.equal(by.intent.artifact, ".ai-review/findings/intent.json");
+  for (const role of r.roles) assert.equal(typeof role.artifact, "string", role.role);
+});
+
+test("buildRoster: the findings roster excludes the scorer", () => {
+  // The list a consumer should pass to aggregate() as `roster`.
+  const r = buildRoster({ files: [f("a.ts", 5)], models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.findings_roles.includes("scorer"), false);
+  assert.deepEqual(
+    r.findings_roles,
+    r.roles.filter((x) => x.kind !== "scoring").map((x) => x.role),
+  );
 });
 
 test("buildRoster: only coverage roles hold files; the rest are assigned zero", () => {
