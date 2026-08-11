@@ -844,13 +844,18 @@ function buildRoster({
     budget_files: FILES_PER_REVIEWER,
     max_bin_files: bins.length > 0 ? Math.max(...bins.map((b) => b.length)) : 0,
     // True only when raising MAX_K could actually have changed this roster.
-    // `bins.length >= MAX_K` separates limiter 1 from limiter 2 but not from a
-    // third binder: with 4 pieces and MAX_K 4, `min(k, pieces)` is 4 either way,
-    // so a higher cap yields the identical roster and reporting "MAX_K bound"
-    // sends whoever reads the telemetry to raise a cap that is not the
-    // constraint. There must be more pieces than the cap for it to bind.
-    k_capped:
-      uncappedK > MAX_K && bins.length >= MAX_K && split.clusters.length > MAX_K,
+    // `split.clusters.length > MAX_K` is what separates limiter 1 from
+    // limiter 2: with only 4 pieces and MAX_K 4, `min(k, pieces)` is 4 either
+    // way, so a higher cap yields the identical roster and reporting "MAX_K
+    // bound" would send whoever reads the telemetry to raise a cap that is
+    // not the constraint. There must be more pieces than the cap for it to
+    // bind. (`bins.length >= MAX_K` is NOT a third independent check here —
+    // once `uncappedK > MAX_K` forces computeK to clamp to exactly MAX_K, and
+    // `split.clusters.length > MAX_K` gives packClusters more pieces than
+    // bins to place them in, `bins.length` is already pinned at MAX_K; adding
+    // the comparison back changes nothing and reads as a third signal that
+    // isn't one.)
+    k_capped: uncappedK > MAX_K && split.clusters.length > MAX_K,
     symbol_manifest: Array.isArray(symbolManifest) ? symbolManifest : [],
     has_test_change: hasTestChange === true,
     has_logic_change: hasLogicChange === true,

@@ -114,10 +114,7 @@ function main() {
     title,
   });
 
-  fs.writeFileSync(
-    path.join(DIR, "manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  );
+  atomicWriteJson(path.join(DIR, "manifest.json"), manifest);
 
   process.stdout.write(
     `prep: ${manifest.file_count} files, churn ${manifest.churn}, ` +

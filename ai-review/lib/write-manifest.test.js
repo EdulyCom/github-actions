@@ -355,6 +355,21 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
   const prevCwd = process.cwd();
   const prevBase = process.env.BASE_SHA;
   const prevHead = process.env.HEAD_SHA;
+  // Spies on the real fs.renameSync so this test proves the DEFAULT wiring --
+  // main() -> writeRoster()/manifest write -> atomicWriteJson -> fs.renameSync
+  // -- actually runs in production, not just that atomicWriteJson behaves
+  // correctly when called directly (already covered above) or that the end
+  // file happens to look right (which a reverted bare fs.writeFileSync would
+  // also produce on the happy path -- the two are indistinguishable from the
+  // output alone, only the syscall sequence tells them apart). Every other
+  // test in this file injects its own writeJson, so nothing else exercises
+  // this specific wire.
+  const renamed = [];
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    renamed.push(to);
+    return realRename(from, to);
+  };
   try {
     process.chdir(dir);
     fs.mkdirSync(".ai-review");
@@ -382,7 +397,19 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     assert.deepEqual(roster.changed_files, ["src/a.ts"]);
     const coverage = roster.roles.filter((r) => r.kind === "coverage");
     assert.deepEqual(coverage.flatMap((r) => r.assigned_files), ["src/a.ts"]);
+
+    assert.deepEqual(
+      renamed.sort(),
+      [path.join(".ai-review", "assignments.json"), path.join(".ai-review", "manifest.json")].sort(),
+      "manifest.json and/or assignments.json did not go through the atomic write path",
+    );
+    assert.deepEqual(
+      fs.readdirSync(".ai-review").filter((f) => f.includes(".tmp-")),
+      [],
+      "a temp file was left behind in .ai-review",
+    );
   } finally {
+    fs.renameSync = realRename;
     process.chdir(prevCwd);
     if (prevBase === undefined) delete process.env.BASE_SHA;
     else process.env.BASE_SHA = prevBase;
