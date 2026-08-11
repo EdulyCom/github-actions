@@ -101,6 +101,21 @@ test("clusterFiles: test<->source naming pairs join across directories", () => {
   assert.equal(cs.length, 1);
 });
 
+test("clusterFiles: a __tests__/ directory file is recognized as a test — tripwire for the shared TEST_DIR_SEGMENTS import", () => {
+  // roster.js imports TEST_DIR_SEGMENTS from prep.js specifically because the
+  // directory alternation had already drifted once between the two copies.
+  // "auth.ts" has no test suffix/prefix of its own, so this pairing can ONLY
+  // happen through the directory-name branch of nameParts' isTest check — if
+  // the import were ever renamed or inlined back to `undefined`, TEST_DIR_RE
+  // would silently become /(^|\/)(undefined)(\/|$)/ (no throw), and every
+  // OTHER test in this file would still pass, since none of them uses a
+  // __tests__/, spec/, tests/ or __mocks__/ path. This is that tripwire, the
+  // same shape FRAME_ROLE's cross-module test already covers for the other
+  // shared constant.
+  const cs = clusterFiles([f("src/a.ts", 10), f("src/__tests__/a.ts", 10)]);
+  assert.equal(cs.length, 1, `TEST_DIR_SEGMENTS wiring broken: ${JSON.stringify(cs)}`);
+});
+
 test("clusterFiles: a lone file is its own cluster", () => {
   const cs = clusterFiles([f("a/x.ts", 1), f("b/y.ts", 1), f("c/z.ts", 1)]);
   assert.equal(cs.length, 3);

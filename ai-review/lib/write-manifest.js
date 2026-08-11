@@ -30,6 +30,38 @@ const { buildManifest, parseNumstat } = require("./prep.js");
 const DIR = ".ai-review";
 
 /**
+ * Write JSON to `p` atomically: temp file in the same directory, then rename.
+ *
+ * A bare `fs.writeFileSync(p, ...)` can leave a truncated file at `p` if it
+ * fails partway through (ENOSPC, a killed process). `writeRoster`'s catch
+ * already reconciles four signals on a write failure — return value, log
+ * line, `::warning::`, telemetry — but none of them touch the artifact on
+ * disk, so a truncated `assignments.json` could outlive a failure the rest of
+ * the system already reported as NOT EMITTED. `rename(2)` on the same
+ * filesystem is atomic: `p` either has the old content (nothing existed) or
+ * the complete new content, never a partial write, regardless of where the
+ * temp write failed. `writeFile`/`renameSync` are injectable for the same
+ * reason the rest of this module's I/O is.
+ */
+function atomicWriteJson(p, obj, io) {
+  const writeFile = (io && io.writeFile) || fs.writeFileSync;
+  const renameFile = (io && io.renameFile) || fs.renameSync;
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFile(tmp, `${JSON.stringify(obj, null, 2)}\n`);
+    renameFile(tmp, p);
+  } finally {
+    // Best-effort cleanup if the write threw before rename — never masks the
+    // original error, never throws itself if the temp file never existed.
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* nothing more to do */
+    }
+  }
+}
+
+/**
  * Files above this are not read for import edges. A minified bundle or a
  * checked-in lockfile yields no useful adjacency and would dominate this step's
  * runtime; it is still stat'd, still assigned, and still read in full by its
@@ -114,8 +146,7 @@ function main() {
  */
 function writeRoster(manifest, sizes, io) {
   const readText = (io && io.readText) || ((p) => fs.readFileSync(p, "utf8"));
-  const writeJson = (io && io.writeJson) || ((p, obj) =>
-    fs.writeFileSync(p, `${JSON.stringify(obj, null, 2)}\n`));
+  const writeJson = (io && io.writeJson) || ((p, obj) => atomicWriteJson(p, obj));
   const log = (io && io.log) || ((line) => process.stdout.write(line));
 
   let roster = null;
@@ -289,6 +320,7 @@ module.exports = {
   IMPORT_SCAN_MAX_BYTES,
   collectSpecifiers,
   rosterTelemetry,
+  atomicWriteJson,
   writeRoster,
   // Exported so a test can pin that main() actually calls writeRoster — every
   // other export here is well covered in isolation, but nothing previously

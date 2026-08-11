@@ -10,6 +10,7 @@ const path = require("node:path");
 const {
   collectSpecifiers,
   rosterTelemetry,
+  atomicWriteJson,
   writeRoster,
   main,
   IMPORT_SCAN_MAX_BYTES,
@@ -201,6 +202,56 @@ test("writeRoster: a throw from writeJson (build succeeded, the write didn't) re
   assert.ok(logs.some((l) => l.startsWith("roster: NOT EMITTED") && l.includes("ENOSPC")));
 });
 
+// The comment above the `why` ternary exists because a real miscategorisation
+// shipped once already ("clusters could not divide further" logged for a
+// file-count overflow that could, in fact, divide further). Each of these
+// drives writeRoster over budget on a different axis and asserts the exact
+// arm, so a future edit that silently swaps two branches fails here instead
+// of shipping unnoticed a second time.
+
+test("writeRoster: logs 'MAX_K bound' when the cap is what's actually binding", () => {
+  const logs = [];
+  const changed_files = Array.from({ length: 10 }, (_, i) => `src/f${i}.ts`);
+  const sizes = Object.fromEntries(changed_files.map((p) => [p, 100000]));
+  writeRoster(
+    { changed_files, symbol_manifest: [], has_test_change: false, has_logic_change: true, modifies_reviewer_guidance: false },
+    sizes,
+    { readText: () => "", writeJson: () => {}, log: (l) => logs.push(l) },
+  );
+  const overBudgetLine = logs.find((l) => l.startsWith("roster: largest bin is over budget"));
+  assert.ok(overBudgetLine, `no over-budget line: ${JSON.stringify(logs)}`);
+  assert.match(overBudgetLine, /MAX_K bound at K=4/);
+});
+
+test("writeRoster: logs the file-count axis when clusters can't divide further", () => {
+  const logs = [];
+  const changed_files = [
+    ...Array.from({ length: 30 }, (_, i) => `a/f${i}.ts`),
+    ...Array.from({ length: 30 }, (_, i) => `b/f${i}.ts`),
+  ];
+  const sizes = Object.fromEntries(changed_files.map((p) => [p, 1000]));
+  writeRoster(
+    { changed_files, symbol_manifest: [], has_test_change: false, has_logic_change: true, modifies_reviewer_guidance: false },
+    sizes,
+    { readText: () => "", writeJson: () => {}, log: (l) => logs.push(l) },
+  );
+  const overBudgetLine = logs.find((l) => l.startsWith("roster: largest bin is over budget"));
+  assert.ok(overBudgetLine, `no over-budget line: ${JSON.stringify(logs)}`);
+  assert.match(overBudgetLine, /file-count axis/);
+});
+
+test("writeRoster: logs the byte axis when one indivisible file is the limiter", () => {
+  const logs = [];
+  writeRoster(
+    { changed_files: ["src/huge.ts"], symbol_manifest: [], has_test_change: false, has_logic_change: true, modifies_reviewer_guidance: false },
+    { "src/huge.ts": 600000 },
+    { readText: () => "", writeJson: () => {}, log: (l) => logs.push(l) },
+  );
+  const overBudgetLine = logs.find((l) => l.startsWith("roster: largest bin is over budget"));
+  assert.ok(overBudgetLine, `no over-budget line: ${JSON.stringify(logs)}`);
+  assert.match(overBudgetLine, /byte axis/);
+});
+
 test("writeRoster: a readText throw for one file degrades to a weaker cluster, not a failure", () => {
   const logs = [];
   const manifest = {
@@ -220,6 +271,76 @@ test("writeRoster: a readText throw for one file degrades to a weaker cluster, n
   });
   assert.notEqual(result, null);
   assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
+});
+
+// --- atomicWriteJson ----------------------------------------------------------
+//
+// writeRoster's catch reconciles four signals on a write failure — return
+// value, log line, ::warning::, telemetry — but a bare fs.writeFileSync could
+// still leave a truncated assignments.json on disk that the other four agree
+// doesn't exist. Real files on a real temp directory, not mocks: the property
+// under test is what actually lands on disk after a failure.
+
+test("atomicWriteJson: writes the JSON, then removes the temp file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-write-"));
+  const target = path.join(dir, "out.json");
+  try {
+    atomicWriteJson(target, { k: 1 });
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, "utf8")), { k: 1 });
+    assert.deepEqual(fs.readdirSync(dir), ["out.json"], "temp file left behind");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("atomicWriteJson: a failure never leaves a partial file at the target path", () => {
+  // The injected writeFile writes REAL, PARTIAL bytes to whatever path it's
+  // given before throwing — simulating an ENOSPC mid-write — rather than
+  // throwing before touching disk at all. A mock that never writes anything
+  // would pass this test whether the implementation targets a temp file or
+  // the real target directly, since nothing on disk changes either way; only
+  // a real partial write can tell the two apart. Confirmed to fail against a
+  // regressed direct-write implementation (no temp file, no rename): the
+  // partial bytes land on `target` itself, corrupting it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-write-"));
+  const target = path.join(dir, "out.json");
+  fs.writeFileSync(target, "PREVIOUS GOOD CONTENT");
+  try {
+    assert.throws(() => {
+      atomicWriteJson(target, { k: 1 }, {
+        writeFile: (p, content) => {
+          fs.writeFileSync(p, content.slice(0, 3)); // a real, truncated write
+          throw new Error("ENOSPC");
+        },
+      });
+    });
+    // The partial bytes landed on the TEMP path, not the target — the target
+    // is exactly what it was before, never truncated, never a mix of old and
+    // new content.
+    assert.equal(fs.readFileSync(target, "utf8"), "PREVIOUS GOOD CONTENT");
+    assert.deepEqual(fs.readdirSync(dir), ["out.json"], "the partial temp file was not cleaned up");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("atomicWriteJson: a rename failure leaves the old target untouched and cleans up the temp file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-write-"));
+  const target = path.join(dir, "out.json");
+  fs.writeFileSync(target, "PREVIOUS GOOD CONTENT");
+  try {
+    assert.throws(() => {
+      atomicWriteJson(target, { k: 1 }, {
+        renameFile: () => {
+          throw new Error("EPERM");
+        },
+      });
+    });
+    assert.equal(fs.readFileSync(target, "utf8"), "PREVIOUS GOOD CONTENT");
+    assert.deepEqual(fs.readdirSync(dir), ["out.json"], "the temp file was not cleaned up");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- main ----------------------------------------------------------------
