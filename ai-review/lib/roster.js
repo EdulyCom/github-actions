@@ -15,8 +15,7 @@
 //      silently missing from every bin is a file nobody reads — and the review
 //      would still report `verdict: pass`, because nothing downstream can tell
 //      "reviewed and clean" from "never opened". `assertPartition` hard-fails
-//      instead. `aggregate.js` records this assertion as its one unimplemented
-//      spec step (vacuous at roster size 1); this is where it lives.
+//      instead.
 //   2. **No partition can split a file.** Roles hold whole paths. There is no
 //      byte-range or line-range field anywhere in the schema, so splitting one
 //      file's contents across two reviewers is unrepresentable rather than
@@ -372,9 +371,17 @@ function splitOversized(clusters, budget, maxFiles) {
  * Empty bins are dropped: a reviewer with nothing to read is a model stage that
  * costs wall-clock and can only report "nothing to review".
  *
+ * Budgets are parameters, matching `splitOversized`: both are exported, and a
+ * caller who tuned the split down and then packed against hardcoded constants
+ * would get pieces sized for their budget and a balance scored against someone
+ * else's, with no error and no log line.
+ *
  * @returns {string[][]} one path list per bin
  */
-function packClusters(clusters, k) {
+function packClusters(clusters, k, budget, maxFiles) {
+  const cap = Number.isFinite(budget) && budget > 0 ? budget : BUDGET_BYTES;
+  const capFiles =
+    Number.isFinite(maxFiles) && maxFiles >= 1 ? Math.floor(maxFiles) : FILES_PER_REVIEWER;
   const list = (Array.isArray(clusters) ? clusters : []).filter(
     (c) => Array.isArray(c?.paths) && c.paths.length > 0,
   );
@@ -389,7 +396,7 @@ function packClusters(clusters, k) {
 
   const loads = new Array(bins).fill(0);
   const out = Array.from({ length: bins }, () => []);
-  const cost = (i) => loads[i] / BUDGET_BYTES + out[i].length / FILES_PER_REVIEWER;
+  const cost = (i) => loads[i] / cap + out[i].length / capFiles;
 
   for (const cluster of sorted) {
     let target = 0;
@@ -411,12 +418,13 @@ function packClusters(clusters, k) {
  * miss costs a cut edge. A commented-out import producing a spurious edge is
  * the cheapest possible error here.
  *
- * JS/TS spellings only. Other ecosystems fall back to the directory and
- * test-pair edges, which is a weaker cluster, not a coverage gap — every
- * changed file is still assigned to exactly one reviewer either way.
+ * JS/TS spellings only — static `import`/`export … from`, dynamic `import(…)`,
+ * and `require(…)`. Other ecosystems fall back to the directory and test-pair
+ * edges, which is a weaker cluster, not a coverage gap — every changed file is
+ * still assigned to exactly one reviewer either way.
  */
 const IMPORT_RE =
-  /(?:^|[^\w$])(?:import|export)\s+(?:[^'"()]*?\sfrom\s+)?['"]([^'"]+)['"]|(?:^|[^\w$])require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  /(?:^|[^\w$])(?:import|export)\s+(?:[^'"()]*?\sfrom\s+)?['"]([^'"]+)['"]|(?:^|[^\w$])(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 
 function extractImports(text) {
   if (typeof text !== "string") return [];
@@ -601,7 +609,7 @@ function buildRoster({
 
   const k = computeK({ totalBytes, fileCount: changed.length });
   const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES, FILES_PER_REVIEWER);
-  const bins = packClusters(split.clusters, k);
+  const bins = packClusters(split.clusters, k, BUDGET_BYTES, FILES_PER_REVIEWER);
   assertPartition(bins, changed);
 
   // `splitOversized` guarantees each *piece* fits both budgets; `packClusters`

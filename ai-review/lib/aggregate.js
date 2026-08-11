@@ -112,12 +112,12 @@ function malformed(role, f, ids) {
     // set-equality assertions stayed green, because Sets are duplicate-blind —
     // reproduced as a P0@100 colliding with a P3@25 yielding verdict pass.
     //
-    // The set spans ALL roles, not one. `derive-findings.js` uses the model's
-    // own id string verbatim whenever it supplies one, so nothing namespaces
-    // ids by role, and two coverage reviewers can independently mint the same
-    // one. A per-role set would validate each file happily and let the
-    // collision through to the join — the identical fail-open, reached from the
-    // direction fan-out opens up.
+    // The set spans ALL roles, not one. `derive-findings.js` does namespace ids
+    // by role, but a role file is untrusted input to this module and it cannot
+    // assume the deriver produced it — this is the last line of defence, not a
+    // duplicate of that one. A per-role set would validate each file happily and
+    // let a collision through to the join, which is the identical fail-open
+    // reached from the direction fan-out opens up.
     if (ids.has(item.id)) return `malformed:${role}:duplicate finding id ${item.id}`;
     ids.add(item.id);
   }

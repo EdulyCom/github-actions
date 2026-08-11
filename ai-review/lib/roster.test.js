@@ -155,6 +155,30 @@ test("packClusters: first-fit-decreasing balances the largest first", () => {
   assert.deepEqual(bins[1].sort(), ["mid", "small"]);
 });
 
+test("packClusters: budgets are parameters, symmetric with splitOversized", () => {
+  // Both are exported. splitOversized takes budget/maxFiles; packClusters used
+  // to divide by the module constants directly, so a caller who tuned the split
+  // down and then packed would get pieces sized for their budget and a balance
+  // scored against 130 KB / 20 files, with no error and no log line.
+  const cs = [
+    { paths: ["heavy"], bytes: 100000 },
+    { paths: Array.from({ length: 10 }, (_, i) => `m${i}`), bytes: 0 },
+    { paths: ["z"], bytes: 0 },
+  ];
+  // Under the module defaults, `heavy` dominates on bytes and `z` joins the
+  // 10-file bin: [1, 11].
+  assert.deepEqual(
+    packClusters(cs, 2).map((b) => b.length).sort((a, b) => a - b),
+    [1, 11],
+  );
+  // Under a budget where bytes are nearly free and files are dear, the 10-file
+  // cluster is the expensive one and `z` joins `heavy` instead: [2, 10].
+  assert.deepEqual(
+    packClusters(cs, 2, 1e9, 4).map((b) => b.length).sort((a, b) => a - b),
+    [2, 10],
+  );
+});
+
 test("packClusters: K=1 puts everything in one bin", () => {
   const cs = clusterFiles([f("src/a.ts", 10), f("lib/b.ts", 10)]);
   assert.deepEqual(packClusters(cs, 1).length, 1);
@@ -324,6 +348,20 @@ test("extractImports: import, export-from and require all count", () => {
     `import "react";`,
   ].join("\n");
   assert.deepEqual(extractImports(src).sort(), ["../lib/b", "./a.js", "./c", "./d", "react"].sort());
+});
+
+test("extractImports: dynamic import() counts too", () => {
+  // A JS/TS spelling the regex silently sat outside, while its own comment
+  // claimed to cover JS/TS. Costs a cut clustering edge, never a coverage gap —
+  // but a documented scope should be true.
+  const src = [
+    `const a = await import("./a");`,
+    `void import('../lib/b')`,
+    `import.meta.url`,
+  ].join("\n");
+  const found = extractImports(src);
+  assert.ok(found.includes("./a"), JSON.stringify(found));
+  assert.ok(found.includes("../lib/b"), JSON.stringify(found));
 });
 
 test("extractImports: garbage never throws", () => {
