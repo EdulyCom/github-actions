@@ -100,20 +100,13 @@ function main() {
  * exists to prevent.
  */
 function writeRoster(manifest, sizes) {
+  let roster = null;
   try {
-    const specifiers = Object.create(null);
-    for (const p of manifest.changed_files) {
-      const size = sizes[p];
-      if (size === undefined || size > IMPORT_SCAN_MAX_BYTES) continue;
-      try {
-        specifiers[p] = extractImports(fs.readFileSync(p, "utf8"));
-      } catch {
-        // Binary, unreadable, or gone. Falls back to directory and test-pair
-        // edges — a weaker cluster, never a coverage gap.
-      }
-    }
+    const specifiers = collectSpecifiers(manifest.changed_files, sizes, (p) =>
+      fs.readFileSync(p, "utf8"),
+    );
 
-    const roster = buildRoster({
+    roster = buildRoster({
       files: manifest.changed_files.map((p) => ({ path: p, bytes: sizes[p] ?? 0 })),
       models: {
         opus: process.env.OPUS || "claude-opus-5",
@@ -136,12 +129,16 @@ function writeRoster(manifest, sizes) {
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
         `${roster.roles.map((r) => `${r.role}:${r.assigned_files.length}`).join(" ")}\n`,
     );
-    if (roster.k_capped) {
-      // Deliberate, not a defect: MAX_K is rate-limit exposure. Logged so a slow
-      // reviewer stage on a huge diff is explainable from the job log alone.
+    // Name the limiter, not just the overflow — the three are distinguishable
+    // (see buildRoster) and they call for different responses.
+    if (roster.max_bin_bytes > roster.budget_bytes || roster.max_bin_files > roster.budget_files) {
+      const why = roster.k_capped
+        ? `MAX_K bound at K=${roster.k}`
+        : "clusters could not divide further";
       process.stdout.write(
-        `roster: MAX_K bound — largest bin is ${roster.max_bin_bytes} bytes ` +
-          `against a ${roster.budget_bytes}-byte per-reviewer budget\n`,
+        `roster: largest bin is over budget (${why}) — ` +
+          `${roster.max_bin_bytes}/${roster.budget_bytes} bytes, ` +
+          `${roster.max_bin_files}/${roster.budget_files} files\n`,
       );
     }
     if (roster.split_clusters.length > 0) {
@@ -150,9 +147,91 @@ function writeRoster(manifest, sizes) {
           `their internal edges belong to the tracer\n`,
       );
     }
+    process.stdout.write(`${rosterTelemetry(roster)}\n`);
   } catch (err) {
     process.stdout.write(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
+    // An annotation as well as a log line: a `run:` step's stdout is not
+    // surfaced anywhere a maintainer looks unless they open the job.
+    process.stdout.write(
+      `::warning::ai-review could not build the review roster: ${one(err)}. ` +
+        "Nothing consumes it yet, so the review is unaffected — but PR-D/2 will.\n",
+    );
+    process.stdout.write(`${rosterTelemetry(null, err)}\n`);
   }
 }
 
-main();
+/** Collapse to a single line: a newline would split a scraped record in two. */
+function one(v) {
+  const s = v && v.message ? v.message : String(v);
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Per-file import specifiers, for the roster's third edge kind.
+ *
+ * @param {string[]} changedFiles
+ * @param {Record<string, number>} sizes  path -> byte size at HEAD
+ * @param {(path: string) => string} readText  injected so this is testable
+ *   without a temp tree, and so the size gate and the skip paths are pinnable.
+ */
+function collectSpecifiers(changedFiles, sizes, readText) {
+  const out = Object.create(null);
+  for (const p of Array.isArray(changedFiles) ? changedFiles : []) {
+    const size = sizes ? sizes[p] : undefined;
+    // No size means the path is gone at HEAD; over the ceiling means a bundle or
+    // a lockfile, which yields no useful adjacency and would dominate this step.
+    // Either way the file is still assigned and still read in full by its
+    // reviewer — only the clustering hint is skipped.
+    if (size === undefined || size > IMPORT_SCAN_MAX_BYTES) continue;
+    try {
+      out[p] = extractImports(readText(p));
+    } catch {
+      // Binary, unreadable, or vanished between stat and read. Falls back to
+      // directory and test-pair edges — a weaker cluster, never a coverage gap.
+    }
+  }
+  return out;
+}
+
+/**
+ * One scrapable line per run, in the `ai-review-metrics {json}` shape.
+ *
+ * The case for shipping the roster before anything reads it rests entirely on
+ * exercising the partition across seven consumers first. A lone unstructured
+ * stdout line cannot carry that: the 682-job latency baseline was gathered by
+ * grepping `ai-review-metrics {...}` out of raw logs, and a roster failure needs
+ * to be countable the same way. A systematic `buildRoster` defect that produced
+ * nothing aggregatable would hold for as long as nobody happened to open a job.
+ *
+ * Failure is a record, not a blank — absence and cleanliness must never be the
+ * same byte pattern.
+ */
+function rosterTelemetry(roster, err) {
+  const payload = roster
+    ? {
+        status: "ok",
+        k: roster.k,
+        kCapped: roster.k_capped,
+        files: roster.changed_files.length,
+        splitClusters: roster.split_clusters.length,
+        maxBinBytes: roster.max_bin_bytes,
+        budgetBytes: roster.budget_bytes,
+        maxBinFiles: roster.max_bin_files,
+        budgetFiles: roster.budget_files,
+        overBudget:
+          roster.max_bin_bytes > roster.budget_bytes ||
+          roster.max_bin_files > roster.budget_files,
+      }
+    : { status: "failed", k: null, error: one(err) };
+  return `ai-review-roster ${JSON.stringify(payload)}`;
+}
+
+module.exports = {
+  IMPORT_SCAN_MAX_BYTES,
+  collectSpecifiers,
+  rosterTelemetry,
+};
+
+// `node lib/write-manifest.js` from the prep step runs it; `require()` from a
+// test does not.
+if (require.main === module) main();

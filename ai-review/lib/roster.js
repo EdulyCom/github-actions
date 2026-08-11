@@ -27,6 +27,8 @@
 // full-file byte size at HEAD (`git cat-file -s`) and, optionally, import edges
 // from a grep pass.
 
+const { TEST_DIR_SEGMENTS } = require("./prep.js");
+
 /**
  * Per-reviewer read budget. ~35K tokens of file content, leaving a Sonnet
  * reviewer room for surrounding-context reads and its own reasoning (spec §5).
@@ -48,11 +50,15 @@ const MAX_K = 4;
 /**
  * Test-file markers, used to find a test's *partner source file* — a different
  * job from `prep.js`'s `classifyPaths`, which only needs a yes/no for the
- * `no_tests_for_changed_logic` penalty. Kept separate deliberately: one regex
- * serving both would have to be loose enough to classify and precise enough to
- * strip, and would drift toward failing at both.
+ * `no_tests_for_changed_logic` penalty. The two stay separate deliberately: one
+ * regex serving both would have to be loose enough to classify and precise
+ * enough to strip, and would drift toward failing at both.
+ *
+ * The directory alternation IS shared, imported rather than copied — the two
+ * copies had already diverged once, and a silent divergence here costs a weaker
+ * cluster with nothing to signal it.
  */
-const TEST_DIR_RE = /(^|\/)(tests?|spec|__tests__|__mocks__)(\/|$)/;
+const TEST_DIR_RE = new RegExp(`(^|/)(${TEST_DIR_SEGMENTS})(/|$)`);
 const TEST_SUFFIX_RE = /[.\-_](?:test|spec)$/i;
 const TEST_PREFIX_RE = /^test[_-]/i;
 
@@ -578,12 +584,21 @@ function buildRoster({
   const bins = packClusters(split.clusters, k);
   assertPartition(bins, changed);
 
-  // `splitOversized` guarantees each *piece* fits the budget; `packClusters` has
-  // no per-bin ceiling, so once MAX_K binds a bin legitimately exceeds it — ten
-  // 100 KB files give K=4 and ~250 KB per reviewer, roughly 2x the budget. That
-  // tradeoff is deliberate (MAX_K is rate-limit exposure, not an arbitrary
-  // number). Stamping it makes it visible: a consumer reading `assigned_files`
-  // could not otherwise tell a within-budget bin from a doubled one.
+  // `splitOversized` guarantees each *piece* fits both budgets; `packClusters`
+  // has no per-bin ceiling, so a bin can legitimately exceed one. THREE distinct
+  // limiters produce that, and the stamps below have to tell them apart because
+  // they call for different responses:
+  //
+  //   1. MAX_K binds. Ten 100 KB files -> K=4 and ~250 KB per reviewer. Rate-limit
+  //      exposure, deliberate; `k_capped` says so.
+  //   2. A file is indivisible. One 600 KB file is one reviewer at 600 KB, and no
+  //      value of K changes that. `k_capped` must be FALSE here — demand exceeded
+  //      MAX_K, but the cap bound nothing, and saying otherwise sends the next
+  //      reader hunting the wrong limiter.
+  //   3. Atomic pieces cannot balance. 60 tiny files in two directories give
+  //      K=3, four 15-file pieces, and bins of [30,15,15]. Neither `k_capped`
+  //      nor `max_bin_bytes` shows it — the files are small — so the COUNT axis
+  //      needs its own stamp or the overflow is undetectable.
   const byPath = new Map(list.map((f) => [String(f.path), Number(f.bytes) || 0]));
   const binBytes = bins.map((paths) => paths.reduce((sum, p) => sum + (byPath.get(p) || 0), 0));
   const uncappedK = Math.max(
@@ -623,7 +638,11 @@ function buildRoster({
     split_clusters: split.splitGroups,
     budget_bytes: BUDGET_BYTES,
     max_bin_bytes: binBytes.length > 0 ? Math.max(...binBytes) : 0,
-    k_capped: changed.length > 0 && uncappedK > MAX_K,
+    budget_files: FILES_PER_REVIEWER,
+    max_bin_files: bins.length > 0 ? Math.max(...bins.map((b) => b.length)) : 0,
+    // `bins.length >= MAX_K` is what distinguishes limiter 1 from limiter 2: the
+    // cap only bound if the roster actually reached it.
+    k_capped: uncappedK > MAX_K && bins.length >= MAX_K,
     symbol_manifest: Array.isArray(symbolManifest) ? symbolManifest : [],
     has_test_change: hasTestChange === true,
     has_logic_change: hasLogicChange === true,

@@ -405,6 +405,34 @@ test("buildRoster: effort is withheld from ANY role that lands on Haiku", () => 
   assert.equal(by.intent.effort, "high", "Opus role lost its effort");
 });
 
+test("buildRoster: a bin over the FILE budget is observable even when bytes are tiny", () => {
+  // 60 tiny files in two directories: computeK gives 3 on the count axis,
+  // splitOversized breaks each 30-file cluster into two atomic 15-file pieces
+  // with no knowledge of k, and four equal pieces cannot balance into three
+  // bins. The result is legal and unimprovable without finer pieces — the
+  // defect was that nothing recorded it: k_capped is false and max_bin_bytes is
+  // far under budget precisely because the files are small.
+  const files = [
+    ...Array.from({ length: 30 }, (_, i) => f(`a/f${i}.ts`, 1000)),
+    ...Array.from({ length: 30 }, (_, i) => f(`b/f${i}.ts`, 1000)),
+  ];
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k_capped, false, "MAX_K did not bind here");
+  assert.ok(r.max_bin_bytes < r.budget_bytes, "byte axis is not the limiter");
+  assert.equal(r.max_bin_files, 30);
+  assert.equal(r.budget_files, FILES_PER_REVIEWER);
+});
+
+test("buildRoster: k_capped means MAX_K actually bound, not merely that demand exceeded it", () => {
+  // One indivisible 600 KB file: demand says 5 reviewers, but a file is atomic,
+  // so the roster is 1. Reporting "MAX_K bound" for a one-reviewer roster sends
+  // the next reader hunting the wrong limiter.
+  const r = buildRoster({ files: [f("src/huge.ts", 600000)], models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 1);
+  assert.equal(r.k_capped, false);
+  assert.ok(r.max_bin_bytes > r.budget_bytes, "still over budget — just not because of the cap");
+});
+
 test("buildRoster: a binding MAX_K is stamped on the roster, not left implicit", () => {
   // splitOversized guarantees each PIECE fits the budget; packClusters has no
   // per-bin ceiling, so when MAX_K binds a bin legitimately exceeds it. The

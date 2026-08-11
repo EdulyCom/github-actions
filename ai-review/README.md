@@ -87,6 +87,22 @@ injection-safety rule.
    the partition it asserts (bins pairwise disjoint, no stray path, union
    equal to `changed_files`) is exercised on real diffs before any model
    stage depends on it.
+
+   Because that soak *is* the justification for shipping early, the step
+   emits one scrapable `ai-review-roster {json}` line per run — the same
+   shape as `ai-review-metrics`, and a record on failure too, so a
+   systematic roster defect is countable across repos instead of sitting
+   unnoticed in a job nobody opened:
+
+   ```bash
+   gh run view <id> --repo <repo> --log | grep -o 'ai-review-roster {.*}'
+   ```
+
+   It carries `k`/`kCapped`, `maxBinBytes`/`budgetBytes`,
+   `maxBinFiles`/`budgetFiles` and `overBudget`. A bin can exceed a budget
+   for three distinct reasons — `MAX_K` binding, a single file larger than
+   the budget, or atomic clusters that cannot balance — and the fields
+   tell them apart, since they call for different responses.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.

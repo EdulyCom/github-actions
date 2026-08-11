@@ -51,8 +51,20 @@ const CODE_EXT = new Set([
 /** Markdown a reviewer is told to read as conventions — see spec §10. */
 const GUIDANCE_RE = /(^|\/)CLAUDE\.md$|(^|\/)\.claude\//;
 
-const TEST_RE =
-  /(^|\/)(tests?|spec|__tests__|__mocks__)\/|(\.|_)(test|spec)\.[A-Za-z0-9]+$/;
+/**
+ * Directory names that mark a test tree. Exported because `lib/roster.js` needs
+ * the same alternation and the two copies had already drifted — it is the one
+ * piece of test-path knowledge both modules genuinely share. The rest cannot be
+ * shared: this module needs a yes/no for the `no_tests_for_changed_logic`
+ * penalty, while the roster needs to *strip* the marker to find a test's partner
+ * source file, and one regex serving both would be too loose to classify and too
+ * imprecise to strip.
+ */
+const TEST_DIR_SEGMENTS = "tests?|spec|__tests__|__mocks__";
+
+const TEST_RE = new RegExp(
+  `(^|/)(${TEST_DIR_SEGMENTS})/|(\\.|_)(test|spec)\\.[A-Za-z0-9]+$`,
+);
 
 /**
  * Resolve git's two rename spellings to the post-rename path.
@@ -236,6 +248,7 @@ function buildManifest({ baseSha, headSha, numstat, diff, sizes, title }) {
 }
 
 module.exports = {
+  TEST_DIR_SEGMENTS,
   parseNumstat,
   extractSymbols,
   isConventionalTitle,

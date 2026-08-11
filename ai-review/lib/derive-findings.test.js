@@ -87,6 +87,33 @@ test("every finding gets a score entry — the join can never be short", () => {
   );
 });
 
+test("ids are namespaced by role, so two reviewers cannot collide", () => {
+  // The schema's `id` is a bare string with no format guidance, so two reviewer
+  // sessions running the same prompt will plausibly both emit "F1". Aggregation
+  // rejects a cross-role duplicate — correctly, since the score join is keyed by
+  // id — which would turn two perfectly good non-overlapping reviews into a
+  // whole-PR failure. Prefixing here is safe: §6.6 dedupe keys on
+  // file+line+reason, not on id, so genuine duplicates still merge.
+  const r = review({
+    findings: [{ id: "F1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],
+  });
+  const one = deriveArtifacts(r, { role: "reviewer-1" });
+  const two = deriveArtifacts(r, { role: "reviewer-2" });
+  assert.equal(one.findings.findings[0].id, "reviewer-1/F1");
+  assert.equal(two.findings.findings[0].id, "reviewer-2/F1");
+  assert.notEqual(one.findings.findings[0].id, two.findings.findings[0].id);
+  // the score side must move with it or the join breaks
+  assert.equal(one.scores.scores[0].id, "reviewer-1/F1");
+});
+
+test("an id the model already namespaced is not double-prefixed", () => {
+  const r = review({
+    findings: [{ id: "reviewer-1/0007", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],
+  });
+  const out = deriveArtifacts(r, { role: "reviewer-1" });
+  assert.equal(out.findings.findings[0].id, "reviewer-1/0007");
+});
+
 test("severity_confirmed defaults to the finding's own severity when absent", () => {
   const r = review({
     findings: [{ id: "x/1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],

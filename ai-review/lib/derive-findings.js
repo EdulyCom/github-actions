@@ -50,8 +50,19 @@ function deriveArtifacts(review, opts) {
   if (!Array.isArray(review.findings)) return null;
   if (!Array.isArray(review.files_reviewed)) return null;
 
+  // Ids are namespaced by role, always. The schema's `id` is a bare string with
+  // no format guidance, so two reviewer sessions running the same prompt will
+  // plausibly both emit "F1" — and `aggregate.js` rejects a cross-role duplicate,
+  // correctly, since its score join is keyed by id. Without the prefix that turns
+  // two perfectly good non-overlapping reviews into a whole-PR failure. Safe
+  // because §6.6 dedupe keys on file+line+reason, never on id, so genuine
+  // duplicate findings still merge across roles.
+  const namespaced = (raw) => (raw.startsWith(`${role}/`) ? raw : `${role}/${raw}`);
+
   const findings = review.findings.map((f, i) => ({
-    id: typeof f.id === "string" && f.id !== "" ? f.id : `${role}/${String(i + 1).padStart(4, "0")}`,
+    id: namespaced(
+      typeof f.id === "string" && f.id !== "" ? f.id : String(i + 1).padStart(4, "0"),
+    ),
     file: f.file ?? null,
     line: typeof f.line === "number" ? f.line : null,
     severity: f.severity,
