@@ -628,19 +628,25 @@ function buildRoster({
 
   // `splitOversized` guarantees each *piece* fits both budgets; `packClusters`
   // has no per-bin ceiling, so a bin can legitimately exceed one. THREE distinct
-  // limiters produce that, and the stamps below have to tell them apart because
-  // they call for different responses:
+  // limiters produce that, but the stamps below distinguish only TWO of them —
+  // said plainly rather than implying finer resolution than they have:
   //
   //   1. MAX_K binds. Ten 100 KB files -> K=4 and ~250 KB per reviewer. Rate-limit
-  //      exposure, deliberate; `k_capped` says so.
+  //      exposure, deliberate; `k_capped` says so, and is the one limiter this
+  //      fully isolates.
   //   2. A file is indivisible. One 600 KB file is one reviewer at 600 KB, and no
   //      value of K changes that. `k_capped` must be FALSE here — demand exceeded
   //      MAX_K, but the cap bound nothing, and saying otherwise sends the next
   //      reader hunting the wrong limiter.
-  //   3. Atomic pieces cannot balance. 60 tiny files in two directories give
-  //      K=3, four 15-file pieces, and bins of [30,15,15]. Neither `k_capped`
-  //      nor `max_bin_bytes` shows it — the files are small — so the COUNT axis
-  //      needs its own stamp or the overflow is undetectable.
+  //   3. Atomic pieces cannot balance. On the FILE-COUNT axis this is isolated —
+  //      60 tiny files in two directories give bins of [30,15,15] with
+  //      `max_bin_files` over budget and `max_bin_bytes` untouched, so a
+  //      count-only overflow reads unambiguously. On the BYTE axis it does not:
+  //      several atomic clusters too large to co-locate present identically to
+  //      limiter 2 (`k_capped: false`, `max_bin_bytes` over budget) — this
+  //      module cannot tell "one big file" from "several medium ones that
+  //      couldn't be packed together" without a field neither telemetry
+  //      consumer has needed yet.
   const byPath = new Map(list.map((f) => [String(f.path), Number(f.bytes) || 0]));
   const binBytes = bins.map((paths) => paths.reduce((sum, p) => sum + (byPath.get(p) || 0), 0));
   const uncappedK = Math.max(

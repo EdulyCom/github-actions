@@ -342,10 +342,16 @@ function aggregate({ manifest, roster, findings, scores }) {
       ? sc.severity_confirmed
       : c.severity;
     const severity = moreSevere(c.severity, confirmed);
+    // Both operands of moreSevere are already constrained to SEVERITIES (one by
+    // malformed(), one by the ternary above), so `severity` is too and
+    // CONFIDENCE_FLOOR[severity] is always defined; `confidence` was validated
+    // finite in the score-list loop upstream. No fallback needed — a guard here
+    // that can never fire would misstate an invariant this module works hard to
+    // establish elsewhere.
     const confidence = Number(sc.confidence);
     const floor = CONFIDENCE_FLOOR[severity];
     const entry = { ...c, severity, confidence };
-    if (floor === undefined || !Number.isFinite(confidence) || confidence < floor) {
+    if (confidence < floor) {
       dropped.push({ ...entry, dropped_because: `confidence ${confidence} < ${floor} for ${severity}` });
     } else {
       kept.push(entry);

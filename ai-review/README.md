@@ -106,10 +106,13 @@ injection-safety rule.
    ```
 
    It carries `k`/`kCapped`, `maxBinBytes`/`budgetBytes`,
-   `maxBinFiles`/`budgetFiles` and `overBudget`. A bin can exceed a budget
-   for three distinct reasons — `MAX_K` binding, a single file larger than
-   the budget, or atomic clusters that cannot balance — and the fields
-   tell them apart, since they call for different responses.
+   `maxBinFiles`/`budgetFiles` and `overBudget`. `kCapped` separates
+   `MAX_K` binding from everything else, and an over-budget `maxBinFiles`
+   with an in-budget `maxBinBytes` separates atomic clusters that cannot
+   balance on file count. A bytes-only overflow does not by itself say
+   whether the cause was one indivisible file over `BUDGET_BYTES` or
+   several smaller atomic clusters that could not be packed to fit —
+   both look identical in the telemetry.
 
    Two output contracts live in `roles[]`: every role writes
    `.ai-review/findings/<role>.json` **except** `scorer`, which writes

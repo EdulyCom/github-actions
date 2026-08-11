@@ -57,7 +57,16 @@ function deriveArtifacts(review, opts) {
   // two perfectly good non-overlapping reviews into a whole-PR failure. Safe
   // because §6.6 dedupe keys on file+line+reason, never on id, so genuine
   // duplicate findings still merge across roles.
-  const namespaced = (raw) => (raw.startsWith(`${role}/`) ? raw : `${role}/${raw}`);
+  // Unconditional, not "skip if it already looks prefixed" — that conditional
+  // was tried first and is not injective: a model that applies its own
+  // namespacing convention inconsistently within one response can emit both
+  // "F1" and "reviewer-1/F1", and a startsWith check maps both to the same
+  // string. That is the exact collision this function exists to prevent,
+  // reached from inside a single role instead of across two. Unconditional
+  // prefixing cannot collide by construction, at the cost of an ugly
+  // "role/role/id" when a model already prefixed correctly — never wrong,
+  // and nothing downstream parses the id's structure.
+  const namespaced = (raw) => `${role}/${raw}`;
 
   const findings = review.findings.map((f, i) => ({
     id: namespaced(

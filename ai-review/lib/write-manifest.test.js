@@ -140,6 +140,31 @@ test("writeRoster: a buildRoster throw is caught, logged, and never written", ()
   assert.ok(logs.some((l) => l.startsWith("ai-review-roster {") && l.includes('"status":"failed"')));
 });
 
+test("writeRoster: a throw from writeJson (build succeeded, the write didn't) returns null too", () => {
+  // buildRoster can succeed and writeJson can still throw (disk full, bad path).
+  // The catch logs NOT EMITTED / a ::warning:: / status:"failed" telemetry in
+  // every case — the return value has to agree, or a caller reading it back
+  // would get a fully-built roster object for a run the log just called a
+  // failure.
+  const logs = [];
+  const manifest = {
+    changed_files: ["src/a.ts"],
+    symbol_manifest: [],
+    has_test_change: false,
+    has_logic_change: true,
+    modifies_reviewer_guidance: false,
+  };
+  const result = writeRoster(manifest, { "src/a.ts": 10 }, {
+    readText: () => "",
+    writeJson: () => {
+      throw new Error("ENOSPC");
+    },
+    log: (line) => logs.push(line),
+  });
+  assert.equal(result, null, "a write failure must not return a built roster");
+  assert.ok(logs.some((l) => l.startsWith("roster: NOT EMITTED") && l.includes("ENOSPC")));
+});
+
 test("writeRoster: a readText throw for one file degrades to a weaker cluster, not a failure", () => {
   const logs = [];
   const manifest = {

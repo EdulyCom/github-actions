@@ -21,7 +21,9 @@ const review = (over = {}) => ({
   checklist: [],
   findings: [
     {
-      id: "review-serial/0001",
+      // Raw, unprefixed — this fixture exercises the splitting mechanics, not
+      // the namespacing edge cases, which have their own dedicated tests below.
+      id: "0001",
       file: "src/a.ts",
       line: 84,
       severity: "P1",
@@ -106,12 +108,27 @@ test("ids are namespaced by role, so two reviewers cannot collide", () => {
   assert.equal(one.scores.scores[0].id, "reviewer-1/F1");
 });
 
-test("an id the model already namespaced is not double-prefixed", () => {
+test("namespacing is unconditional, so two ids can never collide by prefix guessing", () => {
+  // A conditional prefix — skip if raw already starts with "role/" — was tried
+  // first, to avoid double-prefixing an id a well-behaved model already
+  // namespaced itself. But a model told its ids are namespaced can apply the
+  // convention inconsistently within one response: one finding's raw id is
+  // "F1", another's is "reviewer-1/F1". The conditional maps BOTH to
+  // "reviewer-1/F1" — the exact cross-role collision namespacing exists to
+  // prevent, reached from within a single role instead of across two.
+  // Unconditional prefixing is injective: every distinct raw id produces a
+  // distinct namespaced one, full stop. "reviewer-1/reviewer-1/0007" reads
+  // oddly but is never wrong, and nothing downstream parses id structure.
   const r = review({
-    findings: [{ id: "reviewer-1/0007", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],
+    findings: [
+      { id: "F1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 },
+      { id: "reviewer-1/F1", file: "b", line: 2, severity: "P2", summary: "s", failure_scenario: "f", reason: "perf", evidence: "e", confidence: 75 },
+    ],
   });
   const out = deriveArtifacts(r, { role: "reviewer-1" });
-  assert.equal(out.findings.findings[0].id, "reviewer-1/0007");
+  const ids = out.findings.findings.map((f) => f.id);
+  assert.equal(new Set(ids).size, 2, `collided: ${ids}`);
+  assert.deepEqual(ids, ["reviewer-1/F1", "reviewer-1/reviewer-1/F1"]);
 });
 
 test("severity_confirmed defaults to the finding's own severity when absent", () => {

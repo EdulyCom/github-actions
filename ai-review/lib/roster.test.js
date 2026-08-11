@@ -375,6 +375,26 @@ test("packClusters: cost blends both axes, so neither can be starved", () => {
   assert.equal(bins.flat().length, FILES_PER_REVIEWER + 2);
 });
 
+test("packClusters: a low-byte, near-full-count bin reads as expensive, not cheap", () => {
+  // The test above holds under a bytes-only cost too — both models place
+  // "next" so the aggregate counts come out the same, so it never actually
+  // proved the blend is load-bearing. This one asserts the specific bin a
+  // cluster joins, and picks a case where the two models disagree: a bin
+  // near FILES_PER_REVIEWER but at 0 bytes looks CHEAP to a bytes-only
+  // comparison (0 < 10000) and EXPENSIVE to the blend (19/20 ~= 0.95 versus
+  // 10000/133120 ~= 0.075). A bytes-only packer would push the 19-file bin
+  // over budget; the blend keeps it at 19 and grows the other bin instead.
+  const cs = [
+    { paths: ["a-heavy"], bytes: 10000 },
+    { paths: Array.from({ length: 19 }, (_, i) => `many${i}`), bytes: 0 },
+    { paths: ["c-small"], bytes: 1000 },
+  ];
+  const bins = packClusters(cs, 2);
+  const withSmall = bins.find((b) => b.includes("c-small"));
+  assert.deepEqual(withSmall.slice().sort(), ["a-heavy", "c-small"]);
+  assert.equal(bins.find((b) => b !== withSmall).length, 19);
+});
+
 test("packClusters: equal byte loads break the tie on file count, not bin 0", () => {
   const cs = [
     { paths: ["a", "b"], bytes: 0 },
@@ -590,9 +610,21 @@ test("buildRoster: a bin over the FILE budget is observable even when bytes are 
   // 60 tiny files in two directories: computeK gives 3 on the count axis,
   // splitOversized breaks each 30-file cluster into two atomic 15-file pieces
   // with no knowledge of k, and four equal pieces cannot balance into three
-  // bins. The result is legal and unimprovable without finer pieces — the
-  // defect was that nothing recorded it: k_capped is false and max_bin_bytes is
-  // far under budget precisely because the files are small.
+  // bins, giving [30,15,15] where [20,20,20] was reachable by splitting each
+  // cluster into three 10-file pieces instead of two 15-file ones.
+  //
+  // NOT "unimprovable" — a real gap: splitOversized's per-cluster piece count
+  // is derived from BUDGET_BYTES/FILES_PER_REVIEWER alone, with no knowledge of
+  // K or of how many other oversized clusters exist, so it cannot know finer
+  // pieces would let the packer balance globally. A deliberate choice to prefer
+  // cluster locality (fewer, larger pieces) over chasing perfect balance is
+  // defensible — clustering exists to preserve local comprehension for the
+  // reviewer holding each piece — but it is a choice, not a limit, and this
+  // test pins the current behaviour rather than claiming it is optimal.
+  //
+  // What was a genuine defect, and is fixed: nothing recorded the overflow.
+  // k_capped is false and max_bin_bytes is far under budget precisely because
+  // the files are small, so the byte-axis telemetry alone would have missed it.
   const files = [
     ...Array.from({ length: 30 }, (_, i) => f(`a/f${i}.ts`, 1000)),
     ...Array.from({ length: 30 }, (_, i) => f(`b/f${i}.ts`, 1000)),

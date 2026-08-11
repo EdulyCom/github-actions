@@ -143,12 +143,20 @@ function writeRoster(manifest, sizes, io) {
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
         `${roster.roles.map((r) => `${r.role}:${r.assigned_files.length}`).join(" ")}\n`,
     );
-    // Name the limiter, not just the overflow — the three are distinguishable
-    // (see buildRoster) and they call for different responses.
-    if (roster.max_bin_bytes > roster.budget_bytes || roster.max_bin_files > roster.budget_files) {
+    // Name the limiter as precisely as the telemetry actually can — see
+    // buildRoster's header for which of the three causes these two conditions
+    // do and don't isolate. "clusters could not divide further" used to cover
+    // every non-MAX_K case, which was flatly false for a file-count overflow:
+    // splitOversized's per-cluster piece count doesn't know K, so a large
+    // cluster CAN be cut finer than it was, the splitter just wasn't asked to.
+    const filesOver = roster.max_bin_files > roster.budget_files;
+    const bytesOver = roster.max_bin_bytes > roster.budget_bytes;
+    if (bytesOver || filesOver) {
       const why = roster.k_capped
         ? `MAX_K bound at K=${roster.k}`
-        : "clusters could not divide further";
+        : filesOver
+          ? "file-count axis: cluster locality was kept over finer per-cluster splitting"
+          : "byte axis: one indivisible file, or several atomic clusters that could not co-locate — not distinguishable from this telemetry alone";
       log(
         `roster: largest bin is over budget (${why}) — ` +
           `${roster.max_bin_bytes}/${roster.budget_bytes} bytes, ` +
@@ -163,6 +171,12 @@ function writeRoster(manifest, sizes, io) {
     }
     log(`${rosterTelemetry(roster)}\n`);
   } catch (err) {
+    // `roster` may already be a built object here — buildRoster can succeed and
+    // writeJson can still throw. Null it out: the log line, the annotation and
+    // the telemetry all say NOT EMITTED, and the return value has to agree.
+    // Latent while main() is the only caller and ignores it; load-bearing once
+    // PR-D/2 reads this to decide whether to fan out.
+    roster = null;
     log(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
     // An annotation as well as a log line: a `run:` step's stdout is not
     // surfaced anywhere a maintainer looks unless they open the job.
