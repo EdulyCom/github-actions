@@ -234,7 +234,7 @@ function clusterFiles(files, extraEdges) {
 }
 
 /**
- * Split any cluster that alone exceeds the per-reviewer budget (spec §4 step 4).
+ * Split any cluster that alone exceeds a per-reviewer budget (spec §4 step 4).
  *
  * Without this the most ordinary diff shape there is — every changed file in
  * one directory — unions into a single cluster, `packClusters` has exactly one
@@ -242,8 +242,15 @@ function clusterFiles(files, extraEdges) {
  * partition is still valid, so `assertPartition` says nothing, and one reviewer
  * silently holds the whole diff while the emitted `k` claims otherwise.
  *
+ * **Both** of `computeK`'s axes are enforced here, because a guard on bytes
+ * alone leaves `FILES_PER_REVIEWER` unable to reach the emitted roster at all:
+ * 25 files of 2 KB under `src/` sail under the byte cap, clamp the packer to one
+ * bin, and silently contradict the count term that spec §5 put there on purpose.
+ * The same hole swallows a delete-only diff, where every path is 0 bytes at HEAD
+ * yet reviewing removed behaviour is real work.
+ *
  * Splitting is **at file boundaries only** — a file is atomic, so a single file
- * larger than the budget is left whole rather than truncated. That is the
+ * larger than the byte budget is left whole rather than truncated. That is the
  * "must read all" constraint winning over the budget, which is the correct
  * direction for it to lose.
  *
@@ -252,8 +259,10 @@ function clusterFiles(files, extraEdges) {
  *   broken up. It is emitted to the roster because those internal edges no
  *   longer live with one reviewer, and the tracer owns them instead.
  */
-function splitOversized(clusters, budget) {
+function splitOversized(clusters, budget, maxFiles) {
   const cap = Number.isFinite(budget) && budget > 0 ? budget : BUDGET_BYTES;
+  const capFiles =
+    Number.isFinite(maxFiles) && maxFiles >= 1 ? Math.floor(maxFiles) : FILES_PER_REVIEWER;
   const out = [];
   const splitGroups = [];
 
@@ -262,7 +271,7 @@ function splitOversized(clusters, budget) {
     const bytes = Number.isFinite(c?.bytes) ? c.bytes : 0;
     const sizes = c?.sizes;
 
-    if (paths.length < 2 || bytes <= cap || !sizes) {
+    if (paths.length < 2 || (bytes <= cap && paths.length <= capFiles) || !sizes) {
       out.push(c);
       continue;
     }
@@ -278,24 +287,50 @@ function splitOversized(clusters, budget) {
       .slice()
       .sort((a, b) => sizeOf(b) - sizeOf(a) || (a < b ? -1 : a > b ? 1 : 0));
 
-    const pieces = [];
+    // Open the minimum number of pieces the budgets demand up front, then fill
+    // them least-loaded-first. Filling greedily to the cap instead would give 25
+    // small files a 20/5 split: legal, but reviewer-1 then does 4x the work, and
+    // parallel wall-clock is max() not sum(), so most of the win is thrown away.
+    const pieceCount = Math.min(
+      paths.length,
+      Math.max(2, Math.ceil(bytes / cap), Math.ceil(paths.length / capFiles)),
+    );
+    const pieces = Array.from({ length: pieceCount }, () => ({
+      paths: [],
+      bytes: 0,
+      sizes: Object.create(null),
+    }));
+
     for (const p of ordered) {
       const size = sizeOf(p);
-      let target = pieces.find((x) => x.bytes + size <= cap);
-      if (!target) {
-        target = { paths: [], bytes: 0, sizes: Object.create(null) };
-        pieces.push(target);
+      let best = null;
+      for (const piece of pieces) {
+        // A file larger than the whole budget fits nowhere and opens its own
+        // piece below — it is never split, and never crowds another file.
+        if (piece.bytes + size > cap || piece.paths.length >= capFiles) continue;
+        if (
+          best === null ||
+          piece.bytes < best.bytes ||
+          (piece.bytes === best.bytes && piece.paths.length < best.paths.length)
+        ) {
+          best = piece;
+        }
       }
-      target.paths.push(p);
-      target.bytes += size;
-      target.sizes[p] = size;
+      if (best === null) {
+        best = { paths: [], bytes: 0, sizes: Object.create(null) };
+        pieces.push(best);
+      }
+      best.paths.push(p);
+      best.bytes += size;
+      best.sizes[p] = size;
     }
 
-    if (pieces.length <= 1) {
+    const filled = pieces.filter((piece) => piece.paths.length > 0);
+    if (filled.length <= 1) {
       out.push(c);
       continue;
     }
-    for (const piece of pieces) {
+    for (const piece of filled) {
       piece.paths.sort();
       out.push(piece);
     }
@@ -311,8 +346,14 @@ function splitOversized(clusters, budget) {
  * The spec says "first-fit-decreasing". With a fixed K and no per-bin capacity
  * there is no bin to *fail* to fit, so literal first-fit would pile everything
  * into bin 0; the correct reading at fixed K is decreasing-size greedy into the
- * least-loaded bin (LPT). Ties break on bin index, then on first path, so the
- * roster is byte-identical across runs on the same diff.
+ * least-loaded bin (LPT).
+ *
+ * "Least loaded" compares bytes first and **file count second**, because a
+ * strict byte comparison never advances past bin 0 when every load is equal —
+ * which is exactly a delete-only diff, where every path is 0 bytes at HEAD. All
+ * 40 removed files would land on one reviewer while `k` claimed two. Ties then
+ * break on bin index, and cluster order breaks on first path, so the roster is
+ * byte-identical across runs on the same diff.
  *
  * Empty bins are dropped: a reviewer with nothing to read is a model stage that
  * costs wall-clock and can only report "nothing to review".
@@ -339,6 +380,7 @@ function packClusters(clusters, k) {
     let target = 0;
     for (let i = 1; i < bins; i += 1) {
       if (loads[i] < loads[target]) target = i;
+      else if (loads[i] === loads[target] && out[i].length < out[target].length) target = i;
     }
     out[target].push(...cluster.paths);
     loads[target] += Number.isFinite(cluster.bytes) ? cluster.bytes : 0;
@@ -532,7 +574,7 @@ function buildRoster({
   }, 0);
 
   const k = computeK({ totalBytes, fileCount: changed.length });
-  const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES);
+  const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES, FILES_PER_REVIEWER);
   const bins = packClusters(split.clusters, k);
   assertPartition(bins, changed);
 

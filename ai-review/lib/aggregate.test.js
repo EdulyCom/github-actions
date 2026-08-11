@@ -290,6 +290,58 @@ test("row 6: overlapping files_reviewed is fine — only assignment must be disj
   assert.equal(out.status, "ok");
 });
 
+test("intent comes from the frame role, not from whichever role is listed first", () => {
+  // §6 step 9 says intent is owned by exactly one role. Selecting on array
+  // position made that false the moment the roster emitted coverage reviewers
+  // before the frame role — and derive-findings.js stamps `intent` onto every
+  // role file, so a reviewer that saw one slice of the diff and cannot judge the
+  // PR's goal would shadow the role whose whole job that is. Fail-open in the
+  // direction step 9 exists to close.
+  const out = run({
+    roster: ["reviewer-1", "intent"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+        intent: "aligned",
+      }),
+      intent: roleFile({
+        role: "intent",
+        assigned_files: [],
+        files_reviewed: [],
+        intent: "deviated",
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "deviated");
+});
+
+test("intent falls back to any valid value when no frame role is rostered", () => {
+  // The serial roster is a single `review-serial` role that owns intent itself.
+  const out = run();
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "aligned");
+});
+
+test("intent still fails closed when the frame role supplies garbage", () => {
+  const out = run({
+    roster: ["reviewer-1", "intent"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+        intent: null,
+      }),
+      intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], intent: "sideways" }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /no-intent/);
+});
+
 test("row 8: scorer file missing or incomplete", () => {
   for (const bad of [null, { schema: 1, role: "scorer", complete: false, scores: [] }]) {
     const f = finding();

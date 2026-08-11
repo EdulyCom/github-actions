@@ -36,6 +36,13 @@
 const SEVERITIES = ["P0", "P1", "P2", "P3"];
 const VALID_INTENT = new Set(["aligned", "partial", "deviated", "skipped"]);
 
+/**
+ * The role that owns intent (spec §4 "Frame"), by name. Must match the frame
+ * role `lib/roster.js` emits — see the intent selection below for why position
+ * in the roster is not a safe proxy for it.
+ */
+const FRAME_ROLE = "intent";
+
 // §7a: recall bias where it matters. rubric.md's Verify Pass makes PLAUSIBLE the
 // default verdict for the exact class /code-review scores 25-50 ("might be real,
 // wasn't able to verify") — concurrency races, nil on a rare path, off-by-one on
@@ -224,9 +231,22 @@ function aggregate({ manifest, roster, findings, scores }) {
 
   // §6 step 9 / §8 row 10 — intent is owned by exactly one role and a verdict
   // cannot be reached without it.
-  const intent = roles
-    .map((r) => byRole[r].intent)
-    .find((v) => typeof v === "string" && VALID_INTENT.has(v));
+  //
+  // The FRAME role is preferred over roster order, not merely found within it.
+  // Selecting on array position made the "exactly one role" claim false as soon
+  // as the roster emitted coverage reviewers ahead of the frame role, and
+  // `derive-findings.js` stamps `intent` onto every role file unconditionally —
+  // so a reviewer that saw one slice of the diff, and structurally cannot judge
+  // the PR's goal, would shadow the role whose entire mandate that is. If it
+  // says `aligned` where the frame role says `deviated`, the gate reads
+  // `aligned` and passes: fail-open, in the direction step 9 exists to close.
+  //
+  // Coupled by name to `roster.js`'s frame role. The fallback keeps the serial
+  // roster working, where a single `review-serial` role owns intent itself.
+  const validIntent = (v) => typeof v === "string" && VALID_INTENT.has(v);
+  const intent = validIntent(byRole[FRAME_ROLE]?.intent)
+    ? byRole[FRAME_ROLE].intent
+    : roles.map((r) => byRole[r].intent).find(validIntent);
   if (!intent) return inconclusive("no-intent", coverage);
 
   // §6 step 3 / §8 rows 8-9 — join scores by id and require set equality both

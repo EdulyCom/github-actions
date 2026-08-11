@@ -13,6 +13,7 @@ const {
   resolveImportEdges,
   buildRoster,
   BUDGET_BYTES,
+  FILES_PER_REVIEWER,
 } = require("./roster.js");
 
 const f = (path, bytes) => ({ path, bytes });
@@ -192,6 +193,52 @@ test("splitOversized: a single file bigger than budget is never split", () => {
   const out = splitOversized([{ paths: ["huge"], bytes: BUDGET_BYTES * 3, sizes: { huge: BUDGET_BYTES * 3 } }]);
   assert.equal(out.clusters.length, 1);
   assert.deepEqual(out.clusters[0].paths, ["huge"]);
+});
+
+test("splitOversized: a cluster over the FILE COUNT budget is also split", () => {
+  // The byte axis was the only one guarded, so `FILES_PER_REVIEWER` — the whole
+  // reason computeK has a count term (spec §5) — could never reach the emitted
+  // roster: 25 tiny files in one directory union into one cluster, sail under
+  // the byte cap, and clamp the packer to a single bin.
+  const paths = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
+  const sizes = Object.fromEntries(paths.map((p) => [p, 2000]));
+  const out = splitOversized([{ paths, bytes: 50000, sizes }]);
+  assert.ok(out.clusters.length > 1, "not split on count");
+  for (const c of out.clusters) assert.ok(c.paths.length <= FILES_PER_REVIEWER, `${c.paths.length}`);
+  assert.deepEqual(out.clusters.flatMap((c) => c.paths).sort(), paths.slice().sort());
+});
+
+test("buildRoster: 25 small files in one directory fan out, evenly", () => {
+  const files = Array.from({ length: 25 }, (_, i) => f(`src/f${i}.ts`, 2000));
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 2, "count axis never reached the roster");
+  // Not 20/5. Parallel wall-clock is max() not sum(), so a legal-but-lopsided
+  // split throws away most of the win the fan-out exists for.
+  const bins = r.roles.filter((x) => x.kind === "coverage").map((x) => x.assigned_files.length);
+  assert.deepEqual(bins.slice().sort(), [12, 13]);
+  const covered = r.roles.filter((x) => x.kind === "coverage").flatMap((x) => x.assigned_files);
+  assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
+});
+
+test("buildRoster: a delete-only diff fans out even though every file is 0 bytes", () => {
+  // `write-manifest.js` records 0 bytes for a path that no longer exists at
+  // HEAD, so a delete-only PR scores zero on the byte axis while still being
+  // real review work — the rubric's own removed-behaviour angle. With equal
+  // loads the packer's strict `<` scan also never left bin 0.
+  const files = Array.from({ length: 40 }, (_, i) => f(`src/gone${i}.ts`, 0));
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 2);
+  const bins = r.roles.filter((x) => x.kind === "coverage").map((x) => x.assigned_files.length);
+  assert.deepEqual(bins, [20, 20]);
+});
+
+test("packClusters: equal byte loads break the tie on file count, not bin 0", () => {
+  const cs = [
+    { paths: ["a", "b"], bytes: 0 },
+    { paths: ["c", "d"], bytes: 0 },
+  ];
+  const bins = packClusters(cs, 2);
+  assert.equal(bins.length, 2, "all zero-byte clusters landed in one bin");
 });
 
 test("splitOversized: a cluster under budget is untouched and unflagged", () => {
