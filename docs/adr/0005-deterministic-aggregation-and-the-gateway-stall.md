@@ -100,8 +100,12 @@ repos — evidence no design argument substitutes for.
   top-level `findings_roles` is the pre-filtered list to pass as `aggregate()`'s
   `roster` (excludes `scorer`); and `modifies_reviewer_guidance` replaces the
   spec's `modifies_claude_md`, matching the field name `lib/prep.js`'s manifest
-  already uses rather than introducing a second name for the same fact. All
-  additive or a rename to match existing code, never a narrowing of the frozen
+  already uses rather than introducing a second name for the same fact. Seven
+  more top-level keys carry the roster's own budget/limiter telemetry, absent
+  from the frozen example entirely: `k`, `split_clusters`, `budget_bytes`,
+  `max_bin_bytes`, `budget_files`, `max_bin_files`, `k_capped` — documented in
+  the README's `ai-review-roster` telemetry section, not repeated field-by-field
+  here. All additive or a rename to match existing code, never a narrowing of the frozen
   shape.
 
 ### 6. The P2/P3 confidence floor is 75, set from data

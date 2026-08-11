@@ -83,6 +83,30 @@ const IMPORT_SCAN_EXTS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte",
 ]);
 
+/**
+ * Byte size of a changed path at HEAD, or undefined if it isn't one that
+ * means anything — deleted at HEAD, or (the isFile() check) a non-regular
+ * path. fs.statSync follows symlinks, so a changed path that is a symlink to
+ * a character device or FIFO would otherwise stat at a small/zero size,
+ * clearing both IMPORT_SCAN_MAX_BYTES and the extension gate in
+ * collectSpecifiers, whose subsequent readFileSync(p, "utf8") could then
+ * block forever or exhaust memory reading toward an EOF that never comes —
+ * in a prep step that is not continue-on-error, taking the whole review job
+ * down with it. Bounded by the fork guard (this needs an actor with write
+ * access) but a one-line guard here is cheaper than reasoning about who has
+ * write access on which repo. A rejected path is treated the same as a
+ * deleted one: no entry, no read cost, still assigned to a reviewer at 0
+ * bytes downstream.
+ */
+function statSize(p) {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() ? st.size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function read(name) {
   try {
     return fs.readFileSync(path.join(DIR, name), "utf8");
@@ -98,11 +122,8 @@ function main() {
 
   const sizes = Object.create(null);
   for (const f of parseNumstat(numstat).files) {
-    try {
-      sizes[f.path] = fs.statSync(f.path).size;
-    } catch {
-      // Deleted or renamed-away at HEAD; contributes no read cost.
-    }
+    const size = statSize(f.path);
+    if (size !== undefined) sizes[f.path] = size;
   }
 
   const manifest = buildManifest({
@@ -315,6 +336,7 @@ function rosterTelemetry(roster, err) {
 
 module.exports = {
   IMPORT_SCAN_MAX_BYTES,
+  statSize,
   collectSpecifiers,
   rosterTelemetry,
   atomicWriteJson,

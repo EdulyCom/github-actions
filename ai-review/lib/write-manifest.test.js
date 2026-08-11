@@ -8,6 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  statSize,
   collectSpecifiers,
   rosterTelemetry,
   atomicWriteJson,
@@ -419,6 +420,54 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
   }
 });
 
+
+// --- statSize -----------------------------------------------------------------
+//
+// Isolates the guard from the read path entirely, on purpose: proving the real
+// risk (a hang or OOM reading a character device or FIFO) would mean putting a
+// hang-prone device in a test, which defeats the point of having a test suite.
+// /dev/null is harmless to read either way — it stats at size 0 and reads
+// return EOF instantly, so a main()-level integration test using it produced
+// byte-identical manifest.json/assignments.json output whether the guard
+// existed or not, and did not actually discriminate. Testing statSize directly
+// proves the GUARD's own logic — a non-regular path is excluded, not reported
+// as 0 bytes — without needing anything that could hang.
+
+test("statSize: a symlink to a non-regular file is excluded, not reported as 0 bytes", () => {
+  if (process.platform === "win32" || !fs.existsSync("/dev/null")) return;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "statsize-"));
+  const link = path.join(dir, "weird.js");
+  try {
+    fs.symlinkSync("/dev/null", link);
+    assert.equal(statSize(link), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("statSize: a regular file reports its real byte size", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "statsize-"));
+  const file = path.join(dir, "a.ts");
+  try {
+    fs.writeFileSync(file, "hello");
+    assert.equal(statSize(file), 5);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("statSize: a missing path is undefined, the same as a deleted-at-HEAD path", () => {
+  assert.equal(statSize("/nonexistent/path/that/does/not/exist.ts"), undefined);
+});
+
+test("statSize: a directory is excluded too, not reported as some directory-entry size", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "statsize-"));
+  try {
+    assert.equal(statSize(dir), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 // --- rosterTelemetry ---------------------------------------------------------
 //
 // The whole argument for shipping the roster before anything consumes it is that
