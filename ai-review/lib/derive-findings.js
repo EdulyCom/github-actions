@@ -81,11 +81,36 @@ function deriveArtifacts(review, opts) {
   const GENERATED_ID_RE = /^auto-\d{4}$/;
   const generatedId = (i) => `auto-${String(i + 1).padStart(4, "0")}`;
 
+  // The schema requires no uniqueness on the model's own `id`, so two findings
+  // can plainly share a raw value — a model describing two real defects with
+  // the same lazy "F1" is not a contrived case. Neither namespacing nor the
+  // auto- reservation above touches this: both operate on ONE id at a time and
+  // can't see a repeat two array slots later. `aggregate.js`'s shared ids Set
+  // then rejects the whole role as malformed:duplicate — a real review with
+  // real findings turned into a whole-PR "re-run required" over an id string.
+  // Disambiguated here so the invariant the header claims — ids unique by
+  // construction — actually holds for every input, not just the two shapes
+  // that had dedicated tests.
+  const usedIds = new Set();
+  const dedupeId = (id) => {
+    if (!usedIds.has(id)) {
+      usedIds.add(id);
+      return id;
+    }
+    let n = 2;
+    while (usedIds.has(`${id}-${n}`)) n += 1;
+    const disambiguated = `${id}-${n}`;
+    usedIds.add(disambiguated);
+    return disambiguated;
+  };
+
   const findings = review.findings.map((f, i) => ({
-    id: namespaced(
-      typeof f.id === "string" && f.id !== "" && !GENERATED_ID_RE.test(f.id)
-        ? f.id
-        : generatedId(i),
+    id: dedupeId(
+      namespaced(
+        typeof f.id === "string" && f.id !== "" && !GENERATED_ID_RE.test(f.id)
+          ? f.id
+          : generatedId(i),
+      ),
     ),
     file: f.file ?? null,
     line: typeof f.line === "number" ? f.line : null,

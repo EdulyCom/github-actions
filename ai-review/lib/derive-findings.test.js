@@ -171,6 +171,41 @@ test("a model id that literally matches the generated shape is reserved, not tru
   assert.deepEqual(ids, ["review-serial/auto-0001", "review-serial/auto-0002"]);
 });
 
+test("two findings sharing the same plain raw id are disambiguated, not collided", () => {
+  // The schema requires no uniqueness on `id` — a model describing two real
+  // defects with the same lazy "F1" is not contrived. Namespacing and the
+  // auto- reservation each operate on one id at a time and can't see a repeat
+  // two slots later; without dedup, aggregate.js's shared ids Set would reject
+  // the whole role as malformed:duplicate over an id string, discarding two
+  // real findings.
+  const r = review({
+    findings: [
+      { id: "F1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 },
+      { id: "F1", file: "b", line: 2, severity: "P2", summary: "s", failure_scenario: "f", reason: "perf", evidence: "e", confidence: 75 },
+    ],
+  });
+  const out = deriveArtifacts(r, { role: "review-serial" });
+  const ids = out.findings.findings.map((f) => f.id);
+  assert.equal(new Set(ids).size, 2, `collided: ${ids}`);
+  assert.deepEqual(ids, ["review-serial/F1", "review-serial/F1-2"]);
+  // the score side must move with it or the join breaks
+  assert.deepEqual(out.scores.scores.map((s) => s.id), ids);
+});
+
+test("three-way and chained collisions all resolve to distinct ids", () => {
+  const r = review({
+    findings: [
+      { id: "F1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 },
+      { id: "F1", file: "b", line: 2, severity: "P2", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 75 },
+      // Collides with what the second F1 above resolves to, forcing a second bump.
+      { id: "F1-2", file: "c", line: 3, severity: "P3", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 75 },
+    ],
+  });
+  const out = deriveArtifacts(r, { role: "review-serial" });
+  const ids = out.findings.findings.map((f) => f.id);
+  assert.equal(new Set(ids).size, 3, `collided: ${ids}`);
+});
+
 test("severity_confirmed defaults to the finding's own severity when absent", () => {
   const r = review({
     findings: [{ id: "x/1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],
