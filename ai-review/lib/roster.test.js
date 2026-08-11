@@ -264,6 +264,34 @@ test("splitOversized: a single file bigger than budget is never split", () => {
   assert.deepEqual(out.clusters[0].paths, ["huge"]);
 });
 
+test("splitOversized: placement is blended too, not bytes-first like the packer used to be", () => {
+  // packClusters was fixed twice for this exact rule (a piece holding any bytes
+  // loses every tie to an all-zero piece); splitOversized still picked pieces on
+  // raw bytes. One edit plus 44 deletions, K=3: the byte-carrying file opened
+  // piece0, every zero-byte file then beat it on `piece.bytes < best.bytes`, so
+  // piece1/piece2 filled to capFiles before piece0 got another one, and the
+  // last 4 spilled back onto piece0 -> [20, 20, 5]. [15,15,15] was reachable and
+  // never found — silently, since max_bin_files landed exactly on budget_files.
+  const paths = ["edit", ...Array.from({ length: 44 }, (_, i) => `del${i}`)];
+  const sizes = { edit: 1000, ...Object.fromEntries(paths.slice(1).map((p) => [p, 0])) };
+  const out = splitOversized([{ paths, bytes: 1000, sizes }], BUDGET_BYTES, FILES_PER_REVIEWER);
+  const sizesOf = out.clusters.map((c) => c.paths.length).sort((a, b) => a - b);
+  assert.deepEqual(sizesOf, [15, 15, 15]);
+});
+
+test("buildRoster: one edit plus 44 deletions balances instead of hitting the budget silently", () => {
+  const files = [
+    f("src/edit.ts", 1000),
+    ...Array.from({ length: 44 }, (_, i) => f(`src/legacy${i}.ts`, 0)),
+  ];
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.equal(r.k, 3);
+  const bins = r.roles.filter((x) => x.kind === "coverage").map((x) => x.assigned_files.length);
+  assert.deepEqual(bins.slice().sort((a, b) => a - b), [15, 15, 15]);
+  const covered = r.roles.filter((x) => x.kind === "coverage").flatMap((x) => x.assigned_files);
+  assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
+});
+
 test("splitOversized: a cluster over the FILE COUNT budget is also split", () => {
   // The byte axis was the only one guarded, so `FILES_PER_REVIEWER` — the whole
   // reason computeK has a count term (spec §5) — could never reach the emitted

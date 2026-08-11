@@ -258,7 +258,11 @@ function aggregate({ manifest, roster, findings, scores }) {
   //
   // Membership in `roles` is what makes a file eligible, not presence in
   // `byRole`: an entry the roster never declared was never seen by malformed(),
-  // so preferring one would route an unvalidated value into the verdict.
+  // so preferring one would route an unvalidated value into the verdict. The
+  // `byRole[FRAME_ROLE] !== undefined` half is now redundant with that check —
+  // the roster loop above already returns `missing-role:` for any rostered role
+  // absent from `byRole` — but is kept so this line does not depend on running
+  // after that loop to stay correct.
   const validIntent = (v) => typeof v === "string" && VALID_INTENT.has(v);
   const hasFrame = roles.includes(FRAME_ROLE) && byRole[FRAME_ROLE] !== undefined;
   const intent = hasFrame

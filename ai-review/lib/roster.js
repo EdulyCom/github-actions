@@ -306,6 +306,16 @@ function splitOversized(clusters, budget, maxFiles) {
       sizes: Object.create(null),
     }));
 
+    // Blended, matching packClusters — bytes-first-with-a-tiebreak was tried
+    // and rejected there twice (see that function's header) for exactly the
+    // reason it fails here: a piece holding any bytes loses every tie to an
+    // all-zero piece regardless of how many files it already holds. A cluster
+    // mixing one byte-carrying file with more than 2x capFiles zero-byte ones —
+    // one edit plus 44 deletions — put [5, 20, 20] where [15, 15, 15] was
+    // reachable and never found, silently: max_bin_files landed exactly on
+    // budget_files, so the over-budget signal never fired either.
+    const pieceCost = (piece) => piece.bytes / cap + piece.paths.length / capFiles;
+
     for (const p of ordered) {
       const size = sizeOf(p);
       let best = null;
@@ -313,11 +323,7 @@ function splitOversized(clusters, budget, maxFiles) {
         // A file larger than the whole budget fits nowhere and opens its own
         // piece below — it is never split, and never crowds another file.
         if (piece.bytes + size > cap || piece.paths.length >= capFiles) continue;
-        if (
-          best === null ||
-          piece.bytes < best.bytes ||
-          (piece.bytes === best.bytes && piece.paths.length < best.paths.length)
-        ) {
+        if (best === null || pieceCost(piece) < pieceCost(best)) {
           best = piece;
         }
       }
