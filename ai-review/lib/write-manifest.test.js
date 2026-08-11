@@ -3,10 +3,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
 const {
   collectSpecifiers,
   rosterTelemetry,
   writeRoster,
+  main,
   IMPORT_SCAN_MAX_BYTES,
 } = require("./write-manifest.js");
 
@@ -16,6 +21,11 @@ const {
 // claim held: the size gate, the specifiers map, the byte fallback and the
 // best-effort catch are all decisions, not plumbing. The I/O is injected so they
 // can be pinned without a temp directory or a chdir.
+//
+// `main` is the one exception, deliberately: it is real fs.readFileSync /
+// fs.writeFileSync against fixed relative paths, with no injection seam. A
+// temp directory and a chdir are exactly what's needed to pin the one thing
+// no other test here covers — that main() actually calls writeRoster.
 
 // --- collectSpecifiers -------------------------------------------------------
 
@@ -210,6 +220,55 @@ test("writeRoster: a readText throw for one file degrades to a weaker cluster, n
   });
   assert.notEqual(result, null);
   assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
+});
+
+// --- main ----------------------------------------------------------------
+//
+// Real fs, real cwd, no injection seam — that is exactly the wiring the other
+// tests in this file cannot pin. Deleting the writeRoster() call inside main()
+// would keep every other test in this file green while assignments.json
+// silently stopped being emitted in production; this is the test that fails.
+
+test("main: writes manifest.json AND assignments.json against a real diff on disk", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "write-manifest-main-"));
+  const prevCwd = process.cwd();
+  const prevBase = process.env.BASE_SHA;
+  const prevHead = process.env.HEAD_SHA;
+  try {
+    process.chdir(dir);
+    fs.mkdirSync(".ai-review");
+    fs.writeFileSync(".ai-review/numstat.txt", "3\t1\tsrc/a.ts\n");
+    fs.writeFileSync(
+      ".ai-review/diff-headers.txt",
+      "diff --git a/src/a.ts b/src/a.ts\n@@ -1,1 +1,3 @@ export function widget() {\n",
+    );
+    fs.writeFileSync(".ai-review/pr-title.txt", "feat(x): add widget\n");
+    fs.mkdirSync("src");
+    fs.writeFileSync("src/a.ts", "export function widget() {\n  return 1;\n}\n");
+    process.env.BASE_SHA = "base000";
+    process.env.HEAD_SHA = "head111";
+
+    main();
+
+    const manifest = JSON.parse(fs.readFileSync(".ai-review/manifest.json", "utf8"));
+    assert.equal(manifest.schema, 1);
+    assert.deepEqual(manifest.changed_files, ["src/a.ts"]);
+    assert.equal(manifest.base_sha, "base000");
+    assert.equal(manifest.head_sha, "head111");
+
+    const roster = JSON.parse(fs.readFileSync(".ai-review/assignments.json", "utf8"));
+    assert.equal(roster.schema, 1);
+    assert.deepEqual(roster.changed_files, ["src/a.ts"]);
+    const coverage = roster.roles.filter((r) => r.kind === "coverage");
+    assert.deepEqual(coverage.flatMap((r) => r.assigned_files), ["src/a.ts"]);
+  } finally {
+    process.chdir(prevCwd);
+    if (prevBase === undefined) delete process.env.BASE_SHA;
+    else process.env.BASE_SHA = prevBase;
+    if (prevHead === undefined) delete process.env.HEAD_SHA;
+    else process.env.HEAD_SHA = prevHead;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- rosterTelemetry ---------------------------------------------------------

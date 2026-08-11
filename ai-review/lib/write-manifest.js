@@ -244,9 +244,9 @@ function collectSpecifiers(changedFiles, sizes, readText) {
 }
 
 /**
- * Which axis, if either, put the largest bin over its budget — computed once
- * and shared between the job-log line and the scraped telemetry, so the two
- * cannot silently disagree about whether a run was over budget.
+ * Which axis, if either, put the largest bin over its budget — one pure
+ * function called from both the job-log line and the scraped telemetry, so
+ * the two cannot silently disagree about whether a run was over budget.
  */
 function overBudget(roster) {
   const filesOver = roster.max_bin_files > roster.budget_files;
@@ -290,6 +290,12 @@ module.exports = {
   collectSpecifiers,
   rosterTelemetry,
   writeRoster,
+  // Exported so a test can pin that main() actually calls writeRoster — every
+  // other export here is well covered in isolation, but nothing previously
+  // asserted the wiring between them: deleting the writeRoster() call inside
+  // main() would keep every existing test green while assignments.json
+  // silently stopped being emitted in production.
+  main,
 };
 
 // `node lib/write-manifest.js` from the prep step runs it; `require()` from a

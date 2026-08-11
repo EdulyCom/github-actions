@@ -83,6 +83,11 @@ const TEST_DIR_RE = new RegExp(`(^|/)(${TEST_DIR_SEGMENTS})(/|$)`);
 const TEST_SUFFIX_RE = /[.\-_](?:test|spec)$/i;
 const TEST_PREFIX_RE = /^test[_-]/i;
 
+// Composite-key separator for name/ext pairing keys. A literal NUL byte in
+// the source makes git diff this file as binary, so it is built at runtime
+// from String.fromCharCode rather than an inline \u0000 escape.
+const NUL = String.fromCharCode(0);
+
 const dirName = (p) => {
   const i = p.lastIndexOf("/");
   return i === -1 ? "" : p.slice(0, i);
@@ -173,6 +178,55 @@ function makeUnionFind(n) {
 }
 
 /**
+ * Nearest test<->source pairs among `files` — the naming edge `clusterFiles`
+ * unions, extracted so `splitOversized` can use the same pairing for its own
+ * placement affinity instead of re-deriving it. Duplicating this logic is
+ * exactly the shape `blendedCost`'s extraction (above) exists to prevent: two
+ * copies of the same domain knowledge, free to drift apart silently.
+ *
+ * The naming edge requires one side to actually be a test — matching on
+ * basename alone would join every `index.ts` in the repo. A test pairs with
+ * its *nearest* same-named source (by shared directory depth) rather than the
+ * first one seen, so `pkg-a/foo.ts` and `pkg-b/foo.ts` both present doesn't
+ * wire `pkg-b/foo.test.ts` across the package boundary.
+ *
+ * @param {Array<{path: string}>} files
+ * @returns {Array<[string, string]>} [testPath, sourcePath] pairs
+ */
+function findTestPairs(files) {
+  const byPair = new Map();
+
+  for (const f of files) {
+    const { stem, ext, isTest } = nameParts(f.path);
+    if (stem === "") continue;
+    const key = `${stem}${NUL}${ext}`;
+    const slot = byPair.get(key) || { tests: [], sources: [] };
+    (isTest ? slot.tests : slot.sources).push(f.path);
+    byPair.set(key, slot);
+  }
+
+  const pairs = [];
+  for (const slot of byPair.values()) {
+    if (slot.tests.length === 0 || slot.sources.length === 0) continue;
+    for (const t of slot.tests) {
+      let best = slot.sources[0];
+      let bestDepth = -1;
+      for (const s of slot.sources) {
+        const depth = sharedDirDepth(t, s);
+        // Strict `>` keeps the first source on a tie, so the roster is stable
+        // across runs on the same diff.
+        if (depth > bestDepth) {
+          bestDepth = depth;
+          best = s;
+        }
+      }
+      pairs.push([t, best]);
+    }
+  }
+  return pairs;
+}
+
+/**
  * Group changed files into clusters of related files (spec §4 step 2-3).
  *
  * Edges, all drawn among *changed files only*:
@@ -213,37 +267,14 @@ function clusterFiles(files, extraEdges) {
   const uf = makeUnionFind(list.length);
 
   const byDir = new Map();
-  const byPair = new Map();
-
   list.forEach((f, i) => {
     const dir = dirName(f.path);
     if (byDir.has(dir)) uf.union(byDir.get(dir), i);
     else byDir.set(dir, i);
-
-    const { stem, ext, isTest } = nameParts(f.path);
-    if (stem === "") return;
-    const key = `${stem}\u0000${ext}`;
-    const slot = byPair.get(key) || { tests: [], sources: [] };
-    (isTest ? slot.tests : slot.sources).push(i);
-    byPair.set(key, slot);
   });
 
-  for (const slot of byPair.values()) {
-    if (slot.tests.length === 0 || slot.sources.length === 0) continue;
-    for (const t of slot.tests) {
-      let best = slot.sources[0];
-      let bestDepth = -1;
-      for (const s of slot.sources) {
-        const depth = sharedDirDepth(list[t].path, list[s].path);
-        // Strict `>` keeps the first source on a tie, so the roster is stable
-        // across runs on the same diff.
-        if (depth > bestDepth) {
-          bestDepth = depth;
-          best = s;
-        }
-      }
-      uf.union(t, best);
-    }
+  for (const [t, s] of findTestPairs(list)) {
+    uf.union(index.get(t), index.get(s));
   }
 
   for (const edge of Array.isArray(extraEdges) ? extraEdges : []) {
@@ -290,15 +321,33 @@ function clusterFiles(files, extraEdges) {
  * "must read all" constraint winning over the budget, which is the correct
  * direction for it to lose.
  *
+ * `pairs` (from `findTestPairs`) makes a test/source pair the unit of
+ * placement, not a hint applied to individually-placed files. Without this, a
+ * source and its test — similar in size, adjacent in the size-descending
+ * order — alternate into different pieces almost every time, severing the one
+ * edge `clusterFiles` worked to draw across a directory boundary in the first
+ * place. An incremental "join the partner's piece if it's already there and
+ * still has room" was tried first and has a real gap: an unrelated file can
+ * land in the partner's piece between the two placements and fill it past
+ * what the second half needs, even though the pair's COMBINED size would have
+ * fit fine placed together from the start. Grouping first closes that: a pair
+ * is placed together whenever their combined size and count fit some piece,
+ * independent of placement order. When they genuinely don't both fit anywhere
+ * (rare — the pair is a large fraction of the whole budget), each half falls
+ * back to ordinary least-cost placement, same as an unpaired file.
+ *
  * @returns {{clusters: Array<{paths, bytes, sizes}>, splitGroups: string[][]}}
  *   `splitGroups` lists the full membership of each cluster that had to be
  *   broken up. It is emitted to the roster because those internal edges no
  *   longer live with one reviewer, and the tracer owns them instead.
  */
-function splitOversized(clusters, budget, maxFiles) {
+function splitOversized(clusters, budget, maxFiles, pairs) {
   const cap = Number.isFinite(budget) && budget > 0 ? budget : BUDGET_BYTES;
   const capFiles =
     Number.isFinite(maxFiles) && maxFiles >= 1 ? Math.floor(maxFiles) : FILES_PER_REVIEWER;
+  const validPairs = (Array.isArray(pairs) ? pairs : []).filter(
+    (pair) => Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "string",
+  );
   const out = [];
   const splitGroups = [];
 
@@ -317,11 +366,39 @@ function splitOversized(clusters, budget, maxFiles) {
       return Number.isFinite(n) ? n : 0;
     };
 
-    // Largest file first, so a big one opens its own piece instead of landing
-    // last and stranding a piece it cannot fit into.
-    const ordered = paths
+    // Pairs are placed as ATOMIC UNITS, not as two individually-placed files
+    // that happen to reach for the same piece. An incremental "join the
+    // partner's piece if it's already there and still has room" was tried
+    // first and has a real gap: if an unrelated file lands in the partner's
+    // piece between the two placements, the piece can fill past what the
+    // second half needs even while the pair's COMBINED size would have fit
+    // fine had they been placed together from the start. Grouping first closes
+    // that — a pair is placed together whenever their combined size and count
+    // fit in some piece, independent of what else got placed in between.
+    const partnered = new Set();
+    const groups = [];
+    for (const [t, s] of validPairs) {
+      if (
+        !partnered.has(t) &&
+        !partnered.has(s) &&
+        Object.prototype.hasOwnProperty.call(sizes, t) &&
+        Object.prototype.hasOwnProperty.call(sizes, s)
+      ) {
+        partnered.add(t);
+        partnered.add(s);
+        groups.push({ paths: [t, s], bytes: sizeOf(t) + sizeOf(s) });
+      }
+    }
+    for (const p of paths) {
+      if (!partnered.has(p)) groups.push({ paths: [p], bytes: sizeOf(p) });
+    }
+
+    // Largest group first, so a big one opens its own piece instead of landing
+    // last and stranding a piece it cannot fit into. Ties break on first path,
+    // so the roster is byte-identical across runs on the same diff.
+    const ordered = groups
       .slice()
-      .sort((a, b) => sizeOf(b) - sizeOf(a) || (a < b ? -1 : a > b ? 1 : 0));
+      .sort((a, b) => b.bytes - a.bytes || (a.paths[0] < b.paths[0] ? -1 : 1));
 
     // Open the minimum number of pieces the budgets demand up front, then fill
     // them least-loaded-first. Filling greedily to the cap instead would give 25
@@ -342,24 +419,45 @@ function splitOversized(clusters, budget, maxFiles) {
     // where blendedCost gives [15, 15, 15], reachable and previously missed.
     const pieceCost = (piece) => blendedCost(piece.bytes, piece.paths.length, cap, capFiles);
 
-    for (const p of ordered) {
-      const size = sizeOf(p);
+    const place = (piece, path, size) => {
+      piece.paths.push(path);
+      piece.bytes += size;
+      piece.sizes[path] = size;
+    };
+
+    for (const group of ordered) {
       let best = null;
       for (const piece of pieces) {
-        // A file larger than the whole budget fits nowhere and opens its own
-        // piece below — it is never split, and never crowds another file.
-        if (piece.bytes + size > cap || piece.paths.length >= capFiles) continue;
-        if (best === null || pieceCost(piece) < pieceCost(best)) {
-          best = piece;
+        // A group larger than the whole budget fits nowhere as a unit and is
+        // split below; a lone oversized file opens its own piece and is never
+        // split — it is never split, and never crowds another file.
+        if (
+          piece.bytes + group.bytes > cap ||
+          piece.paths.length + group.paths.length > capFiles
+        ) {
+          continue;
         }
+        if (best === null || pieceCost(piece) < pieceCost(best)) best = piece;
       }
-      if (best === null) {
-        best = { paths: [], bytes: 0, sizes: Object.create(null) };
-        pieces.push(best);
+      if (best !== null) {
+        for (const p of group.paths) place(best, p, sizeOf(p));
+        continue;
       }
-      best.paths.push(p);
-      best.bytes += size;
-      best.sizes[p] = size;
+      // The pair doesn't fit together anywhere — fall back to placing each
+      // half independently via ordinary least-cost, same as an unpaired file.
+      for (const p of group.paths) {
+        const size = sizeOf(p);
+        let target = null;
+        for (const piece of pieces) {
+          if (piece.bytes + size > cap || piece.paths.length >= capFiles) continue;
+          if (target === null || pieceCost(piece) < pieceCost(target)) target = piece;
+        }
+        if (target === null) {
+          target = { paths: [], bytes: 0, sizes: Object.create(null) };
+          pieces.push(target);
+        }
+        place(target, p, size);
+      }
     }
 
     const filled = pieces.filter((piece) => piece.paths.length > 0);
@@ -481,7 +579,17 @@ function extractImports(text) {
   return out;
 }
 
-/** Resolve `a/b/../c` -> `a/c` without touching the filesystem. */
+/**
+ * Resolve `a/b/../c` -> `a/c` without touching the filesystem.
+ *
+ * `out.pop()` on an empty array is a silent no-op, so a root-escaping `..` —
+ * `../../x` from a repo-root file — collapses rather than throwing or keeping
+ * the escaping segments. Intentional, not overlooked: this feeds a clustering
+ * *hint*, where over-collection costs one spurious union and a miss costs a
+ * cut edge (see `resolveImportEdges`'s own header) — collapsing to `x` risks
+ * the former, never a coverage gap, since `assertPartition` still guarantees
+ * every changed file is assigned to exactly one reviewer regardless.
+ */
 function normalizeParts(parts) {
   const out = [];
   for (const part of parts) {
@@ -654,7 +762,12 @@ function buildRoster({
     budget: BUDGET_BYTES,
     maxFiles: FILES_PER_REVIEWER,
   });
-  const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES, FILES_PER_REVIEWER);
+  const split = splitOversized(
+    clusterFiles(list, importEdges),
+    BUDGET_BYTES,
+    FILES_PER_REVIEWER,
+    findTestPairs(list),
+  );
   const bins = packClusters(split.clusters, k, BUDGET_BYTES, FILES_PER_REVIEWER);
   assertPartition(bins, changed);
 
@@ -750,6 +863,7 @@ module.exports = {
   FILES_PER_REVIEWER,
   MAX_K,
   computeK,
+  findTestPairs,
   clusterFiles,
   packClusters,
   splitOversized,

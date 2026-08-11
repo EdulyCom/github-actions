@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   computeK,
+  findTestPairs,
   clusterFiles,
   packClusters,
   splitOversized,
@@ -248,6 +249,21 @@ test("packClusters: never emits an empty bin", () => {
   assert.equal(bins.length, 1);
 });
 
+// --- findTestPairs -------------------------------------------------------------
+//
+// Extracted out of clusterFiles so splitOversized can share it — clusterFiles's
+// own pairing is now just findTestPairs feeding a union, checked below.
+
+test("findTestPairs: pairs a test with its nearest same-named source", () => {
+  const pairs = findTestPairs([f("pkg-a/foo.ts", 1), f("pkg-b/foo.ts", 1), f("pkg-b/foo.test.ts", 1)]);
+  assert.deepEqual(pairs, [["pkg-b/foo.test.ts", "pkg-b/foo.ts"]]);
+});
+
+test("findTestPairs: no pair when there is no test, or no source", () => {
+  assert.deepEqual(findTestPairs([f("a.ts", 1), f("b.ts", 1)]), []);
+  assert.deepEqual(findTestPairs([f("a.test.ts", 1), f("b.test.ts", 1)]), []);
+});
+
 // --- splitOversized (spec §4 step 4) -----------------------------------------
 //
 // Without this, the most common diff shape there is — every changed file in one
@@ -442,6 +458,96 @@ test("buildRoster: a one-directory diff still fans out", () => {
   assert.deepEqual(covered.sort(), files.map((x) => x.path).sort());
 });
 
+test("splitOversized: a partner already placed and still with room is joined, not least-cost", () => {
+  // Without pair affinity, size-descending order alternates similar-sized
+  // adjacent pairs into different pieces almost every time — a source and its
+  // test are usually close in size, so they sort next to each other and the
+  // second one finds the FIRST piece already the least loaded... except it
+  // isn't, because placing the first one just loaded it. Demonstrated on this
+  // PR's own roster: 3 of 4 test/source pairs split apart before this fix.
+  const paths = ["a.ts", "a.test.ts", "b.ts", "b.test.ts", "c.ts", "c.test.ts"];
+  const sizes = Object.fromEntries(paths.map((p) => [p, 20000]));
+  const pairs = [["a.test.ts", "a.ts"], ["b.test.ts", "b.ts"], ["c.test.ts", "c.ts"]];
+  const out = splitOversized(
+    [{ paths, bytes: 120000, sizes }],
+    50000,
+    2,
+    pairs,
+  );
+  for (const [test, source] of pairs) {
+    const piece = out.clusters.find((c) => c.paths.includes(test));
+    assert.ok(piece.paths.includes(source), `${test} split from ${source}: pieces=${JSON.stringify(out.clusters.map((c) => c.paths))}`);
+  }
+});
+
+test("splitOversized: affinity never overrides the budget", () => {
+  // The partner's piece is full — joining it would exceed capFiles. The file
+  // must still land somewhere, just not there.
+  const paths = ["big.ts", "a.ts", "b.ts", "partner.test.ts"];
+  const sizes = { "big.ts": 1, "a.ts": 1, "b.ts": 1, "partner.test.ts": 1 };
+  const pairs = [["partner.test.ts", "big.ts"]];
+  // capFiles=1 forces every file into its own piece, so "big.ts"'s piece is
+  // already full by the time partner.test.ts is placed.
+  const out = splitOversized([{ paths, bytes: 4, sizes }], 100, 1, pairs);
+  const bigPiece = out.clusters.find((c) => c.paths.includes("big.ts"));
+  assert.equal(bigPiece.paths.includes("partner.test.ts"), false);
+  assert.equal(out.clusters.flatMap((c) => c.paths).sort().join(","), paths.slice().sort().join(","));
+});
+
+test("splitOversized: no pairs argument behaves exactly as before (backward compatible)", () => {
+  const paths = Array.from({ length: 25 }, (_, i) => `f${i}.ts`);
+  const sizes = Object.fromEntries(paths.map((p) => [p, 2000]));
+  const withPairs = splitOversized([{ paths, bytes: 50000, sizes }], BUDGET_BYTES, FILES_PER_REVIEWER, []);
+  const withoutPairs = splitOversized([{ paths, bytes: 50000, sizes }], BUDGET_BYTES, FILES_PER_REVIEWER);
+  assert.deepEqual(withPairs.clusters, withoutPairs.clusters);
+});
+
+test("buildRoster: test/source pairs stay together across a split — the reported regression", () => {
+  // Unequal, ordinary sizes with realistic slack (~270KB across 3 pieces of
+  // 130KB each, ~30% headroom) — not tuned to any bin-packing boundary. Before
+  // the fix, this PR's own roster on its real diff split 3 of 4 pairs apart.
+  const names = ["aggregate", "roster", "write-manifest", "derive-findings"];
+  const jsBytes = [42000, 38000, 35000, 30000];
+  const files = names.flatMap((n, i) => [
+    f(`ai-review/lib/${n}.js`, jsBytes[i]),
+    f(`ai-review/lib/${n}.test.js`, Math.round(jsBytes[i] * 0.85)),
+  ]);
+  const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.ok(r.k > 1, "test needs an actual split to be meaningful");
+  const roleOf = new Map();
+  for (const role of r.roles) {
+    if (role.kind !== "coverage") continue;
+    for (const p of role.assigned_files) roleOf.set(p, role.role);
+  }
+  for (const n of names) {
+    const src = `ai-review/lib/${n}.js`;
+    const test = `ai-review/lib/${n}.test.js`;
+    assert.equal(roleOf.get(src), roleOf.get(test), `${n}: source in ${roleOf.get(src)}, test in ${roleOf.get(test)}`);
+  }
+});
+
+test("splitOversized: a pair that genuinely cannot fit anywhere together falls back to independent placement", () => {
+  // Tight bin-packing (4 pairs into 3 bins with little slack) is a known limit
+  // of any single-pass greedy grouping — solving it optimally needs
+  // backtracking, disproportionate for a shadow-mode locality nicety. The
+  // fallback still has to place BOTH halves somewhere, just not necessarily
+  // together, and must never drop a file or violate a budget.
+  const names = ["a", "b", "c", "d"];
+  const jsBytes = [45000, 60000, 38000, 32000];
+  const paths = names.flatMap((n) => [`${n}.js`, `${n}.test.js`]);
+  const sizes = Object.fromEntries(
+    names.flatMap((n, i) => [[`${n}.js`, jsBytes[i]], [`${n}.test.js`, jsBytes[i] - 3000]]),
+  );
+  const pairs = names.map((n) => [`${n}.test.js`, `${n}.js`]);
+  const bytes = Object.values(sizes).reduce((s, n) => s + n, 0);
+  const out = splitOversized([{ paths, bytes, sizes }], BUDGET_BYTES, FILES_PER_REVIEWER, pairs);
+  assert.deepEqual(out.clusters.flatMap((c) => c.paths).sort(), paths.slice().sort());
+  for (const c of out.clusters) {
+    assert.ok(c.bytes <= BUDGET_BYTES, `piece over byte budget: ${c.bytes}`);
+    assert.ok(c.paths.length <= FILES_PER_REVIEWER, `piece over file budget: ${c.paths.length}`);
+  }
+});
+
 // --- import edges (spec §4 step 2, third edge kind) --------------------------
 
 test("extractImports: import, export-from and require all count", () => {
@@ -481,6 +587,16 @@ test("resolveImportEdges: a relative import of another changed file is an edge",
 test("resolveImportEdges: '..' segments resolve", () => {
   const edges = resolveImportEdges({ "src/x/a.ts": ["../../lib/c"] }, ["src/x/a.ts", "lib/c.ts"]);
   assert.deepEqual(edges, [["src/x/a.ts", "lib/c.ts"]]);
+});
+
+test("resolveImportEdges: a root-escaping '..' collapses rather than throwing", () => {
+  // out.pop() on an empty array is a silent no-op, so "../../x" from a
+  // repo-root file resolves to "x" instead of keeping the escaping segments.
+  // Deliberate: this feeds a clustering hint, and over-collection (a spurious
+  // union) is the cheap direction — never a coverage gap, since
+  // assertPartition still guarantees every changed file lands exactly once.
+  const edges = resolveImportEdges({ "a.ts": ["../../x"] }, ["a.ts", "x.ts"]);
+  assert.deepEqual(edges, [["a.ts", "x.ts"]]);
 });
 
 test("resolveImportEdges: a directory specifier resolves through index", () => {
