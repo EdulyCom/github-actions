@@ -83,9 +83,15 @@ const TEST_DIR_RE = new RegExp(`(^|/)(${TEST_DIR_SEGMENTS})(/|$)`);
 const TEST_SUFFIX_RE = /[.\-_](?:test|spec)$/i;
 const TEST_PREFIX_RE = /^test[_-]/i;
 
-// Composite-key separator for name/ext pairing keys. A literal NUL byte in
-// the source makes git diff this file as binary, so it is built at runtime
-// from String.fromCharCode rather than an inline \u0000 escape.
+// Composite-key separator for name/ext pairing keys. An inline \u0000
+// escape in JS source is six ordinary ASCII characters — it does not make
+// git see the file as binary, and three other keys in this codebase
+// (roster.js's own import-edge key below, aggregate.js, prep.js) use
+// exactly that and diff as text. Built from String.fromCharCode here only
+// because this file was authored through tooling that mangled a literal
+// \u0000 in an edit parameter into an actual NUL byte mid-session; this
+// constant sidesteps re-authoring the escape by hand, not a real git
+// behavior that inline escapes elsewhere in this file don't also have.
 const NUL = String.fromCharCode(0);
 
 const dirName = (p) => {
