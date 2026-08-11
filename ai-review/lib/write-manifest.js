@@ -156,9 +156,8 @@ function writeRoster(manifest, sizes, io) {
     // every non-MAX_K case, which was flatly false for a file-count overflow:
     // splitOversized's per-cluster piece count doesn't know K, so a large
     // cluster CAN be cut finer than it was, the splitter just wasn't asked to.
-    const filesOver = roster.max_bin_files > roster.budget_files;
-    const bytesOver = roster.max_bin_bytes > roster.budget_bytes;
-    if (bytesOver || filesOver) {
+    const { filesOver, bytesOver, any: isOverBudget } = overBudget(roster);
+    if (isOverBudget) {
       const why = roster.k_capped
         ? `MAX_K bound at K=${roster.k}`
         : filesOver
@@ -214,7 +213,7 @@ function one(v) {
  *   without a temp tree, and so the size gate and the skip paths are pinnable.
  */
 function collectSpecifiers(changedFiles, sizes, readText) {
-  // Lazy, matching writeRoster's require below — a load-time throw in
+  // Lazy, matching writeRoster's require above — a load-time throw in
   // roster.js must not crash this module before writeRoster's try/catch is
   // even reached. Cheap: Node caches the module, so this is a second lookup,
   // not a second load.
@@ -254,6 +253,17 @@ function collectSpecifiers(changedFiles, sizes, readText) {
  * Failure is a record, not a blank — absence and cleanliness must never be the
  * same byte pattern.
  */
+/**
+ * Which axis, if either, put the largest bin over its budget — computed once
+ * and shared between the job-log line and the scraped telemetry, so the two
+ * cannot silently disagree about whether a run was over budget.
+ */
+function overBudget(roster) {
+  const filesOver = roster.max_bin_files > roster.budget_files;
+  const bytesOver = roster.max_bin_bytes > roster.budget_bytes;
+  return { filesOver, bytesOver, any: filesOver || bytesOver };
+}
+
 function rosterTelemetry(roster, err) {
   const payload = roster
     ? {
@@ -266,9 +276,7 @@ function rosterTelemetry(roster, err) {
         budgetBytes: roster.budget_bytes,
         maxBinFiles: roster.max_bin_files,
         budgetFiles: roster.budget_files,
-        overBudget:
-          roster.max_bin_bytes > roster.budget_bytes ||
-          roster.max_bin_files > roster.budget_files,
+        overBudget: overBudget(roster).any,
       }
     : { status: "failed", k: null, error: one(err) };
   return `ai-review-roster ${JSON.stringify(payload)}`;

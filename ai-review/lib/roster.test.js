@@ -44,6 +44,17 @@ test("computeK: many small files fan out even under the byte budget", () => {
   assert.equal(computeK({ totalBytes: 1000, fileCount: 25 }), 2);
 });
 
+test("computeK: budget and maxFiles are parameters, symmetric with splitOversized/packClusters", () => {
+  // Both siblings take budget/maxFiles as parameters; computeK used to hardcode
+  // the module constants, so a caller tuning those two and calling this with
+  // the defaults would size K against a budget the rest of the pipeline no
+  // longer honours. A tighter byte budget should raise K for the same bytes;
+  // a tighter file cap should raise K for the same file count.
+  assert.equal(computeK({ totalBytes: 1000, fileCount: 1 }), 1, "sanity: defaults still give 1");
+  assert.equal(computeK({ totalBytes: 1000, fileCount: 1, budget: 500 }), 2);
+  assert.equal(computeK({ totalBytes: 10, fileCount: 12, maxFiles: 5 }), 3);
+});
+
 test("computeK: never returns 0 or a fraction", () => {
   for (const args of [
     { totalBytes: 0, fileCount: 0 },
@@ -475,6 +486,16 @@ test("resolveImportEdges: '..' segments resolve", () => {
 test("resolveImportEdges: a directory specifier resolves through index", () => {
   const edges = resolveImportEdges({ "src/a.ts": ["./util"] }, ["src/a.ts", "src/util/index.ts"]);
   assert.deepEqual(edges, [["src/a.ts", "src/util/index.ts"]]);
+});
+
+test("resolveImportEdges: a .mts target resolves — write-manifest.js scans it as a source", () => {
+  // IMPORT_SCAN_EXTS (write-manifest.js) explicitly scans .mts/.cts as import
+  // SOURCES; MODULE_EXTS is the list this function tries as a TARGET extension.
+  // The two had drifted — a changed .mts file could be a source but never a
+  // resolvable target, so `import { x } from "./util"` never found a changed
+  // util.mts. Cost was a lost locality edge, never a coverage gap.
+  const edges = resolveImportEdges({ "src/a.ts": ["./util"] }, ["src/a.ts", "src/util.mts"]);
+  assert.deepEqual(edges, [["src/a.ts", "src/util.mts"]]);
 });
 
 test("resolveImportEdges: bare package specifiers are not edges", () => {

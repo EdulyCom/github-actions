@@ -23,8 +23,10 @@
 //      "must read all" — survive parallelism.
 //
 // Pure: no I/O, no git, no process.env. The caller supplies paths with their
-// full-file byte size at HEAD (`git cat-file -s`) and, optionally, import edges
-// from a grep pass.
+// full-file byte size at HEAD (`write-manifest.js` uses `fs.statSync` — the
+// working tree is already checked out, so a stat is both cheaper and exactly
+// the byte count a reviewer reading the file will face) and, optionally,
+// import edges from a grep pass.
 
 const { TEST_DIR_SEGMENTS } = require("./prep.js");
 
@@ -45,6 +47,26 @@ const FILES_PER_REVIEWER = 20;
  * share one gateway and one key; 8 was set before that exposure was considered.
  */
 const MAX_K = 4;
+
+/**
+ * The one cost model both `splitOversized` and `packClusters` place against:
+ * each axis as a fraction of its own budget, summed. Whichever axis reads zero
+ * would otherwise starve the other — a piece or bin holding any bytes loses
+ * every comparison to an all-zero one regardless of how full it already is on
+ * the other axis, which is exactly the shape deleted files (0 bytes) and tiny
+ * files (many, low bytes) both take.
+ *
+ * Defined once and reused at all three call sites deliberately, not as
+ * tidiness: this formula has already diverged twice in this module's history
+ * — `packClusters` was fixed for it before `splitOversized` was, and each time
+ * the divergence was silent (a legal-looking, unevenly-loaded roster with
+ * nothing in the telemetry to flag it, since the emitted numbers can land
+ * exactly on budget). A single definition makes the next re-weighting apply
+ * everywhere or fail to compile everywhere; it cannot apply in two places and
+ * miss a third.
+ */
+const blendedCost = (bytes, count, cap, capFiles) =>
+  (Number.isFinite(bytes) ? bytes : 0) / cap + count / capFiles;
 
 /**
  * Test-file markers, used to find a test's *partner source file* — a different
@@ -107,15 +129,24 @@ function nameParts(path) {
  * degraded fallback — and fan-out would add coordination cost for nothing.
  * K=1 therefore collapses the roster; it never branches the pipeline.
  *
- * @param {{totalBytes: number, fileCount: number}} args
+ * Budget and maxFiles are parameters, matching `splitOversized` and
+ * `packClusters` — both default to the module constants, but a caller who
+ * tunes those two and calls this with the module defaults would size the
+ * roster against a budget the rest of the pipeline no longer honours, with
+ * no error and no log line.
+ *
+ * @param {{totalBytes: number, fileCount: number, budget?: number, maxFiles?: number}} args
  * @returns {number} integer in [1, MAX_K]
  */
-function computeK({ totalBytes, fileCount } = {}) {
+function computeK({ totalBytes, fileCount, budget, maxFiles } = {}) {
   const bytes = Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : 0;
   const count = Number.isFinite(fileCount) && fileCount > 0 ? fileCount : 0;
+  const cap = Number.isFinite(budget) && budget > 0 ? budget : BUDGET_BYTES;
+  const capFiles =
+    Number.isFinite(maxFiles) && maxFiles >= 1 ? Math.floor(maxFiles) : FILES_PER_REVIEWER;
 
-  const byBytes = Math.ceil(bytes / BUDGET_BYTES);
-  const byCount = Math.ceil(count / FILES_PER_REVIEWER);
+  const byBytes = Math.ceil(bytes / cap);
+  const byCount = Math.ceil(count / capFiles);
 
   return Math.min(MAX_K, Math.max(1, byBytes, byCount));
 }
@@ -306,15 +337,10 @@ function splitOversized(clusters, budget, maxFiles) {
       sizes: Object.create(null),
     }));
 
-    // Blended, matching packClusters — bytes-first-with-a-tiebreak was tried
-    // and rejected there twice (see that function's header) for exactly the
-    // reason it fails here: a piece holding any bytes loses every tie to an
-    // all-zero piece regardless of how many files it already holds. A cluster
-    // mixing one byte-carrying file with more than 2x capFiles zero-byte ones —
-    // one edit plus 44 deletions — put [5, 20, 20] where [15, 15, 15] was
-    // reachable and never found, silently: max_bin_files landed exactly on
-    // budget_files, so the over-budget signal never fired either.
-    const pieceCost = (piece) => piece.bytes / cap + piece.paths.length / capFiles;
+    // A cluster mixing one byte-carrying file with more than 2x capFiles
+    // zero-byte ones — one edit plus 44 deletions — used to put [5, 20, 20]
+    // where blendedCost gives [15, 15, 15], reachable and previously missed.
+    const pieceCost = (piece) => blendedCost(piece.bytes, piece.paths.length, cap, capFiles);
 
     for (const p of ordered) {
       const size = sizeOf(p);
@@ -400,8 +426,7 @@ function packClusters(clusters, k, budget, maxFiles) {
   // large zero-byte cluster (20 deletions) sorts last and lands on a bin that is
   // already occupied, giving [1, 21] when [20, 2] was legal on both axes and
   // never considered.
-  const clusterCost = (c) =>
-    (Number.isFinite(c.bytes) ? c.bytes : 0) / cap + c.paths.length / capFiles;
+  const clusterCost = (c) => blendedCost(c.bytes, c.paths.length, cap, capFiles);
   const sorted = list.slice().sort((a, b) => {
     const d = clusterCost(b) - clusterCost(a);
     if (d !== 0) return d;
@@ -410,7 +435,7 @@ function packClusters(clusters, k, budget, maxFiles) {
 
   const loads = new Array(bins).fill(0);
   const out = Array.from({ length: bins }, () => []);
-  const cost = (i) => loads[i] / cap + out[i].length / capFiles;
+  const cost = (i) => blendedCost(loads[i], out[i].length, cap, capFiles);
 
   for (const cluster of sorted) {
     let target = 0;
@@ -467,7 +492,9 @@ function normalizeParts(parts) {
   return out.join("/");
 }
 
-const MODULE_EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".vue", ".svelte"];
+const MODULE_EXTS = [
+  "", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".d.ts", ".vue", ".svelte",
+];
 
 /**
  * Turn per-file import specifiers into adjacency edges among changed files.
@@ -621,7 +648,12 @@ function buildRoster({
     return sum + (Number.isFinite(n) ? n : 0);
   }, 0);
 
-  const k = computeK({ totalBytes, fileCount: changed.length });
+  const k = computeK({
+    totalBytes,
+    fileCount: changed.length,
+    budget: BUDGET_BYTES,
+    maxFiles: FILES_PER_REVIEWER,
+  });
   const split = splitOversized(clusterFiles(list, importEdges), BUDGET_BYTES, FILES_PER_REVIEWER);
   const bins = packClusters(split.clusters, k, BUDGET_BYTES, FILES_PER_REVIEWER);
   assertPartition(bins, changed);
