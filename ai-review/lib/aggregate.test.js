@@ -121,6 +121,24 @@ test("row 5: malformed role file — bad schema, missing complete, complete:fals
   }
 });
 
+test("row 6: coverage mismatch reports reviewed_files intersected with the diff", () => {
+  // `seen` is the failing role's raw files_reviewed, which is allowed to range
+  // outside the diff — so unfiltered it could report MORE reviewed files than
+  // exist in the PR, on an exit whose entire meaning is "a file was not
+  // reviewed". The success path twelve lines below already does this right.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        files_reviewed: ["src/a.ts", "vendor/x.ts", "vendor/y.ts", "vendor/z.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /coverage/);
+  assert.equal(out.coverage.reviewed_files, 1, "out-of-diff neighbours must not inflate the count");
+  assert.equal(out.coverage.expected_files, 2);
+});
+
 test("row 6: coverage mismatch — reviewed fewer files than assigned", () => {
   const out = run({
     findings: {

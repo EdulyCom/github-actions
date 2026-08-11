@@ -221,9 +221,19 @@ function aggregate({ manifest, roster, findings, scores }) {
       if (!seen.has(p)) {
         // Name the path. This step's only product is a diagnosable log line,
         // and "assigned 11, reviewed 8" cannot be acted on.
+        //
+        // Intersected with the diff, like the success path twelve lines below —
+        // `seen` is the failing role's raw files_reviewed, which is explicitly
+        // allowed to range outside changed_files. A role assigned 5 files that
+        // reviewed 4 plus 10 out-of-diff neighbours would otherwise report
+        // "expected 5, reviewed 14" on an exit whose entire meaning is that a
+        // file was NOT reviewed.
         return inconclusive(
           `coverage:${role} did not review ${p} (assigned ${assigned.length}, reviewed ${seen.size})`,
-          { expected_files: changed.length, reviewed_files: seen.size },
+          {
+            expected_files: changed.length,
+            reviewed_files: [...seen].filter((r) => changedSet.has(r)).length,
+          },
         );
       }
     }
