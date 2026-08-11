@@ -208,6 +208,25 @@ test("row 6: a role assigned a file nobody changed is a partition error", () => 
   assert.match(out.reason, /src\/ghost\.ts/);
 });
 
+test("row 6: a role listing the same file twice in its own assigned_files is a partition error", () => {
+  // roster.js's assertPartition throws on any repeated path regardless of
+  // which bin(s) it appears in — this module re-asserts that independently,
+  // since a role file arrives from a model stage that can claim anything. The
+  // cross-role check alone (owner !== role) let this shape through silently.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts", "src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/a\.ts/);
+  assert.match(out.reason, /twice/);
+});
+
 test("row 6: a changed file assigned to no role is a partition error", () => {
   // Distinct from the reviewed-by-nobody case: a file can be incidentally read
   // by a role it was never assigned to, which would satisfy a files_reviewed

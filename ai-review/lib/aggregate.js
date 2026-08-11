@@ -189,12 +189,22 @@ function aggregate({ manifest, roster, findings, scores }) {
       .map(normPath);
     for (const p of assigned) {
       const owner = assignedBy.get(p);
-      if (owner !== undefined && owner !== role) {
+      if (owner !== undefined) {
         // Not a coverage gap: the union still matches and every other assertion
         // stays green. It means the roster was built wrong — the file is read
         // twice, and one defect can surface under two ids that the
         // deterministic dedupe cannot merge when the reported line differs.
-        return inconclusive(`partition:${p} assigned to both ${owner} and ${role}`, partitionCoverage);
+        //
+        // Fires on a repeat within ONE role's own assigned_files too, not just
+        // across roles — `roster.js`'s assertPartition throws on any repeated
+        // path regardless of which bin(s) it appears in, and this module exists
+        // to re-assert that independently of the roster, since a role file
+        // arrives from a model stage that can claim anything.
+        const message =
+          owner === role
+            ? `partition:${p} assigned twice within ${role}`
+            : `partition:${p} assigned to both ${owner} and ${role}`;
+        return inconclusive(message, partitionCoverage);
       }
       if (!changedSet.has(p)) {
         // The role was built against a different diff than the one being gated.

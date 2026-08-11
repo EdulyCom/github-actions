@@ -526,6 +526,25 @@ test("buildRoster: test/source pairs stay together across a split — the report
   }
 });
 
+test("splitOversized: groups are ORDERED by blendedCost too, not raw bytes", () => {
+  // Every placement decision scores with blendedCost; the sort feeding that
+  // placement used raw bytes, the same "one cost model, all sites" gap
+  // blendedCost's own docstring records diverging twice before. Bounded impact
+  // here (a group holds at most 2 paths), but still demonstrable: a tight
+  // capFiles=2 with one 2-file pair and two 1-file groups. Bytes-first visits
+  // the two big singles before the (small-bytes) pair, filling both pieces to
+  // one file each, so the pair's two members can no longer both join one
+  // piece and get split. Blended visits the pair first (it out-costs either
+  // single on the file-count axis), so it claims a whole piece before the
+  // singles arrive.
+  const paths = ["big.ts", "medium.ts", "small.ts", "small.test.ts"];
+  const sizes = { "big.ts": 100, "medium.ts": 90, "small.ts": 5, "small.test.ts": 5 };
+  const pairs = [["small.test.ts", "small.ts"]];
+  const out = splitOversized([{ paths, bytes: 200, sizes }], 1000, 2, pairs);
+  const withPair = out.clusters.find((c) => c.paths.includes("small.test.ts"));
+  assert.ok(withPair.paths.includes("small.ts"), `pair split: ${JSON.stringify(out.clusters.map((c) => c.paths))}`);
+});
+
 test("splitOversized: a pair that genuinely cannot fit anywhere together falls back to independent placement", () => {
   // Tight bin-packing (4 pairs into 3 bins with little slack) is a known limit
   // of any single-pass greedy grouping — solving it optimally needs

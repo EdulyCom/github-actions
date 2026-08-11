@@ -400,11 +400,16 @@ function splitOversized(clusters, budget, maxFiles, pairs) {
     }
 
     // Largest group first, so a big one opens its own piece instead of landing
-    // last and stranding a piece it cannot fit into. Ties break on first path,
-    // so the roster is byte-identical across runs on the same diff.
+    // last and stranding a piece it cannot fit into. Ordered by the same
+    // blendedCost placement scores with below — not raw bytes, for the same
+    // reason packClusters' own sort isn't bytes-only (see that function's
+    // header): a bytes-only order is the exact defect blendedCost's docstring
+    // records diverging twice already. Ties break on first path, so the
+    // roster is byte-identical across runs on the same diff.
+    const groupCost = (g) => blendedCost(g.bytes, g.paths.length, cap, capFiles);
     const ordered = groups
       .slice()
-      .sort((a, b) => b.bytes - a.bytes || (a.paths[0] < b.paths[0] ? -1 : 1));
+      .sort((a, b) => groupCost(b) - groupCost(a) || (a.paths[0] < b.paths[0] ? -1 : 1));
 
     // Open the minimum number of pieces the budgets demand up front, then fill
     // them least-loaded-first. Filling greedily to the cap instead would give 25
