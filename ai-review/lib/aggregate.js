@@ -285,7 +285,10 @@ function aggregate({ manifest, roster, findings, scores }) {
   if (!s || typeof s !== "object" || s.complete !== true || !Array.isArray(s.scores)) {
     return inconclusive("missing-scores", coverage);
   }
-  const scoreList = s && Array.isArray(s.scores) ? s.scores : [];
+  // `s.scores` is guaranteed an array by the guard above — no fallback needed,
+  // and no room for one to quietly resurrect the dead-scorer-reads-clean bug
+  // this guard exists to close.
+  const scoreList = s.scores;
 
   // Validate each score entry, symmetric to the finding-level checks above.
   // Without this, Number(undefined) is NaN and Number(null) is 0 — both take

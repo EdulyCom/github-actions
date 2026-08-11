@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
   collectSpecifiers,
   rosterTelemetry,
+  writeRoster,
   IMPORT_SCAN_MAX_BYTES,
 } = require("./write-manifest.js");
 
@@ -82,6 +83,82 @@ test("collectSpecifiers: binary is skipped by extension, not by hoping read thro
     read,
   );
   assert.deepEqual(opened.sort(), ["src/a.ts", "src/b.mjs"]);
+});
+
+// --- writeRoster --------------------------------------------------------------
+//
+// The success path is exercised end to end in ai-review/action.yml against a
+// real repo (see the commit history); these pin the wiring around it — the I/O
+// is injected so the best-effort catch is reachable without a temp directory or
+// a chdir.
+
+test("writeRoster: writes assignments.json and logs a summary on success", () => {
+  const writes = [];
+  const logs = [];
+  const manifest = {
+    changed_files: ["src/a.ts", "src/b.ts"],
+    symbol_manifest: [],
+    has_test_change: true,
+    has_logic_change: true,
+    modifies_reviewer_guidance: false,
+  };
+  const roster = writeRoster(manifest, { "src/a.ts": 100, "src/b.ts": 200 }, {
+    readText: () => "",
+    writeJson: (p, obj) => writes.push([p, obj]),
+    log: (line) => logs.push(line),
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0], ".ai-review/assignments.json");
+  assert.equal(writes[0][1].k, roster.k);
+  assert.ok(logs.some((l) => l.startsWith("roster: K=")));
+  assert.ok(logs.some((l) => l.startsWith("ai-review-roster {")));
+  assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
+});
+
+test("writeRoster: a buildRoster throw is caught, logged, and never written", () => {
+  // Duplicate changed_files entries make buildRoster's own assertPartition
+  // throw ("assigned twice") — a real failure mode, not a synthetic one, since
+  // a caller could hand this a manifest with a duplicated path.
+  const writes = [];
+  const logs = [];
+  const manifest = {
+    changed_files: ["src/a.ts", "src/a.ts"],
+    symbol_manifest: [],
+    has_test_change: false,
+    has_logic_change: true,
+    modifies_reviewer_guidance: false,
+  };
+  const result = writeRoster(manifest, { "src/a.ts": 10 }, {
+    readText: () => "",
+    writeJson: (p, obj) => writes.push([p, obj]),
+    log: (line) => logs.push(line),
+  });
+  assert.equal(result, null);
+  assert.equal(writes.length, 0, "a failed build must never reach disk");
+  assert.ok(logs.some((l) => l.startsWith("roster: NOT EMITTED")));
+  assert.ok(logs.some((l) => l.startsWith("::warning::")));
+  assert.ok(logs.some((l) => l.startsWith("ai-review-roster {") && l.includes('"status":"failed"')));
+});
+
+test("writeRoster: a readText throw for one file degrades to a weaker cluster, not a failure", () => {
+  const logs = [];
+  const manifest = {
+    changed_files: ["src/a.ts", "src/b.ts"],
+    symbol_manifest: [],
+    has_test_change: false,
+    has_logic_change: true,
+    modifies_reviewer_guidance: false,
+  };
+  const result = writeRoster(manifest, { "src/a.ts": 10, "src/b.ts": 10 }, {
+    readText: (p) => {
+      if (p === "src/a.ts") throw new Error("EACCES");
+      return "";
+    },
+    writeJson: () => {},
+    log: (line) => logs.push(line),
+  });
+  assert.notEqual(result, null);
+  assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
 });
 
 // --- rosterTelemetry ---------------------------------------------------------

@@ -78,6 +78,10 @@ injection-safety rule.
    ```
 
    coverage reviewers, plus the tracer, intent, history and scorer roles.
+   The emitted `k` is how many coverage reviewers actually exist —
+   `min(formula, cluster_count)`, and `0` on an empty diff — not the raw
+   formula value: one 600 KB file computes `K=4` but is a single
+   unsplittable cluster, so `k: 1`.
    Both axes matter: a diff of many small files costs per-file attention
    independent of total bytes, and a cluster exceeding *either* budget is
    split at file boundaries (never inside a file — there is no byte-range

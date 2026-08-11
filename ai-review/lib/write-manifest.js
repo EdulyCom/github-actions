@@ -113,12 +113,15 @@ function main() {
  * is a file nobody reads, and continuing would be the fail-open the assertion
  * exists to prevent.
  */
-function writeRoster(manifest, sizes) {
+function writeRoster(manifest, sizes, io) {
+  const readText = (io && io.readText) || ((p) => fs.readFileSync(p, "utf8"));
+  const writeJson = (io && io.writeJson) || ((p, obj) =>
+    fs.writeFileSync(p, `${JSON.stringify(obj, null, 2)}\n`));
+  const log = (io && io.log) || ((line) => process.stdout.write(line));
+
   let roster = null;
   try {
-    const specifiers = collectSpecifiers(manifest.changed_files, sizes, (p) =>
-      fs.readFileSync(p, "utf8"),
-    );
+    const specifiers = collectSpecifiers(manifest.changed_files, sizes, readText);
 
     roster = buildRoster({
       files: manifest.changed_files.map((p) => ({ path: p, bytes: sizes[p] ?? 0 })),
@@ -134,12 +137,9 @@ function writeRoster(manifest, sizes) {
       modifiesReviewerGuidance: manifest.modifies_reviewer_guidance,
     });
 
-    fs.writeFileSync(
-      path.join(DIR, "assignments.json"),
-      `${JSON.stringify(roster, null, 2)}\n`,
-    );
+    writeJson(path.join(DIR, "assignments.json"), roster);
 
-    process.stdout.write(
+    log(
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
         `${roster.roles.map((r) => `${r.role}:${r.assigned_files.length}`).join(" ")}\n`,
     );
@@ -149,29 +149,30 @@ function writeRoster(manifest, sizes) {
       const why = roster.k_capped
         ? `MAX_K bound at K=${roster.k}`
         : "clusters could not divide further";
-      process.stdout.write(
+      log(
         `roster: largest bin is over budget (${why}) — ` +
           `${roster.max_bin_bytes}/${roster.budget_bytes} bytes, ` +
           `${roster.max_bin_files}/${roster.budget_files} files\n`,
       );
     }
     if (roster.split_clusters.length > 0) {
-      process.stdout.write(
+      log(
         `roster: ${roster.split_clusters.length} cluster(s) split across reviewers; ` +
           `their internal edges belong to the tracer\n`,
       );
     }
-    process.stdout.write(`${rosterTelemetry(roster)}\n`);
+    log(`${rosterTelemetry(roster)}\n`);
   } catch (err) {
-    process.stdout.write(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
+    log(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
     // An annotation as well as a log line: a `run:` step's stdout is not
     // surfaced anywhere a maintainer looks unless they open the job.
-    process.stdout.write(
+    log(
       `::warning::ai-review could not build the review roster: ${one(err)}. ` +
         "Nothing consumes it yet, so the review is unaffected — but PR-D/2 will.\n",
     );
-    process.stdout.write(`${rosterTelemetry(null, err)}\n`);
+    log(`${rosterTelemetry(null, err)}\n`);
   }
+  return roster;
 }
 
 /** Collapse to a single line: a newline would split a scraped record in two. */
@@ -248,6 +249,7 @@ module.exports = {
   IMPORT_SCAN_MAX_BYTES,
   collectSpecifiers,
   rosterTelemetry,
+  writeRoster,
 };
 
 // `node lib/write-manifest.js` from the prep step runs it; `require()` from a
