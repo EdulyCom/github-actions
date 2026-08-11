@@ -39,7 +39,11 @@ const VALID_INTENT = new Set(["aligned", "partial", "deviated", "skipped"]);
 /**
  * The role that owns intent (spec §4 "Frame"), by name. Must match the frame
  * role `lib/roster.js` emits — see the intent selection below for why position
- * in the roster is not a safe proxy for it.
+ * in the roster is not a safe proxy for it. Exported so `roster.test.js` can
+ * pin the two spellings against each other: `roster.js`'s own tests only
+ * assert its own literal, so a rename on either side would desynchronise them
+ * into a silent fail-open — `hasFrame` goes false, intent and checklist revert
+ * to first-valid-wins across every role, and `status` stays `"ok"`.
  */
 const FRAME_ROLE = "intent";
 
@@ -443,4 +447,4 @@ function aggregate({ manifest, roster, findings, scores }) {
   };
 }
 
-module.exports = { aggregate, moreSevere, CONFIDENCE_FLOOR };
+module.exports = { aggregate, moreSevere, CONFIDENCE_FLOOR, FRAME_ROLE };

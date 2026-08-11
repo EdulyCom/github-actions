@@ -26,7 +26,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { buildManifest, parseNumstat } = require("./prep.js");
-const { buildRoster, extractImports, resolveImportEdges } = require("./roster.js");
 
 const DIR = ".ai-review";
 
@@ -121,6 +120,14 @@ function writeRoster(manifest, sizes, io) {
 
   let roster = null;
   try {
+    // Required inside the try, not at module scope: a load-time throw from
+    // roster.js — a syntax error surviving to production, or any future
+    // module-scope code that throws — would otherwise crash this require()
+    // before writeRoster ever runs, taking manifest.json and the whole prep
+    // step down with it. That is exactly the failure this function's own
+    // JSDoc promises cannot happen.
+    const { buildRoster, resolveImportEdges } = require("./roster.js");
+
     const specifiers = collectSpecifiers(manifest.changed_files, sizes, readText);
 
     roster = buildRoster({
@@ -177,7 +184,10 @@ function writeRoster(manifest, sizes, io) {
     // Latent while main() is the only caller and ignores it; load-bearing once
     // PR-D/2 reads this to decide whether to fan out.
     roster = null;
-    log(`roster: NOT EMITTED — ${err && err.message ? err.message : err}\n`);
+    // one(), like the two lines below it — a multi-line error message would
+    // otherwise split this record across lines, the exact failure one()'s own
+    // comment exists to prevent.
+    log(`roster: NOT EMITTED — ${one(err)}\n`);
     // An annotation as well as a log line: a `run:` step's stdout is not
     // surfaced anywhere a maintainer looks unless they open the job.
     log(
@@ -204,6 +214,11 @@ function one(v) {
  *   without a temp tree, and so the size gate and the skip paths are pinnable.
  */
 function collectSpecifiers(changedFiles, sizes, readText) {
+  // Lazy, matching writeRoster's require below — a load-time throw in
+  // roster.js must not crash this module before writeRoster's try/catch is
+  // even reached. Cheap: Node caches the module, so this is a second lookup,
+  // not a second load.
+  const { extractImports } = require("./roster.js");
   const out = Object.create(null);
   for (const p of Array.isArray(changedFiles) ? changedFiles : []) {
     const size = sizes ? sizes[p] : undefined;

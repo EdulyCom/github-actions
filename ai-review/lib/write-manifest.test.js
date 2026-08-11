@@ -140,6 +140,32 @@ test("writeRoster: a buildRoster throw is caught, logged, and never written", ()
   assert.ok(logs.some((l) => l.startsWith("ai-review-roster {") && l.includes('"status":"failed"')));
 });
 
+test("writeRoster: a multi-line error message doesn't split the NOT EMITTED log line", () => {
+  // The other two lines in this catch already went through one(); this one
+  // didn't, so a multi-line error would break a scraper reading the log
+  // line-by-line — the exact failure one()'s own comment describes.
+  const logs = [];
+  // A single valid path, not a duplicate — buildRoster must succeed so it is
+  // writeJson's throw, not assertPartition's, that reaches this catch.
+  const manifest = {
+    changed_files: ["src/a.ts"],
+    symbol_manifest: [],
+    has_test_change: false,
+    has_logic_change: true,
+    modifies_reviewer_guidance: false,
+  };
+  writeRoster(manifest, { "src/a.ts": 10 }, {
+    readText: () => "",
+    writeJson: () => {
+      throw new Error("line one\nline two\nline three");
+    },
+    log: (line) => logs.push(line),
+  });
+  const notEmitted = logs.find((l) => l.startsWith("roster: NOT EMITTED"));
+  assert.ok(notEmitted, "no NOT EMITTED line found");
+  assert.equal(notEmitted.trimEnd().includes("\n"), false, `split across lines: ${JSON.stringify(notEmitted)}`);
+});
+
 test("writeRoster: a throw from writeJson (build succeeded, the write didn't) returns null too", () => {
   // buildRoster can succeed and writeJson can still throw (disk full, bad path).
   // The catch logs NOT EMITTED / a ::warning:: / status:"failed" telemetry in

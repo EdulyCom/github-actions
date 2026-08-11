@@ -131,6 +131,26 @@ test("namespacing is unconditional, so two ids can never collide by prefix guess
   assert.deepEqual(ids, ["reviewer-1/F1", "reviewer-1/reviewer-1/F1"]);
 });
 
+test("a model id and a generated fallback id in the same role cannot collide", () => {
+  // Unconditional prefixing is injective on the PREFIX; it says nothing about
+  // the value being prefixed. A model returning "0002" for finding 0, and
+  // omitting an id for finding 1 (which falls back to index 1 -> "0002" under
+  // the old unstemmed fallback), both namespaced to "review-serial/0002" —
+  // aggregate.js's shared ids Set then rejected the whole review as
+  // malformed:review-serial:duplicate. Four-digit zero-padded ids are this
+  // system's own house style, so the collision was not a contrived edge case.
+  const r = review({
+    findings: [
+      { id: "0002", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 },
+      { id: "", file: "b", line: 2, severity: "P2", summary: "s", failure_scenario: "f", reason: "perf", evidence: "e", confidence: 75 },
+    ],
+  });
+  const out = deriveArtifacts(r, { role: "review-serial" });
+  const ids = out.findings.findings.map((f) => f.id);
+  assert.equal(new Set(ids).size, 2, `collided: ${ids}`);
+  assert.deepEqual(ids, ["review-serial/0002", "review-serial/auto-0002"]);
+});
+
 test("severity_confirmed defaults to the finding's own severity when absent", () => {
   const r = review({
     findings: [{ id: "x/1", file: "a", line: 1, severity: "P1", summary: "s", failure_scenario: "f", reason: "bug", evidence: "e", confidence: 100 }],

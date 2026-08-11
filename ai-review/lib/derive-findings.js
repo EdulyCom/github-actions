@@ -68,10 +68,18 @@ function deriveArtifacts(review, opts) {
   // and nothing downstream parses the id's structure.
   const namespaced = (raw) => `${role}/${raw}`;
 
+  // The `auto-` stem keeps the generated fallback out of the space a model id
+  // can land in. Unconditional prefixing was made injective on the prefix; it
+  // says nothing about the VALUE being prefixed, and four-digit zero-padded ids
+  // are this system's own house style (the id schema requires a string but sets
+  // no format) — a model returning "0002" for one finding while another finding
+  // in the same response falls back to index 2's generated "0002" collided
+  // under the same role, in exactly the shape the shared `ids` Set in
+  // aggregate.js was built to reject as `malformed:role:duplicate finding id`.
+  const generatedId = (i) => `auto-${String(i + 1).padStart(4, "0")}`;
+
   const findings = review.findings.map((f, i) => ({
-    id: namespaced(
-      typeof f.id === "string" && f.id !== "" ? f.id : String(i + 1).padStart(4, "0"),
-    ),
+    id: namespaced(typeof f.id === "string" && f.id !== "" ? f.id : generatedId(i)),
     file: f.file ?? null,
     line: typeof f.line === "number" ? f.line : null,
     severity: f.severity,

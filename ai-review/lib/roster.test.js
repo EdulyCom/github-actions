@@ -15,6 +15,7 @@ const {
   BUDGET_BYTES,
   FILES_PER_REVIEWER,
 } = require("./roster.js");
+const { FRAME_ROLE } = require("./aggregate.js");
 
 const f = (path, bytes) => ({ path, bytes });
 
@@ -664,6 +665,19 @@ test("buildRoster: an uncapped roster reports k_capped false and a bin within bu
   const r = buildRoster({ files, models: { opus: "o", sonnet: "s", haiku: "h" } });
   assert.equal(r.k_capped, false);
   assert.equal(r.max_bin_bytes, 3000);
+});
+
+test("buildRoster: the frame role's spelling matches aggregate.js's FRAME_ROLE", () => {
+  // Independent literals — "intent" here, FRAME_ROLE in aggregate.js — with
+  // nothing else relating them. A rename on either side desynchronises them
+  // into a silent fail-open: hasFrame goes false, intent and checklist revert
+  // to first-valid-wins across every role, and status stays "ok". This is the
+  // tripwire that turns that rename into an immediate, loud test failure
+  // instead of a fan-out-time surprise.
+  const r = buildRoster({ files: [f("a.ts", 5)], models: { opus: "o", sonnet: "s", haiku: "h" } });
+  assert.ok(r.findings_roles.includes(FRAME_ROLE), `findings_roles=${r.findings_roles}`);
+  const frame = r.roles.find((x) => x.kind === "frame");
+  assert.equal(frame.role, FRAME_ROLE);
 });
 
 test("buildRoster: an empty diff yields no coverage roles, and k says 0", () => {
