@@ -121,6 +121,36 @@ test("row 5: malformed role file — bad schema, missing complete, complete:fals
   }
 });
 
+test("row 5: an assigned_files that isn't an array is malformed, not a partition gap", () => {
+  // Without this check, a string or null degrades to [] at the partition
+  // check (still fails closed) but blames "assigned to no role" on the
+  // CHANGED FILE instead of naming the role whose envelope was actually bad —
+  // correct direction, wrong suspect.
+  for (const bad of ["a,b", null, 42, {}]) {
+    const out = run({ findings: { "review-serial": roleFile({ assigned_files: bad }) } });
+    assert.equal(out.status, "inconclusive", JSON.stringify(bad));
+    assert.match(out.reason, /malformed:review-serial/, `${JSON.stringify(bad)} -> ${out.reason}`);
+  }
+});
+
+test("row 6: coverage mismatch reports reviewed_files intersected with the diff", () => {
+  // `seen` is the failing role's raw files_reviewed, which is allowed to range
+  // outside the diff — so unfiltered it could report MORE reviewed files than
+  // exist in the PR, on an exit whose entire meaning is "a file was not
+  // reviewed". The success path twelve lines below already does this right.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        files_reviewed: ["src/a.ts", "vendor/x.ts", "vendor/y.ts", "vendor/z.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /coverage/);
+  assert.equal(out.coverage.reviewed_files, 1, "out-of-diff neighbours must not inflate the count");
+  assert.equal(out.coverage.expected_files, 2);
+});
+
 test("row 6: coverage mismatch — reviewed fewer files than assigned", () => {
   const out = run({
     findings: {
@@ -144,6 +174,332 @@ test("row 6: partition integrity — roles must cover changed_files exactly", ()
   });
   assert.equal(out.status, "inconclusive");
   assert.match(out.reason, /coverage|partition/);
+});
+
+test("finding ids must be unique ACROSS roles, not just within one", () => {
+  // The score join is a Map keyed by id, so a collision silently keeps one
+  // finding and discards the other while every set-equality assertion stays
+  // green — reproduced earlier as a P0@100 colliding with a P3@25 yielding
+  // verdict pass. Ids are model-invented and `derive-findings.js` uses the
+  // model's own string when present, so nothing namespaces them by role.
+  const f = finding({ id: "collide", severity: "P0" });
+  const g = finding({ id: "collide", severity: "P3", file: "src/b.ts" });
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts"],
+        findings: [f],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+        findings: [g],
+      }),
+    },
+    scores: scoresFor(["collide"]),
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /duplicate finding id collide/);
+});
+
+test("row 6: a role assigned a file nobody changed is a partition error", () => {
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts", "src/b.ts", "src/ghost.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts", "src/ghost.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/ghost\.ts/);
+});
+
+test("row 6: a role listing the same file twice in its own assigned_files is a partition error", () => {
+  // roster.js's assertPartition throws on any repeated path regardless of
+  // which bin(s) it appears in — this module re-asserts that independently,
+  // since a role file arrives from a model stage that can claim anything. The
+  // cross-role check alone (owner !== role) let this shape through silently.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts", "src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/a\.ts/);
+  assert.match(out.reason, /twice/);
+});
+
+test("row 6: a changed file assigned to no role is a partition error", () => {
+  // Distinct from the reviewed-by-nobody case: a file can be incidentally read
+  // by a role it was never assigned to, which would satisfy a files_reviewed
+  // union while nobody actually owned it.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/b\.ts/);
+});
+
+test("reviewed_files counts the diff, so it can never exceed expected_files", () => {
+  // files_reviewed is explicitly allowed to range outside the diff — reading a
+  // neighbour for context is what a reviewer should do — so a raw tally gives
+  // "expected 2, reviewed 5", which reads as nonsense and is the number fan-out
+  // will scrape per role.
+  const out = run({
+    findings: {
+      "review-serial": roleFile({
+        files_reviewed: ["src/a.ts", "src/b.ts", "vendor/x.ts", "vendor/y.ts", "vendor/z.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.coverage.expected_files, 2);
+  assert.equal(out.coverage.reviewed_files, 2);
+});
+
+test("a dead or malformed role reports the real file count, not an empty diff's", () => {
+  // inconclusive() defaults to expected_files: 0, so these exits logged the same
+  // tally an empty diff logs. Every other exit passes coverage explicitly.
+  const dead = run({ roster: ["review-serial", "tracer"] });
+  assert.match(dead.reason, /missing-role:tracer/);
+  assert.equal(dead.coverage.expected_files, 2);
+
+  const bad = run({ findings: { "review-serial": roleFile({ schema: 2 }) } });
+  assert.match(bad.reason, /malformed/);
+  assert.equal(bad.coverage.expected_files, 2);
+});
+
+test("dedupe normalises the path, so './x' and 'x' are one finding", () => {
+  // finding.file is model-typed text and malformed() never touches it, while
+  // every partition and coverage comparison in the module goes through
+  // normPath. Two roles spelling the same path differently counted the same
+  // defect twice. It fails closed, so this is a weaker-than-intended §6.6
+  // rather than a fail-open — but the fix costs nothing.
+  const a = finding({ id: "r1/1", file: "src/a.ts", line: 84, reason: "bug" });
+  const b = finding({ id: "r2/1", file: "./src/a.ts", line: 84, reason: "bug" });
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts"], files_reviewed: ["src/a.ts"], findings: [a] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"], findings: [b] }),
+    },
+    scores: scoresFor(["r1/1", "r2/1"]),
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.counts.p1, 1, "the same defect counted twice");
+});
+
+test("a partition failure does not report a misleading reviewed count", () => {
+  // The count is of files verified as reviewed; at the point a partition breaks,
+  // nothing has been verified. Reporting a partial tally reads as a coverage
+  // shortfall, which is exactly what a partition error is NOT.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts", "src/b.ts"], files_reviewed: ["src/a.ts", "src/b.ts"] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"] }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.equal(out.coverage.reviewed_files, 0);
+  assert.equal(out.coverage.expected_files, 2);
+});
+
+test("row 6: partition integrity — two roles must not be assigned the same file", () => {
+  // The other half of §6 step 2, vacuous while the roster was size 1. Two roles
+  // holding one path is not a coverage gap — the union still matches, and every
+  // assertion above stays green — so it can only be caught here. It means the
+  // roster was built wrong: the file is read twice, and one defect surfaces
+  // under two ids that the deterministic dedupe cannot merge across roles when
+  // the reported line or reason differs.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "inconclusive");
+  assert.match(out.reason, /partition/);
+  assert.match(out.reason, /src\/b\.ts/);
+});
+
+test("row 6: disjoint roles that jointly cover changed_files pass", () => {
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+});
+
+test("row 6: overlapping files_reviewed is fine — only assignment must be disjoint", () => {
+  // Reading a neighbour file for context is exactly what a reviewer should do.
+  // Only the assignment is a partition.
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+      }),
+      "reviewer-2": roleFile({
+        role: "reviewer-2",
+        assigned_files: ["src/b.ts"],
+        files_reviewed: ["src/b.ts", "src/a.ts"],
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+});
+
+test("intent comes from the frame role, not from whichever role is listed first", () => {
+  // §6 step 9 says intent is owned by exactly one role. Selecting on array
+  // position made that false the moment the roster emitted coverage reviewers
+  // before the frame role — and derive-findings.js stamps `intent` onto every
+  // role file, so a reviewer that saw one slice of the diff and cannot judge the
+  // PR's goal would shadow the role whose whole job that is. Fail-open in the
+  // direction step 9 exists to close.
+  const out = run({
+    roster: ["reviewer-1", "intent"],
+    findings: {
+      "reviewer-1": roleFile({
+        role: "reviewer-1",
+        assigned_files: ["src/a.ts", "src/b.ts"],
+        files_reviewed: ["src/a.ts", "src/b.ts"],
+        intent: "aligned",
+      }),
+      intent: roleFile({
+        role: "intent",
+        assigned_files: [],
+        files_reviewed: [],
+        intent: "deviated",
+      }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "deviated");
+});
+
+test("intent falls back to any valid value when no frame role is rostered", () => {
+  // The serial roster is a single `review-serial` role that owns intent itself.
+  const out = run();
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "aligned");
+});
+
+test("a rostered frame role with an unusable intent fails closed — no fallback", () => {
+  // The previous version of this test set reviewer-1's intent to null too, so
+  // it only pinned "inconclusive when EVERY role is invalid" and left the real
+  // hole open: a garbled frame value fell through to whichever coverage role
+  // answered first. reviewer-1 says `aligned` here deliberately.
+  for (const bad of ["sideways", null, 42, ""]) {
+    const out = run({
+      roster: ["reviewer-1", "intent"],
+      findings: {
+        "reviewer-1": roleFile({
+          role: "reviewer-1",
+          assigned_files: ["src/a.ts", "src/b.ts"],
+          files_reviewed: ["src/a.ts", "src/b.ts"],
+          intent: "aligned",
+        }),
+        intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], intent: bad }),
+      },
+    });
+    assert.equal(out.status, "inconclusive", `frame intent ${JSON.stringify(bad)}`);
+    assert.match(out.reason, /no-intent/);
+  }
+});
+
+test("an intent file absent from the roster is never preferred over a rostered role", () => {
+  // byRole is keyed by role name and can carry entries the roster never
+  // declared. Those are never validated by malformed(), so preferring one would
+  // route an unvalidated value straight into the verdict.
+  const out = run({
+    roster: ["review-serial"],
+    findings: {
+      "review-serial": roleFile({ intent: "deviated" }),
+      intent: { schema: 1, role: "intent", intent: "aligned" },
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.equal(out.review.intent, "deviated");
+});
+
+test("checklist is owned by the frame role, not concatenated across roles", () => {
+  // Same property the intent fix is about. derive-findings.js stamps `checklist`
+  // onto every role file, so flatMap duplicates each item K times — and
+  // publish.js counts verified items per normalized text precisely so one
+  // verified item cannot tick several identically-normalizing boxes. Inflating
+  // that count to K reopens the collision the counter exists to prevent.
+  const item = { text: "Adds a test", status: "verified" };
+  const out = run({
+    roster: ["reviewer-1", "reviewer-2", "intent"],
+    findings: {
+      "reviewer-1": roleFile({ role: "reviewer-1", assigned_files: ["src/a.ts"], files_reviewed: ["src/a.ts"], checklist: [item] }),
+      "reviewer-2": roleFile({ role: "reviewer-2", assigned_files: ["src/b.ts"], files_reviewed: ["src/b.ts"], checklist: [item] }),
+      intent: roleFile({ role: "intent", assigned_files: [], files_reviewed: [], checklist: [item] }),
+    },
+  });
+  assert.equal(out.status, "ok");
+  assert.deepEqual(out.review.checklist, [item]);
+});
+
+test("checklist still concatenates when no frame role is rostered", () => {
+  const item = { text: "Adds a test", status: "verified" };
+  const out = run({ findings: { "review-serial": roleFile({ checklist: [item] }) } });
+  assert.deepEqual(out.review.checklist, [item]);
+});
+
+test("row 8: a dead scorer is inconclusive even when nobody found anything", () => {
+  // The guard was conditional on candidates.length > 0, so: scorer dies, every
+  // coverage reviewer legitimately returns zero findings, the guard doesn't
+  // fire, scoreList falls back to [], both set-equality loops iterate nothing,
+  // and a clean verdict comes out of a run with a dead role. Every other dead
+  // role is named by the roster loop; the scorer alone was exempt. Unreachable
+  // today — action.yml null-checks scores.json first — but this is the PR that
+  // puts a scorer on the roster with its own artifact path, which is what makes
+  // it reachable at PR-D/2.
+  for (const bad of [null, undefined, { schema: 1, role: "scorer", complete: false, scores: [] }]) {
+    const out = run({ scores: bad });
+    assert.equal(out.status, "inconclusive", String(bad));
+    assert.match(out.reason, /scores/);
+  }
 });
 
 test("row 8: scorer file missing or incomplete", () => {

@@ -50,8 +50,68 @@ function deriveArtifacts(review, opts) {
   if (!Array.isArray(review.findings)) return null;
   if (!Array.isArray(review.files_reviewed)) return null;
 
+  // Ids are namespaced by role, always. The schema's `id` is a bare string with
+  // no format guidance, so two reviewer sessions running the same prompt will
+  // plausibly both emit "F1" — and `aggregate.js` rejects a cross-role duplicate,
+  // correctly, since its score join is keyed by id. Without the prefix that turns
+  // two perfectly good non-overlapping reviews into a whole-PR failure. Safe
+  // because §6.6 dedupe keys on file+line+reason, never on id, so genuine
+  // duplicate findings still merge across roles.
+  // Unconditional, not "skip if it already looks prefixed" — that conditional
+  // was tried first and is not injective: a model that applies its own
+  // namespacing convention inconsistently within one response can emit both
+  // "F1" and "reviewer-1/F1", and a startsWith check maps both to the same
+  // string. That is the exact collision this function exists to prevent,
+  // reached from inside a single role instead of across two. Unconditional
+  // prefixing cannot collide by construction, at the cost of an ugly
+  // "role/role/id" when a model already prefixed correctly — never wrong,
+  // and nothing downstream parses the id's structure.
+  const namespaced = (raw) => `${role}/${raw}`;
+
+  // The `auto-` stem keeps the generated fallback out of the space a model id
+  // can land in — narrows the collision window, but "auto-" is only a
+  // convention, not reserved: a model that happens to emit the literal string
+  // "auto-0002" would still collide with whatever finding's OWN generated
+  // fallback that is. RESERVED is what makes the invariant hold by
+  // construction: a raw id matching the generated shape is never trusted as a
+  // model value — it is always replaced by THIS finding's own generatedId(i).
+  // generatedId is injective over the array index, so two different findings
+  // can never be forced to the same reserved-pattern id, however a model
+  // spells its own.
+  const GENERATED_ID_RE = /^auto-\d{4}$/;
+  const generatedId = (i) => `auto-${String(i + 1).padStart(4, "0")}`;
+
+  // The schema requires no uniqueness on the model's own `id`, so two findings
+  // can plainly share a raw value — a model describing two real defects with
+  // the same lazy "F1" is not a contrived case. Neither namespacing nor the
+  // auto- reservation above touches this: both operate on ONE id at a time and
+  // can't see a repeat two array slots later. `aggregate.js`'s shared ids Set
+  // then rejects the whole role as malformed:duplicate — a real review with
+  // real findings turned into a whole-PR "re-run required" over an id string.
+  // Disambiguated here so the invariant the header claims — ids unique by
+  // construction — actually holds for every input, not just the two shapes
+  // that had dedicated tests.
+  const usedIds = new Set();
+  const dedupeId = (id) => {
+    if (!usedIds.has(id)) {
+      usedIds.add(id);
+      return id;
+    }
+    let n = 2;
+    while (usedIds.has(`${id}-${n}`)) n += 1;
+    const disambiguated = `${id}-${n}`;
+    usedIds.add(disambiguated);
+    return disambiguated;
+  };
+
   const findings = review.findings.map((f, i) => ({
-    id: typeof f.id === "string" && f.id !== "" ? f.id : `${role}/${String(i + 1).padStart(4, "0")}`,
+    id: dedupeId(
+      namespaced(
+        typeof f.id === "string" && f.id !== "" && !GENERATED_ID_RE.test(f.id)
+          ? f.id
+          : generatedId(i),
+      ),
+    ),
     file: f.file ?? null,
     line: typeof f.line === "number" ? f.line : null,
     severity: f.severity,
@@ -78,9 +138,14 @@ function deriveArtifacts(review, opts) {
       role,
       complete: true,
       model_used: o.model || null,
-      assigned_files: Array.isArray(o.assignedFiles)
-        ? o.assignedFiles
-        : review.files_reviewed,
+      // No fallback to `review.files_reviewed`. That would hand aggregate.js a
+      // model claim to compare against another copy of the same claim, which is
+      // exactly what the JSDoc above says this field exists to avoid — and it
+      // breaks aggregation's partition check, which requires assigned_files to
+      // be a subset of changed_files while files_reviewed is explicitly allowed
+      // to range outside the diff (a reviewer reading a neighbour for context).
+      // An empty assignment fails closed with a diagnosable reason instead.
+      assigned_files: Array.isArray(o.assignedFiles) ? o.assignedFiles : [],
       files_reviewed: review.files_reviewed,
       intent: review.intent ?? null,
       checklist: Array.isArray(review.checklist) ? review.checklist : [],

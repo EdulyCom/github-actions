@@ -81,15 +81,32 @@ Divergences were advisory-only and each explained by the confidence filter.
 Deleting `structured_output` waits on that agreement holding across other
 repos — evidence no design argument substitutes for.
 
-### 5. Two deviations from the frozen spec, recorded not silent
+### 5. Two open deviations from the frozen spec, recorded not silent
 
 - **Reconciliation runs before the confidence filter** (spec §6 orders 4 then
   5). In the spec's order a finding the scorer *upgrades* to P1 is still
   filtered on the finder's original P2 label — the strictest threshold applied
   to the least severe reading, fail-**open** on gate-blocking findings. Pinned
   by a test.
-- **Pairwise-disjointness (§6 step 2) is not implemented.** Vacuous at roster
-  size 1; PR-D must add it.
+- **Pairwise-disjointness (§6 step 2) shipped one release late — now closed.**
+  It was vacuous at roster size 1, so it was deferred; `lib/roster.js` and
+  `aggregate.js`'s `partition:` checks now assert it in both places, because
+  the roster can only assert what it emits and a role file arrives from a model
+  stage that can claim an assignment nobody made.
+- **`assignments.json` extends spec §6's frozen example rather than matching
+  it byte-for-byte.** Each role additionally carries `artifact` (the file path
+  the role writes — needed once `scorer` sits in `roles[]` alongside the
+  findings-writing roles, since it writes a different one) and `effort`;
+  top-level `findings_roles` is the pre-filtered list to pass as `aggregate()`'s
+  `roster` (excludes `scorer`); and `modifies_reviewer_guidance` replaces the
+  spec's `modifies_claude_md`, matching the field name `lib/prep.js`'s manifest
+  already uses rather than introducing a second name for the same fact. Seven
+  more top-level keys carry the roster's own budget/limiter telemetry, absent
+  from the frozen example entirely: `k`, `split_clusters`, `budget_bytes`,
+  `max_bin_bytes`, `budget_files`, `max_bin_files`, `k_capped` — documented in
+  the README's `ai-review-roster` telemetry section, not repeated field-by-field
+  here. All additive or a rename to match existing code, never a narrowing of the frozen
+  shape.
 
 ### 6. The P2/P3 confidence floor is 75, set from data
 

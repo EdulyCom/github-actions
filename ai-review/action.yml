@@ -137,9 +137,13 @@ inputs:
   haiku-model:
     description: >
       Model ID used by the context stage (this phase) to read the diff and changed
-      files and write context.md for the review stage to consume. Override when a
-      gateway aliases model names. NOTE: Haiku 4.5 does not accept the `effort`
-      parameter, so no stage running this model may pass `--effort`.
+      files and write context.md for the review stage to consume. Also stamped by
+      the deterministic-prep step onto the roster's `history` and `scorer` roles,
+      so an override here reaches those too. Override when a gateway aliases model
+      names. NOTE: Haiku 4.5 does not accept the `effort` parameter, so no stage
+      running this model may pass `--effort` — the roster resolves that against
+      the model id rather than the tier, so pointing another tier at a Haiku id is
+      covered as well.
     required: false
     default: "claude-haiku-4-5"
   enable-context-stage:
@@ -419,14 +423,27 @@ runs:
       #   2. Latency. Wall-clock is linear in turns (measured: duration ~=
       #      turns * 24s over 682 jobs), so every re-derivation is pure cost.
       #
-      # All parsing lives in lib/prep.js behind 21 unit tests; this step only
-      # runs git and hands stdout over. Nothing here is model-controlled.
+      # It also emits `.ai-review/assignments.json` — the review roster from
+      # lib/roster.js: which reviewer reads which files, and under which model.
+      # NOTHING CONSUMES IT YET; the review below is still one serial session.
+      # It ships now, and best-effort, so the partition it asserts (bins
+      # pairwise disjoint, union equal to changed_files) is exercised on real
+      # diffs across every consumer before a model stage depends on it. Same
+      # shadow-mode discipline the aggregation step shipped under.
+      #
+      # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
+      # this step only runs git and hands stdout over. Nothing here is
+      # model-controlled.
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
         SONNET: ${{ inputs.sonnet-model }}
         OPUS: ${{ inputs.opus-model }}
+        # Read by lib/write-manifest.js only (lib/roster.js is pure and never
+        # touches the environment), to stamp the OSH tiering onto the roster
+        # with the consumer's overrides rather than hardcoded ids.
+        HAIKU: ${{ inputs.haiku-model }}
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
         CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
@@ -1322,7 +1339,16 @@ runs:
           let assignedFiles;
           try {
             assignedFiles = JSON.parse(fs.readFileSync(".ai-review/manifest.json", "utf8")).changed_files;
-          } catch { /* fall back to the model's own list inside deriveArtifacts */ }
+          } catch {
+            // Leave undefined. deriveArtifacts emits an EMPTY assigned_files
+            // rather than substituting the model's own files_reviewed — that
+            // would compare a model claim against another copy of itself, and
+            // files_reviewed is allowed to range outside the diff, which the
+            // partition check forbids for an assignment. Empty makes
+            // aggregation fail closed with a named path instead. In practice the
+            // shadow step below reads the same manifest and reports
+            // `missing: manifest.json`, so it never reaches aggregate() anyway.
+          }
 
           const out = deriveArtifacts(review, {
             role: "review-serial",

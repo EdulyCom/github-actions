@@ -50,8 +50,16 @@ injection-safety rule.
    never lingers next to new commits. Runs even on a draft PR.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
-7. **Checkout / compute diff stats and route model** — checks out the PR
-   head commit and routes ordinary diffs to `sonnet-model`, escalating to
+7. **Checkout / deterministic prep and model routing** — checks out the PR
+   head commit, then resolves the merge base, the changed-file list, each
+   file's full byte size at HEAD, a symbol manifest from the diff hunk
+   headers, and the Conventional-Commits title check into
+   `.ai-review/manifest.json`. The review stage is told to trust those
+   values instead of re-deriving them in paid model turns — a model that
+   derives the diff base from a false premise reviews the wrong range and
+   reports confidently on it.
+
+   The same step routes ordinary diffs to `sonnet-model`, escalating to
    `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
    (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
    sent nearly every real PR to Opus and moved the review stage from
@@ -60,6 +68,59 @@ injection-safety rule.
    routed to Opus, and Opus runs cost 3x the wall-clock and 4x the spend of
    Sonnet ones. Still a **stopgap** — the real fix is reviewing in parallel
    rather than in series, and both thresholds are removed once that lands.
+
+   It also writes `.ai-review/assignments.json`: the review roster —
+   related changed files clustered, then packed into
+
+   ```
+   K = clamp(max(ceil(total_fullfile_bytes / 130 KB),
+                 ceil(changed_files / 20)), 1, 4)
+   ```
+
+   coverage reviewers, plus the tracer, intent, history and scorer roles.
+   Both axes matter: a diff of many small files costs per-file attention
+   independent of total bytes, and a cluster exceeding *either* budget is
+   split at file boundaries (never inside a file — there is no byte-range
+   field in the schema) with the affected paths recorded in
+   `split_clusters` for the tracer. **Nothing reads it yet** — the review
+   below is still one serial session. It ships early, and best-effort, so
+   the partition it asserts (bins pairwise disjoint, no stray path, union
+   equal to `changed_files`) is exercised on real diffs before any model
+   stage depends on it.
+
+   The emitted `k` is how many coverage reviewers actually exist —
+   `min(formula, piece count after splitting)`, and `0` on an empty diff —
+   not the raw formula value: one 600 KB file computes `K=4` but is a
+   single unsplittable cluster, so `k: 1`; 25 small files in one directory
+   compute `K=2` but split into two pieces, so `k` can exceed the
+   *cluster* count too — one cluster split into two pieces still emits
+   `k: 2`.
+
+   Because that soak *is* the justification for shipping early, the step
+   emits one scrapable `ai-review-roster {json}` line per run — the same
+   shape as `ai-review-metrics`, and a record on failure too, so a
+   systematic roster defect is countable across repos instead of sitting
+   unnoticed in a job nobody opened:
+
+   ```bash
+   gh run view <id> --repo <repo> --log | grep -o 'ai-review-roster {.*}'
+   ```
+
+   It carries `k`/`kCapped`, `maxBinBytes`/`budgetBytes`,
+   `maxBinFiles`/`budgetFiles` and `overBudget`. `kCapped` separates
+   `MAX_K` binding from everything else, and an over-budget `maxBinFiles`
+   with an in-budget `maxBinBytes` separates atomic clusters that cannot
+   balance on file count. A bytes-only overflow does not by itself say
+   whether the cause was one indivisible file over `BUDGET_BYTES` or
+   several smaller atomic clusters that could not be packed to fit —
+   both look identical in the telemetry.
+
+   Two output contracts live in `roles[]`: every role writes
+   `.ai-review/findings/<role>.json` **except** `scorer`, which writes
+   `.ai-review/scores.json`. Each role states its own path in `artifact`,
+   and `findings_roles` is the pre-filtered list to hand aggregation as its
+   `roster` — passing all of `roles[]` would demand a findings file from
+   the scorer and fail every run.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
@@ -147,7 +208,7 @@ injection-safety rule.
 | `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `800` |
 | `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
 | `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
-| `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
+| `haiku-model` | Model used by the context stage, and stamped on the roster's `history`/`scorer` roles by the prep step. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage or role running it passes `--effort` — the roster resolves that against the model id, not the tier, so overriding another tier to a literal Haiku id (e.g. `sonnet-model: claude-haiku-4-5`) is also covered. A gateway alias that *routes* to Haiku under an unrelated string is not detected; the check is a substring match, not alias resolution. | No | `claude-haiku-4-5` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |

@@ -24,16 +24,28 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
-// A second, smaller divergence from spec §6 step 2, recorded so it is not read
-// as an oversight: pairwise-disjointness between roles is not asserted, only
-// that every assigned file was reviewed and every changed file was covered by
-// some role. At roster size 1 (PR-C) disjointness is vacuous; PR-D introduces
-// multiple roles and must add it.
+// Spec §6 step 2 is now implemented in full, over `assigned_files`: pairwise
+// disjoint, no stray path, union equal to `changed_files`, and every assigned
+// file claimed as reviewed. Disjointness was vacuous at roster size 1. All four
+// are asserted here as well as in `lib/roster.js` because that module can only
+// assert the roster it *emits*; a role file arrives from a model stage and can
+// claim an assignment the roster never made.
 //
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 
 const SEVERITIES = ["P0", "P1", "P2", "P3"];
 const VALID_INTENT = new Set(["aligned", "partial", "deviated", "skipped"]);
+
+/**
+ * The role that owns intent (spec §4 "Frame"), by name. Must match the frame
+ * role `lib/roster.js` emits — see the intent selection below for why position
+ * in the roster is not a safe proxy for it. Exported so `roster.test.js` can
+ * pin the two spellings against each other: `roster.js`'s own tests only
+ * assert its own literal, so a rename on either side would desynchronise them
+ * into a silent fail-open — `hasFrame` goes false, intent and checklist revert
+ * to first-valid-wins across every role, and `status` stays `"ok"`.
+ */
+const FRAME_ROLE = "intent";
 
 // §7a: recall bias where it matters. rubric.md's Verify Pass makes PLAUSIBLE the
 // default verdict for the exact class /code-review scores 25-50 ("might be real,
@@ -76,13 +88,23 @@ function inconclusive(reason, coverage) {
   };
 }
 
-/** A role file is usable only if it is the shape we froze. */
-function malformed(role, f) {
+/**
+ * A role file is usable only if it is the shape we froze.
+ *
+ * `ids` is supplied by the caller and shared across every role on purpose —
+ * see the duplicate check below.
+ */
+function malformed(role, f, ids) {
   if (f === null || typeof f !== "object") return `malformed:${role}`;
   if (f.schema !== 1) return `malformed:${role}`;
   if (f.complete !== true) return `malformed:${role}`;
   if (!Array.isArray(f.findings)) return `malformed:${role}`;
   if (!Array.isArray(f.files_reviewed)) return `malformed:${role}`;
+  // Load-bearing for PASS 1 below (the assignment partition), and unchecked
+  // until now: a string or null here degrades to `[]` at the partition check,
+  // which still fails closed but reports the wrong file as "assigned to no
+  // role" instead of naming the role whose envelope was actually malformed.
+  if (!Array.isArray(f.assigned_files)) return `malformed:${role}`;
 
   // Validate each finding, not just the envelope. A finding whose severity is
   // not one of P0-P3 has no entry in CONFIDENCE_FLOOR, so the filter below
@@ -90,7 +112,6 @@ function malformed(role, f) {
   // dropped[] — silently discarding a finding that might be a P0 because its
   // label was garbled. That is precisely the "absence must never read as
   // cleanliness" failure this module exists to prevent, so it is inconclusive.
-  const ids = new Set();
   for (const item of f.findings) {
     if (item === null || typeof item !== "object") return `malformed:${role}`;
     if (typeof item.id !== "string" || item.id === "") return `malformed:${role}`;
@@ -99,6 +120,13 @@ function malformed(role, f) {
     // collision would collapse the score join below (Map, last wins) while the
     // set-equality assertions stayed green, because Sets are duplicate-blind —
     // reproduced as a P0@100 colliding with a P3@25 yielding verdict pass.
+    //
+    // The set spans ALL roles, not one. `derive-findings.js` does namespace ids
+    // by role, but a role file is untrusted input to this module and it cannot
+    // assume the deriver produced it — this is the last line of defence, not a
+    // duplicate of that one. A per-role set would validate each file happily and
+    // let a collision through to the join, which is the identical fail-open
+    // reached from the direction fan-out opens up.
     if (ids.has(item.id)) return `malformed:${role}:duplicate finding id ${item.id}`;
     ids.add(item.id);
   }
@@ -128,16 +156,81 @@ function aggregate({ manifest, roster, findings, scores }) {
 
   // §6 step 1 / §8 rows 4-5 — every rostered role produced a parseable,
   // complete file. A dead role is named rather than averaged away.
+  // Coverage is passed explicitly on every exit — `inconclusive()` defaults to
+  // `expected_files: 0`, which is an empty diff's tally, and a dead role on a
+  // 12-file PR logging the same numbers as an empty diff is exactly the
+  // absence-reads-as-cleanliness confusion this module exists to prevent.
+  const nothingVerified = { expected_files: changed.length, reviewed_files: 0 };
+  const findingIds = new Set();
   for (const role of roles) {
-    if (byRole[role] === undefined) return inconclusive(`missing-role:${role}`);
-    const bad = malformed(role, byRole[role]);
-    if (bad) return inconclusive(bad);
+    if (byRole[role] === undefined) return inconclusive(`missing-role:${role}`, nothingVerified);
+    const bad = malformed(role, byRole[role], findingIds);
+    if (bad) return inconclusive(bad, nothingVerified);
   }
 
-  // §6 step 2 / §8 row 6 — the partition must cover changed_files exactly, and
-  // each role must have reviewed everything it was assigned. This checks the
-  // *claim*, not comprehension: it is a tripwire against silent truncation, not
-  // proof of reading. Said plainly here so nobody reads more into it.
+  // §6 step 2 / §8 row 6, in two passes over two different properties.
+  //
+  // PASS 1 — the ASSIGNMENT is a partition of changed_files: pairwise disjoint,
+  // no stray path, nothing left unowned. Only `assigned_files` is a partition;
+  // `files_reviewed` may overlap freely and may range outside the diff, since
+  // reading a neighbouring file for context is what a reviewer should do. That
+  // is exactly why coverage cannot be argued from `files_reviewed` alone — a
+  // file assigned to nobody but incidentally opened by somebody would satisfy a
+  // reviewed-union while no role ever owned it.
+  //
+  // `lib/roster.js` asserts the same three properties on the roster it emits.
+  // Repeating them here is not belt-and-braces: a role file arrives from a model
+  // stage and can claim an assignment the roster never made, so this module has
+  // to validate review output independently of the roster that produced it.
+  //
+  // The coverage payload reports `reviewed_files: 0` on these failures because
+  // nothing has been verified as reviewed yet — a partial tally would read as a
+  // coverage shortfall, which is precisely what a partition error is not.
+  const partitionCoverage = nothingVerified;
+  const changedSet = new Set(changed.map(normPath));
+  const assignedBy = new Map();
+  for (const role of roles) {
+    const assigned = (Array.isArray(byRole[role].assigned_files) ? byRole[role].assigned_files : [])
+      .map(normPath);
+    for (const p of assigned) {
+      const owner = assignedBy.get(p);
+      if (owner !== undefined) {
+        // Not a coverage gap: the union still matches and every other assertion
+        // stays green. It means the roster was built wrong — the file is read
+        // twice, and one defect can surface under two ids that the
+        // deterministic dedupe cannot merge when the reported line differs.
+        //
+        // Fires on a repeat within ONE role's own assigned_files too, not just
+        // across roles — `roster.js`'s assertPartition throws on any repeated
+        // path regardless of which bin(s) it appears in, and this module exists
+        // to re-assert that independently of the roster, since a role file
+        // arrives from a model stage that can claim anything.
+        const message =
+          owner === role
+            ? `partition:${p} assigned twice within ${role}`
+            : `partition:${p} assigned to both ${owner} and ${role}`;
+        return inconclusive(message, partitionCoverage);
+      }
+      if (!changedSet.has(p)) {
+        // The role was built against a different diff than the one being gated.
+        return inconclusive(
+          `partition:${p} assigned to ${role} but is not in changed_files`,
+          partitionCoverage,
+        );
+      }
+      assignedBy.set(p, role);
+    }
+  }
+  for (const p of changedSet) {
+    if (!assignedBy.has(p)) {
+      return inconclusive(`partition:${p} was assigned to no role`, partitionCoverage);
+    }
+  }
+
+  // PASS 2 — each role reviewed everything it was assigned. This checks the
+  // *claim*, not comprehension: a tripwire against silent truncation, not proof
+  // of reading. Said plainly here so nobody reads more into it. Combined with
+  // pass 1, every changed file is now owned by a role that says it read it.
   const reviewed = new Set();
   for (const role of roles) {
     const f = byRole[role];
@@ -147,9 +240,19 @@ function aggregate({ manifest, roster, findings, scores }) {
       if (!seen.has(p)) {
         // Name the path. This step's only product is a diagnosable log line,
         // and "assigned 11, reviewed 8" cannot be acted on.
+        //
+        // Intersected with the diff, like the success path twelve lines below —
+        // `seen` is the failing role's raw files_reviewed, which is explicitly
+        // allowed to range outside changed_files. A role assigned 5 files that
+        // reviewed 4 plus 10 out-of-diff neighbours would otherwise report
+        // "expected 5, reviewed 14" on an exit whose entire meaning is that a
+        // file was NOT reviewed.
         return inconclusive(
           `coverage:${role} did not review ${p} (assigned ${assigned.length}, reviewed ${seen.size})`,
-          { expected_files: changed.length, reviewed_files: seen.size },
+          {
+            expected_files: changed.length,
+            reviewed_files: [...seen].filter((r) => changedSet.has(r)).length,
+          },
         );
       }
     }
@@ -157,20 +260,46 @@ function aggregate({ manifest, roster, findings, scores }) {
   }
   const coverage = {
     expected_files: changed.length,
-    reviewed_files: reviewed.size,
+    // Intersected with the diff, not the raw union. `files_reviewed` is allowed
+    // to range outside `changed_files`, so a reviewer assigned 3 files that opens
+    // 5 neighbours would otherwise report "expected 3, reviewed 8" — a ratio that
+    // reads as nonsense and is the per-role tally fan-out will scrape.
+    reviewed_files: [...reviewed].filter((p) => changedSet.has(p)).length,
   };
-  for (const p of changed.map(normPath)) {
-    if (!reviewed.has(p)) {
-      return inconclusive(`coverage:${p} was not reviewed by any role`, coverage);
-    }
-  }
 
   // §6 step 9 / §8 row 10 — intent is owned by exactly one role and a verdict
   // cannot be reached without it.
-  const intent = roles
-    .map((r) => byRole[r].intent)
-    .find((v) => typeof v === "string" && VALID_INTENT.has(v));
-  if (!intent) return inconclusive("no-intent", coverage);
+  //
+  // "Exactly one role" is enforced two ways, because selecting on array position
+  // satisfies neither. `derive-findings.js` stamps `intent` onto every role file
+  // unconditionally, so a reviewer that saw one slice of the diff — and
+  // structurally cannot judge the PR's goal — would shadow the role whose entire
+  // mandate that is. If it says `aligned` where the frame role says `deviated`,
+  // the gate reads `aligned` and passes: fail-open, in the direction step 9
+  // exists to close.
+  //
+  //   1. If the frame role is ROSTERED, its value is the only one consulted. An
+  //      unusable value from it is `no-intent`, never a licence to poll the
+  //      coverage roles — a garbled frame answer is exactly when the fallback is
+  //      most likely to substitute a slice-local opinion for a whole-PR one.
+  //   2. Only when no frame role is rostered does first-valid-wins apply. That
+  //      is the serial roster, where one `review-serial` role owns intent itself.
+  //
+  // Membership in `roles` is what makes a file eligible, not presence in
+  // `byRole`: an entry the roster never declared was never seen by malformed(),
+  // so preferring one would route an unvalidated value into the verdict. The
+  // `byRole[FRAME_ROLE] !== undefined` half is now redundant with that check —
+  // the roster loop above already returns `missing-role:` for any rostered role
+  // absent from `byRole` — but is kept so this line does not depend on running
+  // after that loop to stay correct.
+  const validIntent = (v) => typeof v === "string" && VALID_INTENT.has(v);
+  const hasFrame = roles.includes(FRAME_ROLE) && byRole[FRAME_ROLE] !== undefined;
+  const intent = hasFrame
+    ? (validIntent(byRole[FRAME_ROLE].intent) ? byRole[FRAME_ROLE].intent : null)
+    : roles.map((r) => byRole[r].intent).find(validIntent);
+  if (!intent) {
+    return inconclusive(hasFrame ? `no-intent:${FRAME_ROLE} value unusable` : "no-intent", coverage);
+  }
 
   // §6 step 3 / §8 rows 8-9 — join scores by id and require set equality both
   // ways, so "unscored => dropped => clean" is unreachable.
@@ -178,11 +307,21 @@ function aggregate({ manifest, roster, findings, scores }) {
   for (const role of roles) {
     for (const f of byRole[role].findings) candidates.push(f);
   }
+  // Unconditional. This used to fire only when `candidates.length > 0`, so a
+  // dead scorer plus a run where every coverage reviewer legitimately found
+  // nothing produced a CLEAN verdict: the guard stayed quiet, `scoreList` fell
+  // back to `[]`, and both set-equality loops iterated nothing. §8 treats a dead
+  // role as inconclusive regardless of what the other roles found, and the
+  // roster loop above already names every other one — the scorer was the single
+  // exemption, on the one artifact that arrives outside that loop.
   const s = scores;
   if (!s || typeof s !== "object" || s.complete !== true || !Array.isArray(s.scores)) {
-    if (candidates.length > 0) return inconclusive("missing-scores", coverage);
+    return inconclusive("missing-scores", coverage);
   }
-  const scoreList = s && Array.isArray(s.scores) ? s.scores : [];
+  // `s.scores` is guaranteed an array by the guard above — no fallback needed,
+  // and no room for one to quietly resurrect the dead-scorer-reads-clean bug
+  // this guard exists to close.
+  const scoreList = s.scores;
 
   // Validate each score entry, symmetric to the finding-level checks above.
   // Without this, Number(undefined) is NaN and Number(null) is 0 — both take
@@ -222,10 +361,16 @@ function aggregate({ manifest, roster, findings, scores }) {
       ? sc.severity_confirmed
       : c.severity;
     const severity = moreSevere(c.severity, confirmed);
+    // Both operands of moreSevere are already constrained to SEVERITIES (one by
+    // malformed(), one by the ternary above), so `severity` is too and
+    // CONFIDENCE_FLOOR[severity] is always defined; `confidence` was validated
+    // finite in the score-list loop upstream. No fallback needed — a guard here
+    // that can never fire would misstate an invariant this module works hard to
+    // establish elsewhere.
     const confidence = Number(sc.confidence);
     const floor = CONFIDENCE_FLOOR[severity];
     const entry = { ...c, severity, confidence };
-    if (floor === undefined || !Number.isFinite(confidence) || confidence < floor) {
+    if (confidence < floor) {
       dropped.push({ ...entry, dropped_because: `confidence ${confidence} < ${floor} for ${severity}` });
     } else {
       kept.push(entry);
@@ -239,7 +384,12 @@ function aggregate({ manifest, roster, findings, scores }) {
   const deduped = [];
   const seenKeys = new Set();
   for (const f of kept) {
-    const key = `${f.file}\u0000${f.line}\u0000${f.reason}`;
+    // normPath, like every other path comparison here. `finding.file` is
+    // model-typed text and `malformed()` never validates it, so two roles
+    // spelling one path "./src/a.ts" and "src/a.ts" counted the same defect
+    // twice. Over-counting fails closed, so this was a weaker-than-intended
+    // §6.6 rather than a fail-open — and the fix costs nothing.
+    const key = `${normPath(f.file)}\u0000${f.line}\u0000${f.reason}`;
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
     deduped.push(f);
@@ -277,9 +427,17 @@ function aggregate({ manifest, roster, findings, scores }) {
     if (k in counts) counts[k] += 1;
   }
 
-  const checklist = roles.flatMap((r) =>
-    Array.isArray(byRole[r].checklist) ? byRole[r].checklist : [],
-  );
+  // Single-owner, for the same reason as intent and with a sharper downstream
+  // consequence. `derive-findings.js` stamps `checklist` onto every role file,
+  // so concatenating gives K copies of each item, possibly with conflicting
+  // statuses. `publish.js` counts verified items per normalized text precisely
+  // so one verified item cannot tick several boxes that normalize identically —
+  // inflating that count to K reopens the collision the counter exists to
+  // prevent. The frame role owns the checklist because it owns the intent
+  // contract the checklist is derived from.
+  const checklist = hasFrame
+    ? (Array.isArray(byRole[FRAME_ROLE].checklist) ? byRole[FRAME_ROLE].checklist : [])
+    : roles.flatMap((r) => (Array.isArray(byRole[r].checklist) ? byRole[r].checklist : []));
 
   return {
     status: "ok",
@@ -304,4 +462,4 @@ function aggregate({ manifest, roster, findings, scores }) {
   };
 }
 
-module.exports = { aggregate, moreSevere, CONFIDENCE_FLOOR };
+module.exports = { aggregate, moreSevere, CONFIDENCE_FLOOR, FRAME_ROLE };
