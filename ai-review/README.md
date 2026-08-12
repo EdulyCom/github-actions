@@ -146,7 +146,7 @@ injection-safety rule.
 | `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `25` |
 | `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `800` |
 | `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
-| `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `opus` |
+| `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
 | `haiku-model` | Model used by the context stage. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage running it passes `--effort`. | No | `claude-haiku-4-5` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
