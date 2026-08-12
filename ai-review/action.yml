@@ -111,7 +111,7 @@ inputs:
       routing step, whose output feeds the Review stage as the model to
       run. Override when a gateway aliases model names.
     required: false
-    default: "claude-opus-5"
+    default: "opus"
   sonnet-files-threshold:
     description: >
       Max changed-file count for a diff to still be considered "tiny" and
@@ -484,7 +484,7 @@ runs:
         if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
           MODEL="${SONNET:-claude-sonnet-5}"
         else
-          MODEL="${OPUS:-claude-opus-5}"
+          MODEL="${OPUS:-opus}"
         fi
         {
           echo "files=${FILES}"
