@@ -79,11 +79,6 @@ function stripLeadingBannerArtifacts(markdown) {
  *   `reviewMeta` stamps the delta baseline (spec §6.1); Publish passes
  *   current HEAD + PR merge-base + this run's full|delta mode.
  */
-function modelLine(_modelUsed) {
-  // Model attribution removed from published review bodies (consumer ask).
-  return [];
-}
-
 function modelFooter(_modelUsed) {
   return ["", "_Re-run this job if you need another review pass._"];
 }
@@ -148,7 +143,6 @@ function buildReviewBody({
  *   cannot treat the body as a delta baseline (spec §6.1).
  */
 function buildInconclusiveBody(salvaged, opts = {}) {
-  const modelUsed = opts && opts.modelUsed;
   const reviewMeta = opts && opts.reviewMeta;
   const inconclusiveMeta =
     reviewMeta && reviewMeta.headSha && reviewMeta.baseSha
@@ -167,7 +161,6 @@ function buildInconclusiveBody(salvaged, opts = {}) {
     "fails closed.",
     "",
     "**Re-run the `ai-review` job** to get a verdict.",
-    ...modelLine(modelUsed),
     ...(salvaged
       ? [
           "",

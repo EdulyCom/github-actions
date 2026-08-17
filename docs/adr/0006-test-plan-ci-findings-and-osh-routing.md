@@ -50,7 +50,7 @@ in `ai-review/README.md`).
 | K | Mode | Review session |
 | --- | --- | --- |
 | ≤1 (incl. empty-diff `0`) | `collapse` | Single Sonnet + `--json-schema` |
-| >1 (max 4) | `fanout` | Opus parent + native Sonnet/Haiku subagents; only Opus emits structured output |
+| >1 (max 4) | `fanout` | Opus parent + Sonnet Task workers (`osh-*` agents); only Opus emits structured output |
 
 `sonnet-files-threshold` / `sonnet-churn-threshold` remain accepted but are
 **deprecated for model routing**.

@@ -178,13 +178,9 @@ function writeRoster(manifest, sizes, io) {
       models: {
         opus: process.env.OPUS || "claude/claude-opus-5",
         sonnet: process.env.SONNET || "claude/claude-sonnet-5",
-        // Helper tier (history/scorer): Task subagents under Opus inherit
-        // adaptive thinking, so Haiku 400s on this gateway. Prefer HELPER_MODEL
-        // (Sonnet) when set; fall back to HAIKU for older callers.
-        haiku:
-          process.env.HELPER_MODEL ||
-          process.env.HAIKU ||
-          "claude/claude-sonnet-5",
+        // Helper tier (history/scorer): Task under Opus cannot use Haiku on
+        // this gateway (adaptive thinking 400). Always Sonnet unless overridden.
+        haiku: process.env.HELPER_MODEL || "claude/claude-sonnet-5",
       },
       importEdges: resolveImportEdges(specifiers, manifest.changed_files),
       symbolManifest: manifest.symbol_manifest,

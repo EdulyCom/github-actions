@@ -31,7 +31,7 @@ already specified — without replacing how findings are scored or gated.
 The 2026-08-07 document remains the source of truth for:
 
 - Binding constraints (§1): **rubric scoring stays**; **must read all** for the active review range.
-- Coverage / coherence / intent / history roles, `K = clamp(ceil(bytes / BUDGET), 1, 4)`, cluster
+- Coverage / coherence / intent / history roles, `K = clamp(max(ceil(bytes / BUDGET), ceil(files / 20)), 1, 4)`, cluster
   packing, independent Haiku scoring, deterministic aggregation.
 - Fail-closed matrix and frozen artifact shapes (`assignments.json`, per-role findings, gate input).
 - No Node `Promise.race` orchestrator — concurrency is Claude Code’s subagent scheduler inside one
@@ -48,7 +48,7 @@ Where the two conflict on product intent, treat this document as the later refin
 Test-Plan/CI, and orchestration *delivery*; treat 2026-08-07 as authoritative for scoring vocabulary,
 must-read-all, roster math, and aggregation. **Exception (K=1 collapse):** §5.2 of this document
 overrides parallel design §5’s minimum roster `{R1,H}` — the collapse path is a single Sonnet session
-with no Opus parent and no independent Haiku scorer (see §5.2).
+with no Opus parent and no independent scorer Task (see §5.2).
 
 ---
 
@@ -56,7 +56,7 @@ with no Opus parent and no independent Haiku scorer (see §5.2).
 
 | Decision | Choice |
 |---|---|
-| Orchestration | Opus parent + native Sonnet/Haiku subagents in one `claude-code-action` invocation |
+| Orchestration | Opus parent + Sonnet Task workers (`osh-*` agents) in one `claude-code-action` invocation |
 | Delta baseline | Commits after last published `<!-- ai-review -->` with meta `head_sha` |
 | Full review when | First run, missing meta, inconclusive prior, force-push/non-ancestor, base change, `force-full-review` |
 | Test plan | Map to CI; gaps → findings P0–P3; stop ticking checklist boxes in PR body |
@@ -123,7 +123,7 @@ flowchart TD
 |---|---|---|
 | **O**pus (parent) | One `claude-code-action` session with `--model` Opus when fan-out is live | Intent isolation ownership (or dispatch of the intent role), prioritization, conflict resolution across worker outputs, final structured judgment (`comment_markdown` + schema fields). Does **not** exhaustively re-read every file on large diffs when workers already covered them. |
 | **S**onnet (workers) | Coverage cluster reviewers R1..Rk from `roster.js` / `assignments.json`; tracer / coherence as in 2026-08-07 §4 | Full-file reads of assigned paths; propose findings with severity. |
-| **H**aiku (helpers) | History / mechanical gathers + **independent confidence scoring** | Cheap collection and scoring that must not be the same model that found the issue (parallel design §3). |
+| **H**elpers (Sonnet Task) | History / mechanical gathers + **independent confidence scoring** (agents `osh-history`, `osh-scorer`) | Cheap collection and scoring that must not be the same model session that found the issue (parallel design §3). Haiku is **not** used as a Task child (adaptive-thinking 400 on this gateway). |
 
 Only the **Opus parent** emits `--json-schema` structured output for Publish. Workers return freeform
 or JSON **via Task results** (no unscopeable Write on the review allowlist); the parent aggregates into
@@ -136,21 +136,23 @@ counts are never trusted as gate inputs.
 `K` is still the read-budget from parallel design §5:
 
 ```
-K = clamp(ceil(total_fullfile_bytes / BUDGET), 1, 4)
+K = clamp(max(ceil(total_fullfile_bytes / BUDGET), ceil(file_count / 20)), 1, 4)
 ```
 
-Cap remains **K≤4**. Fan-out is an option when the work exceeds one reviewer’s comprehension budget,
-not a fixed pipeline every PR pays for.
+(`BUDGET` = 130 KiB; file axis matches `roster.js` `FILES_PER_REVIEWER`.) Cap remains **K≤4**.
+Fan-out is an option when the work exceeds one reviewer’s comprehension budget, not a fixed
+pipeline every PR pays for.
 
 **Collapse rule (this design — overrides parallel design §5 minimum `{R1,H}`):**
 
 - If the roster / `assignments.json` implies **K=1** (single coverage reviewer holds the whole
   active-range byte budget): run a **single Sonnet** review session that emits `--json-schema`
-  structured output directly — **no Opus parent**, **no independent Haiku scorer**. Artifact
+  structured output directly — **no Opus parent**, **no independent scorer Task**. Artifact
   contracts may match today’s single-session shape (not full findings/scores fan-in). Fail-closed
   path unchanged; lower cost.
-- If **K>1**: Opus parent + native Sonnet/Haiku subagents consuming `assignments.json`. Independent
-  Haiku scoring applies only on this path (finder ≠ scorer), per parallel design §3 / §7b.
+- If **K>1**: Opus parent + native Sonnet Task subagents (`osh-*` via `--agents`) consuming
+  `assignments.json`. Independent scoring (`osh-scorer`) applies only on this path (finder ≠
+  scorer), per parallel design §3 / §7b.
 
 Prep always emits the manifest and roster. For **K>1**, topology still collapses by roster size
 inside the Opus parent; for **K=1**, the topology is the collapsed single-session path above (not
@@ -270,7 +272,7 @@ stable enough that fan-out is not the first multiplier on an unfinished baseline
 |---|---|---|
 | **1 — Delta** | Meta marker, baseline resolver, manifest/prompt range wiring, `force-full-review` | Immediate token and wall-clock win on re-runs; works with today’s serial review |
 | **2 — Test-Plan/CI** | CI inventory + items artifacts; findings for gaps; stop checklist ticks | Honest Test Plan signal without waiting on OSH |
-| **3 — OSH fan-out** | Opus parent + Sonnet/Haiku subagents from roster; K=1 collapse; deprecate size-based model routing | Largest stall-surface change; ship after cheaper slices reduce how often / how large full reviews are |
+| **3 — OSH fan-out** | Opus parent + Sonnet Task subagents from roster; K=1 collapse; deprecate size-based model routing | Largest stall-surface change; ship after cheaper slices reduce how often / how large full reviews are |
 
 Follow-up docs (README / plan / short ADR note that checklist tick write-back is retired) land after
 the slices or alongside Slice 2–3 as consumer-facing copy catches up.

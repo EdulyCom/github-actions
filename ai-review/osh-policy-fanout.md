@@ -50,6 +50,16 @@ range is satisfied when coverage workers' `assigned_files` union equals
 `changed_files` (plus targeted neighbor reads when prior findings or imports
 require it).
 
+## Worker failures (fail closed, do not burn turns)
+
+If any Task returns an API/tool error, empty result, or times out:
+
+- **Do not** re-spawn the same worker more than once.
+- Prefer emitting structured output with what you have: lower confidence on
+  uncovered paths, and add a P1 finding that names the failed role(s).
+- Never loop on Bash/gh retries hoping a dead worker recovers — that burns
+  `--max-turns` and yields `error_max_turns` with no Publishable SO.
+
 ## Your job after workers return
 
 Resolve conflicts, prioritize, own intent, map Test Plan↔CI gaps to findings,

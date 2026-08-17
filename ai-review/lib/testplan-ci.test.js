@@ -200,3 +200,56 @@ test("writeTestPlanCiArtifacts writes both JSON shapes", () => {
     { name: "ci / test", conclusion: "success", status: "completed" },
   ]);
 });
+
+test("main: reads env paths and writes Test Plan/CI artifacts", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const { main } = require("./testplan-ci.js");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "testplan-ci-main-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "pr-body.md"),
+      "## Test Plan\n- [ ] Unit tests for parser\n",
+    );
+    fs.writeFileSync(
+      path.join(dir, "check-runs.raw.json"),
+      JSON.stringify([
+        {
+          name: "ci / test",
+          conclusion: "success",
+          status: "completed",
+        },
+      ]),
+    );
+
+    const prev = {
+      AI_REVIEW_DIR: process.env.AI_REVIEW_DIR,
+      PR_BODY_PATH: process.env.PR_BODY_PATH,
+      CHECK_RUNS_PATH: process.env.CHECK_RUNS_PATH,
+    };
+    process.env.AI_REVIEW_DIR = dir;
+    process.env.PR_BODY_PATH = path.join(dir, "pr-body.md");
+    process.env.CHECK_RUNS_PATH = path.join(dir, "check-runs.raw.json");
+    try {
+      main();
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+
+    const plan = JSON.parse(
+      fs.readFileSync(path.join(dir, "test-plan-items.json"), "utf8"),
+    );
+    const ci = JSON.parse(
+      fs.readFileSync(path.join(dir, "ci-checks.json"), "utf8"),
+    );
+    assert.deepEqual(plan.items, ["Unit tests for parser"]);
+    assert.equal(ci.checks.length, 1);
+    assert.equal(ci.checks[0].name, "ci / test");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

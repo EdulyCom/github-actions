@@ -411,7 +411,7 @@ runs:
       # lib/roster.js: which reviewer reads which files, and under which model.
       # Slice 3 (OSH): routing and the review prompt consume `.k` and the role
       # list. K≤1 → single Sonnet session (collapse); K>1 → Opus parent that
-      # fans out native Sonnet/Haiku subagents per the roster. No Node
+      # fans out native Sonnet Task workers per the roster. No Node
       # Promise.race orchestrator — concurrency is Claude Code's scheduler.
       #
       # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
@@ -632,6 +632,10 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        # allowed_non_write_users enables CCA subprocess isolation by
+        # default; that writes an invalid root package.json and breaks
+        # later node requires (Publish/telemetry). Opt out.
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token: this stage only
@@ -760,7 +764,16 @@ runs:
         PR_BODY_PATH=".ai-review/pr-body.md" \
           CHECK_RUNS_PATH=".ai-review/check-runs.raw.json" \
           AI_REVIEW_DIR=".ai-review" \
-          node "${TESTPLAN_CLI}" || true
+          node "${TESTPLAN_CLI}" || {
+            echo "::warning::testplan-ci failed; writing empty Test Plan/CI artifacts so the review can still map coverage"
+            echo '[]' > .ai-review/test-plan-items.json
+            echo '[]' > .ai-review/ci-checks.json
+          }
+        if [ ! -f .ai-review/test-plan-items.json ] || [ ! -f .ai-review/ci-checks.json ]; then
+          echo "::warning::Test Plan/CI artifacts missing after inventory; writing empty stubs"
+          echo '[]' > .ai-review/test-plan-items.json
+          echo '[]' > .ai-review/ci-checks.json
+        fi
 
         if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
           # If any returned check-run has not yet reached "completed"
@@ -788,7 +801,7 @@ runs:
       # exits 1 (upstream flakiness). Don't crash the job — the retry step
       # below re-attempts, and Publish degrades gracefully if both miss.
       #
-      # --max-turns 200 (in claude_args below) was intended as a mechanical
+      # --max-turns 250 (in claude_args below) was intended as a mechanical
       # backstop for rubric.md's Angle C bound. DO NOT TRUST IT AS A CEILING:
       # a measured run (EdulyCom/eduly 31294407787) reported num_turns 208
       # under this cap with subtype "success", and grepping the eight
@@ -828,6 +841,10 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        # allowed_non_write_users enables CCA subprocess isolation by
+        # default; that writes an invalid root package.json and breaks
+        # later node requires (Publish/telemetry). Opt out.
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
@@ -848,7 +865,7 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
-          --max-turns 200
+          --max-turns 250
           --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
           --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
@@ -1027,7 +1044,7 @@ runs:
         exit 0
 
     # Retry blast-radius gate. The retry below re-runs the ENTIRE review at
-    # --max-turns 200 — it is not a cheap re-emit. After a long first attempt
+    # --max-turns 250 — it is not a cheap re-emit. After a long first attempt
     # it cannot finish inside any caller's timeout-minutes, so it only burns
     # tokens until the job is killed: review-stage durations up to 79.5 min
     # were measured, and 32 of 682 jobs died on the caller's clock.
@@ -1118,6 +1135,10 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        # allowed_non_write_users enables CCA subprocess isolation by
+        # default; that writes an invalid root package.json and breaks
+        # later node requires (Publish/telemetry). Opt out.
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
@@ -1206,6 +1227,10 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
+        # allowed_non_write_users enables CCA subprocess isolation by
+        # default; that writes an invalid root package.json and breaks
+        # later node requires (Publish/telemetry). Opt out.
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
@@ -1218,7 +1243,7 @@ runs:
         claude_args: |
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
-          --max-turns 200
+          --max-turns 250
           --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
           --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
