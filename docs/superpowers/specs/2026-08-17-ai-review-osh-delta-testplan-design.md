@@ -46,7 +46,9 @@ This 2026-08-17 document **adds**:
 
 Where the two conflict on product intent, treat this document as the later refinement for delta,
 Test-Plan/CI, and orchestration *delivery*; treat 2026-08-07 as authoritative for scoring vocabulary,
-must-read-all, roster math, and aggregation.
+must-read-all, roster math, and aggregation. **Exception (K=1 collapse):** §5.2 of this document
+overrides parallel design §5’s minimum roster `{R1,H}` — the collapse path is a single Sonnet session
+with no Opus parent and no independent Haiku scorer (see §5.2).
 
 ---
 
@@ -139,17 +141,21 @@ K = clamp(ceil(total_fullfile_bytes / BUDGET), 1, 4)
 Cap remains **K≤4**. Fan-out is an option when the work exceeds one reviewer’s comprehension budget,
 not a fixed pipeline every PR pays for.
 
-**Collapse rule (this design):**
+**Collapse rule (this design — overrides parallel design §5 minimum `{R1,H}`):**
 
 - If the roster / `assignments.json` implies **K=1** (single coverage reviewer holds the whole
-  active-range byte budget): run a **single Sonnet** review session — no Opus parent fan-out. Same
-  artifact contracts and fail-closed path; lower cost.
-- If **K>1**: Opus parent + native Sonnet/Haiku subagents consuming `assignments.json`.
+  active-range byte budget): run a **single Sonnet** review session that emits `--json-schema`
+  structured output directly — **no Opus parent**, **no independent Haiku scorer**. Artifact
+  contracts may match today’s single-session shape (not full findings/scores fan-in). Fail-closed
+  path unchanged; lower cost.
+- If **K>1**: Opus parent + native Sonnet/Haiku subagents consuming `assignments.json`. Independent
+  Haiku scoring applies only on this path (finder ≠ scorer), per parallel design §3 / §7b.
 
-Prep always emits the manifest and roster. Topology collapses by roster size, not by a second
-code-path architecture. Diff-size Sonnet-vs-Opus routing thresholds (`sonnet-files-threshold` /
-`sonnet-churn-threshold`) are deprecated once Slice 3 is live; they may remain accepted for backward
-compatibility until removed in a follow-up.
+Prep always emits the manifest and roster. For **K>1**, topology still collapses by roster size
+inside the Opus parent; for **K=1**, the topology is the collapsed single-session path above (not
+the parallel design’s `{R1,H}` minimum). Diff-size Sonnet-vs-Opus routing thresholds
+(`sonnet-files-threshold` / `sonnet-churn-threshold`) are deprecated once Slice 3 is live; they may
+remain accepted for backward compatibility until removed in a follow-up.
 
 ### 5.3 What this deliberately is not
 
@@ -200,7 +206,7 @@ resolved vs still-open.
 | Missing or unparseable meta | Cannot trust prior HEAD |
 | Prior review inconclusive (`mode` absent / `inconclusive`) | Prior judgment incomplete |
 | Force-push / prior `head_sha` not an ancestor of current HEAD | History rewritten |
-| Base branch SHA change (merge-base moved materially vs meta `base_sha`) | Diff identity changed |
+| Base branch SHA change (current merge-base SHA ≠ meta `base_sha`) | Diff identity changed |
 | Input `force-full-review: true` | Operator override |
 
 Manifest fields (additive; keep existing `base_sha` / `head_sha` as PR merge-base and HEAD for
