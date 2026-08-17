@@ -77,7 +77,8 @@ prompt.)
 7. **Stage QA rubric** — copies the action's own `rubric.md` into the
    workspace so the review can read it with a stable path.
 8. **Post-merge QA review (agentic)** — only runs when an Anthropic
-   credential is configured. Claude (`qa-model`, Sonnet by default) reads the
+   credential is configured. Claude (locked Sonnet primary with
+   Cursor → free fallbacks) reads the
    rubric, inspects the merged diff via `git`, **smoke-tests the deployed app
    over HTTP** (the health URL plus any routes the diff touches), **evaluates
    the PR's Test Plan** if one is present (running each item it can against

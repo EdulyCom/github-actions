@@ -52,12 +52,6 @@ inputs:
       before this action runs.
     required: false
     default: ""
-  qa-model:
-    description: >-
-      Model used for the agentic post-merge QA review. Defaults to Sonnet;
-      override with a repo var if a custom gateway aliases model names.
-    required: false
-    default: claude-sonnet-5
   allowed-tools:
     description: >-
       Tool allowlist passed to the QA review's `--allowedTools`. The default
@@ -308,19 +302,14 @@ runs:
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
-        # --fallback-model: escape hatch for HTTP 529 (Overloaded). Without it
-        # the CLI retries the primary internally with no exit. Measured on the
-        # sibling ai-review action, that backoff ran ~28 min per stage and
-        # produced 85-min jobs that did zero work (turns:3, $0, 0 tool calls).
-        # This action has a single model stage, so the same overload costs it
-        # one long stall rather than three — but it had no exit either.
-        # Neither entry may equal the primary or the fallback is a no-op:
-        # `qa-model` defaults to Sonnet 5, so the list is same-tier first
-        # (Sonnet 4.6), then Opus. The list is ordered and the primary is
-        # re-tried at the start of each turn.
+        # --fallback-model: Claude primary → Cursor if Claude blocked → free
+        # if Cursor blocked. Keep the free tail in sync with ai-review.
+        # Neither entry may equal the primary or the fallback is a no-op.
+        # The list is ordered and the primary is re-tried at the start of
+        # each turn. Does not bound silent gateway stalls (ADR 0005).
         claude_args: |
-          --model ${{ inputs.qa-model }}
-          --fallback-model claude-sonnet-4-6,claude-opus-4-8
+          --model claude/claude-sonnet-5
+          --fallback-model claude/cursor/claude-4.6-sonnet-medium-thinking,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free
           --allowedTools "${{ inputs.allowed-tools }}"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","deploy_status","counts","summary","report_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","medium","high"]},"deploy_status":{"type":"string","enum":["healthy","unhealthy","unknown"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"summary":{"type":"string"},"report_markdown":{"type":"string"},"test_plan":{"type":"object","additionalProperties":false,"required":["present"],"properties":{"present":{"type":"boolean"},"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["passed","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}}}'
         prompt: |
@@ -395,9 +384,25 @@ runs:
         UPDATE_PR_BODY: ${{ inputs.update-pr-body }}
         UPDATE_LINKED_ISSUES: ${{ inputs.update-linked-issues }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        REVIEW_EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+        REPORT_FOOTER_PATH: ${{ github.action_path }}/lib/report-footer.js
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
+          const fs = require('fs');
+          const { formatModelFooter, modelFromExecutionLog } = require(process.env.REPORT_FOOTER_PATH);
+
+          let modelUsed = '';
+          try {
+            const log = JSON.parse(fs.readFileSync(process.env.REVIEW_EXEC_FILE || '', 'utf8'));
+            modelUsed = modelFromExecutionLog(log);
+          } catch {
+            // No execution log (review skipped / missing).
+          }
+          if (!modelUsed && process.env.QA_OUTPUT) {
+            modelUsed = 'claude/claude-sonnet-5';
+          }
+
           const prNumber = Number(process.env.PR_NUMBER);
           const healthOk = process.env.HEALTH_STATUS === 'healthy';
 
@@ -513,6 +518,12 @@ runs:
           if (qaRan && process.env.REVIEW_OUTCOME === 'failure') {
             body.push('');
             body.push('> ⚠️ The QA review step reported a non-zero outcome — the report above may be partial.');
+          }
+
+          const footer = formatModelFooter(modelUsed);
+          if (footer) {
+            body.push('');
+            body.push(footer);
           }
 
           body.push('');
