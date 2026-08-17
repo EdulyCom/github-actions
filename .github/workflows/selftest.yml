@@ -66,6 +66,11 @@ jobs:
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
           anthropic-auth-token: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
+          # Skip collaborator permission API (has been 503ing and aborting
+          # Claude stages before the model runs). Scoped to this PR author,
+          # not "*". Context/Review use read-scoped github.token; Publish
+          # posts with the App token.
+          allowed-non-write-users: eduly-haldarwish
 
   gated-demo:
     needs: [review]
