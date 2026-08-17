@@ -286,6 +286,21 @@ runs:
       run: | # zizmor: ignore[github-env] BASE_URL is this action's own anthropic-base-url input (caller-supplied static config), never attacker-influenceable event data — see ADR-0010's env-binding rule
         echo "ANTHROPIC_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
 
+    # Locked model IDs (not inputs). Keep in sync with ai-review cascade.
+    # Claude primary → Cursor if Claude blocked → free if Cursor blocked.
+    - name: Resolve locked models
+      id: models
+      if: >-
+        steps.merge.outputs.skip != 'true' &&
+        (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "primary=claude/claude-sonnet-5"
+          echo "fallback=claude/cursor/claude-4.6-sonnet-medium-thinking,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
+        } >> "${GITHUB_OUTPUT}"
+
     # Workaround for anthropics/claude-code-action#1294: the action requires
     # *some* value in `anthropic_api_key` even when authenticating to a custom
     # gateway via a bearer token, so fall back to the auth token itself and
@@ -308,8 +323,8 @@ runs:
         # The list is ordered and the primary is re-tried at the start of
         # each turn. Does not bound silent gateway stalls (ADR 0005).
         claude_args: |
-          --model claude/claude-sonnet-5
-          --fallback-model claude/cursor/claude-4.6-sonnet-medium-thinking,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free
+          --model ${{ steps.models.outputs.primary }}
+          --fallback-model ${{ steps.models.outputs.fallback }}
           --allowedTools "${{ inputs.allowed-tools }}"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","deploy_status","counts","summary","report_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","medium","high"]},"deploy_status":{"type":"string","enum":["healthy","unhealthy","unknown"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"summary":{"type":"string"},"report_markdown":{"type":"string"},"test_plan":{"type":"object","additionalProperties":false,"required":["present"],"properties":{"present":{"type":"boolean"},"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["passed","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}}}'
         prompt: |
