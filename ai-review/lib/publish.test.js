@@ -14,6 +14,37 @@ const {
 
 // --- stripLeadingBannerArtifacts --------------------------------------------
 
+test("unescapes literal \\\\n when comment_markdown was double-escaped", () => {
+  // Observed on PR #52 review 4949356509: model/schema path left `\\n` as
+  // two characters, so GitHub rendered the body as one smashed line.
+  const raw =
+    "### P0 — Blockers\\n\\n_None._\\n\\n### P1 — Should Fix\\n\\n_None._\\n\\n### P2 — Nice-to-Have\\n\\n- drift risk";
+  const out = stripLeadingBannerArtifacts(raw);
+  assert.equal(
+    out,
+    [
+      "### P0 — Blockers",
+      "",
+      "_None._",
+      "",
+      "### P1 — Should Fix",
+      "",
+      "_None._",
+      "",
+      "### P2 — Nice-to-Have",
+      "",
+      "- drift risk",
+    ].join("\n")
+  );
+  assert.equal(out.includes("\\n"), false);
+});
+
+test("leaves normal markdown with real newlines alone", () => {
+  const raw = "### P0 — Blockers\n\n_None._\n\nUse `\\\\n` in a code span occasionally.";
+  const out = stripLeadingBannerArtifacts(raw);
+  assert.equal(out, raw);
+});
+
 test("strips a leading verdict token line", () => {
   const out = stripLeadingBannerArtifacts("**✅ PASS**\n\nReal content here.");
   assert.equal(out, "Real content here.");

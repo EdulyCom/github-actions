@@ -13,6 +13,20 @@
 const STATUS_BLOCK_START = "<!-- ai-review-status -->";
 const STATUS_BLOCK_END = "<!-- /ai-review-status -->";
 
+// Some structured-output paths deliver comment_markdown with literal
+// two-character "\n" sequences instead of real newlines (observed on
+// EdulyCom/github-actions#52 review 4949356509). GitHub then renders the
+// findings as one smashed line under the banner. Only rewrite when the
+// literal escapes dominate real newlines so a normal body that mentions
+// `\n` in prose/code is left alone.
+function unescapeLiteralNewlines(markdown) {
+  if (typeof markdown !== "string" || !markdown.includes("\\n")) return markdown;
+  const literal = (markdown.match(/\\n/g) || []).length;
+  const real = (markdown.match(/\n/g) || []).length;
+  if (literal === 0 || literal < real) return markdown;
+  return markdown.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
 // The review-stage prompt instructs the model not to prepend its own
 // verdict token / confidence-merge-risk line / HTML marker to
 // comment_markdown (the caller owns that banner), but model
@@ -21,6 +35,7 @@ const STATUS_BLOCK_END = "<!-- /ai-review-status -->";
 // duplicate the banner above it.
 function stripLeadingBannerArtifacts(markdown) {
   if (!markdown) return markdown;
+  markdown = unescapeLiteralNewlines(markdown);
   const verdictTokenRe = /^\*\*(?:✅ PASS|❌ FAIL)\*\*\s*$/;
   const confidenceLineRe = /^Confidence:\s*\d+\s*·\s*Merge risk:\s*\S+\s*$/i;
   const htmlCommentRe = /^<!--.*-->\s*$/;
@@ -116,6 +131,7 @@ function buildReviewBody({
  */
 function buildInconclusiveBody(salvaged, opts = {}) {
   const modelUsed = opts && opts.modelUsed;
+  salvaged = unescapeLiteralNewlines(salvaged || "");
   return [
     "<!-- ai-review -->",
     "### ⚠️ AI Review — inconclusive (re-run required)",
@@ -224,6 +240,7 @@ function upsertStatusBlock(body, block) {
 }
 
 module.exports = {
+  unescapeLiteralNewlines,
   stripLeadingBannerArtifacts,
   buildReviewBody,
   buildInconclusiveBody,
