@@ -286,10 +286,9 @@ runs:
       run: | # zizmor: ignore[github-env] BASE_URL is this action's own anthropic-base-url input (caller-supplied static config), never attacker-influenceable event data — see ADR-0010's env-binding rule
         echo "ANTHROPIC_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
 
-    # Locked model IDs (not inputs). Keep in sync with ai-review cascade.
-    # Claude primary → Cursor (composer-2.5) if Claude blocked → free.
-    # Do not use claude/cursor/claude-* here: CLI hangs on those IDs (see
-    # ai-review Resolve model routing comment). Cap chain at 3 (CLI limit).
+    # Locked model IDs (not inputs). Keep in sync with ai-review's *schema*
+    # cascade: Claude → structured_output free only (no Cursor — none advertise
+    # structured_output, and --json-schema reviews go inconclusive on them).
     - name: Resolve locked models
       id: models
       if: >-
@@ -300,7 +299,7 @@ runs:
         set -euo pipefail
         {
           echo "primary=claude/claude-sonnet-5"
-          echo "fallback=claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free"
+          echo "fallback=oc/nemotron-3.5-lightning-free,oc/deepseek-v4-flash-free,auto/best-free"
         } >> "${GITHUB_OUTPUT}"
 
     # Workaround for anthropics/claude-code-action#1294: the action requires

@@ -422,20 +422,22 @@ runs:
 
         # Locked model IDs (not inputs). Keep in sync with ai-qa.
         #
-        # Cursor tier MUST be composer-2.5 (or another CLI-proven Cursor ID).
-        # claude/cursor/claude-* IDs accept raw /v1/messages but hang Claude Code
-        # CLI (unrecognized_model → aborted_streaming), so a Claude-off cascade
-        # never reaches free if those IDs are first in --fallback-model.
-        # Claude Code caps fallback chains at 3 entries after dedupe.
+        # Two cascades (Claude Code caps --fallback-model at 3 entries):
+        #   Context (no --json-schema): Claude → composer-2.5 → free.
+        #     composer is CLI-safe; claude/cursor/claude-* hang the CLI.
+        #   Review (has --json-schema): Claude → structured_output free only.
+        #     No Cursor model advertises structured_output on this gateway, and
+        #     Agent SDK docs: a mid-stream model fallback can retract an already
+        #     completed structured_output — landing on composer then yields the
+        #     inconclusive "success but no structured_output" failure mode.
         SONNET="claude/claude-sonnet-5"
         OPUS="claude/claude-opus-5"
         HAIKU="claude/claude-haiku-4-5-20251001"
         CURSOR="claude/cursor/composer-2.5"
-        FREE="oc/nemotron-3.5-lightning-free,auto/best-free"
-        FALLBACK_CHAIN="${CURSOR},${FREE}"
-        SONNET_FALLBACK="${FALLBACK_CHAIN}"
-        OPUS_FALLBACK="${FALLBACK_CHAIN}"
-        HAIKU_FALLBACK="${FALLBACK_CHAIN}"
+        FREE_SO="oc/nemotron-3.5-lightning-free,oc/deepseek-v4-flash-free,auto/best-free"
+        HAIKU_FALLBACK="${CURSOR},oc/nemotron-3.5-lightning-free,auto/best-free"
+        SONNET_FALLBACK="${FREE_SO}"
+        OPUS_FALLBACK="${FREE_SO}"
         export SONNET OPUS HAIKU
 
         # Resolve the review range once, deterministically. `git diff A...B`
@@ -870,11 +872,18 @@ runs:
       if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
+        # Prefer the action output; fall back to the fixed path the pinned
+        # claude-code-action always writes (outputs can be missing when the
+        # step fails on a missing structured_output after logging session_id).
         EXEC_FILE: ${{ steps.review.outputs.execution_file }}
       run: |
         set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
+        CANDIDATE="${EXEC_FILE:-}"
+        if [ -z "${CANDIDATE}" ] || [ ! -s "${CANDIDATE}" ]; then
+          CANDIDATE="${RUNNER_TEMP}/claude-execution-output.json"
+        fi
+        if [ -s "${CANDIDATE}" ]; then
+          cp "${CANDIDATE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
         fi
         exit 0
 
@@ -890,6 +899,11 @@ runs:
     # wins, and its duration_ms is the stage duration. Best-effort — any
     # parse failure leaves retry-ok=true, so this can only ever suppress a
     # retry that is provably too late, never block one on missing data.
+    #
+    # Also recovers session_id for the cheap repair step: when the review
+    # action fails on missing structured_output it may log "Set session_id"
+    # without exporting the output, which previously skipped repair entirely
+    # (observed on run 31997386554) and forced a full re-review.
     - name: Gate the review retry on elapsed review time
       id: retry_budget
       if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -898,14 +912,34 @@ runs:
         # 15 min. A retry starting later than this cannot complete within the
         # 25-min timeout docs/consumer-integration.md recommends.
         RETRY_BUDGET_MS: "900000"
+        REVIEW_SESSION_ID: ${{ steps.review.outputs.session_id }}
       run: |
         set -uo pipefail
         SNAPSHOT="${RUNNER_TEMP}/ai-review-exec-review-snapshot.json"
         RETRY_OK=true
         DURATION_MS=0
+        SESSION_ID="${REVIEW_SESSION_ID:-}"
         if [ -s "${SNAPSHOT}" ]; then
           DURATION_MS="$(jq -r '[.[] | select(.type == "result")] | last | .duration_ms // 0' \
             "${SNAPSHOT}" 2>/dev/null || echo 0)"
+          if [ -z "${SESSION_ID}" ]; then
+            SESSION_ID="$(jq -r '
+              [
+                .[]
+                | select(.type == "system" and .subtype == "init")
+                | .session_id // empty
+              ]
+              | map(select(length > 0))
+              | last // empty
+            ' "${SNAPSHOT}" 2>/dev/null || true)"
+          fi
+          if [ -z "${SESSION_ID}" ]; then
+            SESSION_ID="$(jq -r '
+              [.[] | select(.type == "result") | .session_id // empty]
+              | map(select(length > 0))
+              | last // empty
+            ' "${SNAPSHOT}" 2>/dev/null || true)"
+          fi
         fi
         case "${DURATION_MS}" in
           ''|*[!0-9]*) DURATION_MS=0 ;;
@@ -914,9 +948,13 @@ runs:
           RETRY_OK=false
           echo "::warning::Review stage ran ${DURATION_MS}ms (>= ${RETRY_BUDGET_MS}ms budget); skipping the full-review retry, which could not finish inside the caller's timeout."
         fi
+        if [ -z "${SESSION_ID}" ]; then
+          echo "::warning::No review session_id in step outputs or execution snapshot; structured-output repair will be skipped."
+        fi
         {
           echo "retry-ok=${RETRY_OK}"
           echo "review-duration-ms=${DURATION_MS}"
+          echo "session_id=${SESSION_ID}"
         } >> "${GITHUB_OUTPUT}"
         exit 0
 
@@ -935,7 +973,7 @@ runs:
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
         steps.review.outputs.structured_output == '' &&
-        steps.review.outputs.session_id != ''
+        steps.retry_budget.outputs.session_id != ''
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
@@ -946,7 +984,7 @@ runs:
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
         claude_args: |
-          --resume ${{ steps.review.outputs.session_id }}
+          --resume ${{ steps.retry_budget.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --allowedTools "Read"

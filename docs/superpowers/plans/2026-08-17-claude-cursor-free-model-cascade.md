@@ -88,11 +88,14 @@ Do **not** add `oc/big-pickle` while billing is unknown (not labeled free in the
 | Action / role | Primary | `--fallback-model` (ordered) |
 | --- | --- | --- |
 | ai-review context | `claude/claude-haiku-4-5-20251001` | `claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free` |
-| ai-review review (tiny) | `claude/claude-sonnet-5` | same Cursor→free chain (CLI max 3) |
-| ai-review review (large) | `claude/claude-opus-5` | same Cursor→free chain (CLI max 3) |
-| ai-qa review | `claude/claude-sonnet-5` | same Cursor→free chain (CLI max 3) |
+| ai-review review (tiny) | `claude/claude-sonnet-5` | `oc/nemotron-3.5-lightning-free,oc/deepseek-v4-flash-free,auto/best-free` (SO free only) |
+| ai-review review (large) | `claude/claude-opus-5` | same SO free chain |
+| ai-qa review | `claude/claude-sonnet-5` | same SO free chain |
 
-> **Do not** put `claude/cursor/claude-*` in `--fallback-model`: raw `/v1/messages` may 200, but Claude Code CLI hangs (`unrecognized_model` → `aborted_streaming`) and never reaches free. Use `composer-2.5` as the Cursor tier.
+> **Do not** put `claude/cursor/claude-*` in `--fallback-model`: raw `/v1/messages` may 200, but Claude Code CLI hangs (`unrecognized_model` → `aborted_streaming`).
+> **Do not** put Cursor (including `composer-2.5`) on `--json-schema` review/QA stages: no Cursor ID advertises `structured_output` on this gateway, and Agent SDK docs note a mid-stream fallback can retract structured output — that is the inconclusive path.
+> Context (no schema) may still use `composer-2.5` as the Cursor tier.
+
 
 Comment footer copy (**successful** reviews / QA comments only):
 

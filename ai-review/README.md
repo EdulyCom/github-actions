@@ -11,8 +11,9 @@ The verdict comes from a real two-stage AI review: a Haiku context stage
 summarizes the diff, then a diff-size-routed Sonnet/Opus review stage
 performs the full rubric scan (see `ai-review/rubric.md`) and returns a
 schema-validated structured result. Model IDs are **locked in the action**
-(Claude primary → Cursor `composer-2.5` if Claude is blocked → OpenCode free /
-`auto/best-free`; Claude Code caps the fallback chain at 3). The posted PR review footer names the model that
+(Claude primary → for context, Cursor `composer-2.5` then free; for schema
+reviews, structured_output free models only — Cursor has no SO on this
+gateway). The posted PR review footer names the model that
 actually ran and hints to re-run the job for another pass. The `Publish review`
 step never trusts
 the model's self-reported verdict directly — it deterministically
