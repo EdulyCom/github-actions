@@ -1,6 +1,6 @@
 # `ai-review` OSH + delta + Test-Plan/CI — design
 
-**Status:** approved shape, not yet implemented. Sequencing in §8 governs how it lands.
+**Status:** approved shape; Slices 1–2 landed; Slice 3 (OSH fan-out) landing on this branch.
 **Extends:** [`2026-08-07-ai-review-parallel-review-design.md`](./2026-08-07-ai-review-parallel-review-design.md)
 (parallel OSH / coverage–coherence / rubric scoring). This document does **not** supersede that
 design’s §1 binding constraints or its scoring/`recompute.js` contract.
@@ -348,3 +348,53 @@ This design is complete when:
 - Non-goals explicitly exclude test execution, separate stage orchestrators, and fixing #43 here.
 - Ship order is Slice 1 delta → Slice 2 test-plan/CI → Slice 3 OSH, with K≤4 collapse at K=1.
 - `recompute.js`, fail-closed Publish, and SO-free cascade for schema stages remain in force.
+
+---
+
+## Appendix A — Opus parent prompt contract (Slice 3)
+
+Frozen for the live `claude-code-action` parent session when fan-out is active.
+Prep still emits `.ai-review/assignments.json`; the parent **must** consume that roster
+and must not invent a second partition.
+
+### Locked model IDs (action-level; keep in sync with `ai-review` / `ai-qa`)
+
+| Tier | Primary ID used in action / roster |
+|---|---|
+| Opus (parent / intent tier) | `claude/claude-opus-5` |
+| Sonnet (coverage + tracer) | `claude/claude-sonnet-5` |
+| Haiku (history + independent scorer) | `claude/claude-haiku-4-5-20251001` |
+
+Subagents use the `model` field on each role in `assignments.json` (same strings). Cap remains
+**K ≤ 4** coverage reviewers (`roster.js` `MAX_K`).
+
+### Fan-out path (`assignments.json` `.k` > 1)
+
+1. Parent session `--model` is Opus. Only this session may use `--json-schema` / emit
+   structured output for Publish.
+2. Read `.ai-review/assignments.json`. Spawn native Claude Code **Task/Agent** subagents:
+   - **Sonnet** for each `reviewer-*` (coverage) and for `tracer` (coherence).
+   - **Haiku** for `history` and for `scorer` (independent confidence / `severity_confirmed`).
+   - **Intent** (`kind: frame`): Opus owns it (parent may run it itself or dispatch an Opus-tier
+     subagent). Keep intent isolated from coverage analysis.
+3. Workers may write freeform or JSON under `.ai-review/` (e.g. `findings/<role>.json`,
+   `scores.json`). They must **not** emit the Publish `--json-schema` blob.
+4. Opus **must not** exhaustively re-read every file workers already covered unless conflict
+   resolution or a spot-check needs it. Must-read-all for the active range is satisfied by the
+   coverage workers' union of `assigned_files` (plus tracer / neighbor expansion rules).
+5. Parent aggregates worker outputs into the schema contract (`comment_markdown`, `findings`,
+   `counts`, `intent`, etc.). Publish continues to consume **parent structured output** (same
+   fail-closed gate as today); multi-file `aggregate.js` remains shadow/non-gating until a
+   follow-up wires it live.
+
+### Collapse path (`assignments.json` `.k` ≤ 1, including empty-diff `k: 0`)
+
+- Single **Sonnet** session with `--json-schema` — **no** Opus parent, **no** independent Haiku
+  scorer, **no** subagent fan-out instructions.
+- Artifact / SO shape may match today's serial review. Fail-closed path unchanged.
+
+### Routing note
+
+Once Slice 3 is live, model selection is **roster K**, not `sonnet-files-threshold` /
+`sonnet-churn-threshold`. Those inputs remain accepted for backward compatibility but do not
+choose the review model.

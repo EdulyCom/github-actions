@@ -9,9 +9,9 @@ description: >
   job output rather than an identity-pinned Check Run, and why the review
   identity is cosmetic. The verdict is produced by a real two-stage AI
   review pipeline: a Haiku context stage summarizes the diff, then a
-  diff-size-routed Sonnet/Opus review stage performs the full rubric scan
-  and returns a schema-validated result that a deterministic step
-  recomputes the pass/fail decision from.
+  roster-K-routed Sonnet (collapse) or Opus (OSH fan-out) review stage
+  performs the full rubric scan and returns a schema-validated result that
+  a deterministic step recomputes the pass/fail decision from.
 
 inputs:
   app-id:
@@ -96,24 +96,18 @@ inputs:
     default: "90"
   sonnet-files-threshold:
     description: >
-      Max changed-file count for a diff to still be considered "tiny" and
-      routed to the locked Sonnet primary. A diff qualifies for Sonnet only when it
-      is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to the locked Opus primary. Widened to 25 (from 15) — measured over
-      682 review jobs, 89% of all traffic routed to Opus, and Opus runs cost
-      3x the wall-clock (28.1 min median vs 9.2) and 4x the spend ($13.22 vs
-      $3.27) of Sonnet ones. This is NOT a depth concession: the parallel
-      design puts every coverage reviewer on Sonnet under the approved OSH
-      tiering, so widening early previews that end state. Both thresholds go
-      away entirely once the review stage fans out.
+      DEPRECATED — accepted for backward compatibility but ignored for model
+      routing. Review model selection uses roster K from
+      `.ai-review/assignments.json` (K≤1 → Sonnet collapse; K>1 → Opus OSH
+      parent). Formerly: max changed-file count for Sonnet when paired with
+      `sonnet-churn-threshold`.
     required: false
     default: "25"
   sonnet-churn-threshold:
     description: >
-      Max changed-line count (additions + deletions) for a diff to still
-      be considered "tiny" and routed to the locked Sonnet primary. Applied together
-      with `sonnet-files-threshold` (both must hold for Sonnet). Widened to
-      800 alongside `sonnet-files-threshold` — see the note there.
+      DEPRECATED — accepted for backward compatibility but ignored for model
+      routing. See `sonnet-files-threshold`. Formerly: max changed-line count
+      (additions + deletions) for Sonnet when paired with that input.
     required: false
     default: "800"
   enable-context-stage:
@@ -403,11 +397,10 @@ runs:
       #
       # It also emits `.ai-review/assignments.json` — the review roster from
       # lib/roster.js: which reviewer reads which files, and under which model.
-      # NOTHING CONSUMES IT YET; the review below is still one serial session.
-      # It ships now, and best-effort, so the partition it asserts (bins
-      # pairwise disjoint, union equal to changed_files) is exercised on real
-      # diffs across every consumer before a model stage depends on it. Same
-      # shadow-mode discipline the aggregation step shipped under.
+      # Slice 3 (OSH): routing and the review prompt consume `.k` and the role
+      # list. K≤1 → single Sonnet session (collapse); K>1 → Opus parent that
+      # fans out native Sonnet/Haiku subagents per the roster. No Node
+      # Promise.race orchestrator — concurrency is Claude Code's scheduler.
       #
       # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
       # this step only runs git and hands stdout over. Nothing here is
@@ -418,8 +411,7 @@ runs:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
         # Locked at action level — keep in sync with ai-qa cascade comments.
         # Claude primary → Cursor if Claude blocked → free if Cursor blocked.
-        FILES_MAX: ${{ inputs.sonnet-files-threshold }}
-        CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
+        # sonnet-*-threshold inputs are deprecated for routing (kept unused).
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
         DELTA_CLI: ${{ github.action_path }}/lib/write-delta.js
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
@@ -499,37 +491,105 @@ runs:
 
         FILES="$(jq -r '.file_count' .ai-review/manifest.json)"
         CHURN="$(jq -r '.churn' .ai-review/manifest.json)"
+        # Roster K drives OSH topology (spec §5.2 / Appendix A). Not file/churn
+        # thresholds — those inputs are deprecated for model selection.
+        K="$(jq -r '.k // 0' .ai-review/assignments.json)"
+        K="${K:-0}"
 
-        # Sonnet for ordinary diffs; Opus once a diff exceeds EITHER
-        # threshold. 7168977 narrowed the Sonnet band from 15/400 to 3/60,
-        # which routed nearly every real PR to Opus and took the review
-        # stage from ~10-13 min to a 35-min median (59-min max, jobs killed
-        # at callers' 60-min cap). Every consumer picked that up at once
-        # because they track this action at @main.
-        #
-        # Widened 15/400 -> 25/800. Measured across 682 review jobs in 7
-        # consumer repos: 89% of ALL traffic still routed to Opus at 15/400,
-        # and Opus runs cost 3x the wall-clock (28.1 min median vs 9.2) and
-        # 4x the spend ($13.22 vs $3.27) of Sonnet ones.
-        #
-        # This is NOT a depth concession. The approved parallel design puts
-        # every coverage reviewer on Sonnet under the OSH tiering, so this
-        # previews the agreed end state rather than deviating from it.
-        # Still a STOPGAP: the real fix is reviewing in parallel rather than
-        # in series, and BOTH thresholds are deleted when the review stage
-        # fans out. Not the long-term answer.
-        FILES_MAX="${FILES_MAX:-25}"
-        CHURN_MAX="${CHURN_MAX:-800}"
-        if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
+        # K≤1 (including empty-diff k:0): single Sonnet session emits
+        # --json-schema directly — no Opus parent, no Haiku scorer.
+        # K>1: Opus parent + native Sonnet/Haiku subagents; only Opus emits SO.
+        if [ "${K}" -le 1 ]; then
           MODEL="${SONNET}"
           FALLBACK="${SONNET_FALLBACK}"
+          OSH_MODE="collapse"
         else
           MODEL="${OPUS}"
           FALLBACK="${OPUS_FALLBACK}"
+          OSH_MODE="fanout"
         fi
+        echo "prep: osh-mode=${OSH_MODE} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
+
+        # Policy file the review/retry prompts must obey (keeps one shared
+        # prompt body with mode-specific orchestration rules).
+        if [ "${OSH_MODE}" = "fanout" ]; then
+          cat > .ai-review/osh-policy.md <<'EOF'
+# OSH fan-out policy (K>1)
+
+You are the **Opus parent** for this review. Only YOU emit the required
+`--json-schema` structured output for Publish. Do not ask subagents to emit
+that schema blob.
+
+## Roster
+
+Read `.ai-review/assignments.json` first. Honor its partition: do not invent
+a second file split. Cap is K≤4 coverage reviewers.
+
+Locked model IDs (match `roles[].model` when spawning):
+
+- Opus parent / intent: `claude/claude-opus-5`
+- Sonnet coverage + tracer: `claude/claude-sonnet-5`
+- Haiku history + scorer: `claude/claude-haiku-4-5-20251001`
+
+## Subagents (native Claude Code Task/Agent tool)
+
+Spawn concurrent subagents:
+
+1. **Sonnet** — one per `reviewer-*` (`kind: coverage`): read 100% of every
+   `assigned_files` path with `Read`; run per-file rubric angles; propose
+   findings with P0–P3 severity. Write JSON to the role's `artifact` path
+   under `.ai-review/` when useful.
+2. **Sonnet** — `tracer` (`kind: coherence`): zero assigned files; follow
+   `symbol_manifest` / `split_clusters` for cross-file breakage (Angle C).
+3. **Haiku** — `history` (`kind: perspective`): git blame / prior comments /
+   code-comment angles; cheap gathers, not full-file exhaustiveness.
+4. **Haiku** — `scorer` (`kind: scoring`): independent confidence 0/25/50/75/100
+   and `severity_confirmed` for findings you (or workers) raised. Finder ≠
+   scorer. Prefer writing `.ai-review/scores.json`.
+5. **Intent** (`kind: frame`): you own Angle H (or dispatch an Opus-tier
+   subagent). Frame from linked issues + PR body **before** treating coverage
+   findings as settled.
+
+Workers return freeform or JSON under `.ai-review/`; they must not emit
+Publish structured output.
+
+## What you must not re-read
+
+Do **not** exhaustively re-read every file workers already covered unless
+conflict resolution or a spot-check needs it. Must-read-all for the active
+range is satisfied when coverage workers' `assigned_files` union equals
+`changed_files` (plus targeted neighbor reads when prior findings or imports
+require it).
+
+## Your job after workers return
+
+Resolve conflicts, prioritize, own intent, map Test Plan↔CI gaps to findings,
+apply delta prior-review carry-forward rules, then emit the single structured
+output (`comment_markdown`, `findings`, `files_reviewed`, `counts`, `intent`,
+…). Aggregate worker outputs yourself into that schema — Publish gates on your
+SO only.
+EOF
+        else
+          cat > .ai-review/osh-policy.md <<'EOF'
+# OSH collapse policy (K≤1)
+
+You are a **single Sonnet** reviewer session. Emit `--json-schema` structured
+output directly.
+
+- Do **not** spawn Task/Agent subagents for coverage / scorer / history fan-out.
+- Do **not** expect an Opus parent or an independent Haiku scorer on this path.
+- Read the COMPLETE contents of every file in `manifest.json` `changed_files`
+  with `Read` — never sample, truncate, or reason from diff hunks alone.
+- Perform the full rubric review yourself (all angles that apply), including
+  intent, Test Plan↔CI findings, and delta carry-forward when present.
+EOF
+        fi
+
         {
           echo "files=${FILES}"
           echo "churn=${CHURN}"
+          echo "k=${K}"
+          echo "osh-mode=${OSH_MODE}"
           echo "model=${MODEL}"
           echo "fallback-model=${FALLBACK}"
           echo "haiku-model=${HAIKU}"
@@ -793,6 +853,7 @@ runs:
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token, for the same
@@ -808,7 +869,7 @@ runs:
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "Read,Grep,Glob,Write,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -820,11 +881,20 @@ runs:
           command you ran and its actual output/exit code. If you assert a
           check passed, you must have run it and read the result this session.
 
+          Read `.ai-review/osh-policy.md` FIRST and obey it. Prep set
+          `OSH_MODE` (`collapse` or `fanout`) to match that file:
+          - collapse: single-session Sonnet review; no subagent fan-out.
+          - fanout: you are the Opus parent; spawn Sonnet/Haiku Task
+            subagents per `.ai-review/assignments.json`; only YOU emit
+            structured output. Workers may Write under `.ai-review/`.
+
           Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
           first, then line-by-line diff, removed-behavior audit, cross-file
           tracing, reuse, simplification, efficiency, altitude), a severity
-          scale (P0-P3), and a full review checklist. Follow it.
+          scale (P0-P3), and a full review checklist. Follow it — under
+          fanout, coverage/coherence/scoring work is delegated per
+          osh-policy.md while you still own the final judgment.
 
           The PR number is available in the `PR_NUMBER` environment variable.
           Run `gh pr view "$PR_NUMBER" --json title,body,url,number` to read
@@ -845,13 +915,13 @@ runs:
           context-gathering stage) for a summary of what changed and its
           callers/callees/related helpers.
 
-          Read `.ai-review/manifest.json` FIRST. A prior deterministic step
-          already resolved the review range and staged the facts you would
-          otherwise re-derive: `base_sha` and `head_sha` (PR merge-base and
-          HEAD for telemetry), `review_mode` (`full` or `delta`),
-          `delta_base_sha` when mode is delta (the prior published review
-          HEAD — the start of this run's active range), `changed_files`
-          (the authoritative list for the active range only),
+          Read `.ai-review/manifest.json` FIRST (after osh-policy). A prior
+          deterministic step already resolved the review range and staged the
+          facts you would otherwise re-derive: `base_sha` and `head_sha` (PR
+          merge-base and HEAD for telemetry), `review_mode` (`full` or
+          `delta`), `delta_base_sha` when mode is delta (the prior published
+          review HEAD — the start of this run's active range),
+          `changed_files` (the authoritative list for the active range only),
           `symbol_manifest` (declarations touched by the diff), plus
           `title_ok`, `has_test_change` and `no_tests_for_changed_logic`.
 
@@ -871,17 +941,19 @@ runs:
           finding or an import requires it — that is targeted expansion,
           not a second full-PR read.
 
-          Read the COMPLETE contents of every file in `changed_files` with
-          `Read` — never sample, truncate, or reason from the diff hunks alone.
-          There is no size cap on changed files; large files are why this diff
-          was routed to the stronger model. `changed_files` is the coverage
-          contract: every entry gets read in full. For callers/callees outside
-          the diff (Angle C), start from `symbol_manifest` and follow the
-          rubric's risk-based bound instead of reading every call site in
-          full — that angle has no natural stopping point and is the one place
-          exhaustiveness is not the goal.
+          Must-read-all for the active range: under **collapse**, YOU read
+          the COMPLETE contents of every file in `changed_files` with `Read`
+          — never sample, truncate, or reason from the diff hunks alone.
+          Under **fanout**, coverage subagents satisfy that contract for
+          their `assigned_files`; you do not re-read every file unless
+          osh-policy conflict resolution needs a spot check. For
+          callers/callees outside the diff (Angle C), start from
+          `symbol_manifest` and follow the rubric's risk-based bound (or the
+          tracer role under fanout) — that angle has no natural stopping
+          point and is the one place exhaustiveness is not the goal.
 
-          Perform the full 8-angle scan from the rubric against the diff.
+          Perform the full 8-angle scan from the rubric against the diff
+          (directly under collapse; via roster roles under fanout).
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
           the rubric's severity definitions, and count them.
 
@@ -927,10 +999,12 @@ runs:
           structured output as well. `findings` is one entry per finding you
           report, with your own confidence 0/25/50/75/100 and, where you would
           reclassify it, `severity_confirmed`. `files_reviewed` lists every file
-          you read in full — it is cross-checked against the staged manifest, so
-          a short list reads as incomplete coverage. A later non-gating step
-          aggregates these deterministically and compares the result against
-          your own `counts`; they do not affect this run's verdict.
+          read in full for the active range (yours under collapse; union of
+          coverage workers under fanout) — it is cross-checked against the
+          staged manifest, so a short list reads as incomplete coverage. A
+          later non-gating step aggregates these deterministically and
+          compares the result against your own `counts`; they do not affect
+          this run's verdict.
 
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
@@ -1144,6 +1218,7 @@ runs:
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
@@ -1154,21 +1229,27 @@ runs:
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "Read,Grep,Glob,Write,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
           ended without returning the required structured output. Emitting the
           structured output as your FINAL action is mandatory this time.
 
+          Read `.ai-review/osh-policy.md` and obey it (`OSH_MODE` is
+          `collapse` or `fanout`). Under fanout you are the Opus parent —
+          spawn Sonnet/Haiku Task subagents per `.ai-review/assignments.json`;
+          only YOU emit structured output. Under collapse, do not fan out.
+
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
           report, with your own confidence 0/25/50/75/100 and, where you would
           reclassify it, `severity_confirmed`. `files_reviewed` lists every file
-          you read in full — it is cross-checked against the staged manifest, so
-          a short list reads as incomplete coverage. A later non-gating step
-          aggregates these deterministically and compares the result against
-          your own `counts`; they do not affect this run's verdict.
+          read in full for the active range — it is cross-checked against the
+          staged manifest, so a short list reads as incomplete coverage. A
+          later non-gating step aggregates these deterministically and compares
+          the result against your own `counts`; they do not affect this run's
+          verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + review checklist) and `context.md` at the repo root
@@ -1189,17 +1270,20 @@ runs:
           Test Plan items become normal `findings[]` (P0–P3 via the rubric);
           leave `checklist` empty — Publish does not tick PR-body boxes.
           Attempt to load `/verification-before-completion` and
-          `/requesting-code-review` (best-effort). Read complete file contents,
-          never just the diff hunks. Do NOT run tests or probe for a
-          toolchain — set `test_execution: "skipped"` (you have no shell
-          access to a test runner). You MAY populate `verification_evidence`
-          when you have real command output; omit it if you cannot.
+          `/requesting-code-review` (best-effort). Under collapse, read
+          complete file contents (never just diff hunks). Under fanout,
+          coverage workers do that for assigned paths. Do NOT run tests or
+          probe for a toolchain — set `test_execution: "skipped"` (you have
+          no shell access to a test runner). You MAY populate
+          `verification_evidence` when you have real command output; omit it
+          if you cannot.
 
-          Perform the full review per the rubric, then write `comment_markdown`
-          (findings grouped by severity P0-P3 with "_None._" for empty sections,
-          plus strengths; no leading verdict token / confidence line / HTML
-          marker — the caller prepends its own banner). `counts` must be
-          accurate; a deterministic step recomputes the pass/fail decision.
+          Perform the full review per the rubric (and osh-policy), then write
+          `comment_markdown` (findings grouped by severity P0-P3 with
+          "_None._" for empty sections, plus strengths; no leading verdict
+          token / confidence line / HTML marker — the caller prepends its own
+          banner). `counts` must be accurate; a deterministic step recomputes
+          the pass/fail decision.
 
           Return your assessment via the required structured output schema. Do
           NOT end your turn without emitting the structured output.
@@ -1481,6 +1565,13 @@ runs:
 
     # Shadow aggregation — OBSERVATION ONLY, gates nothing.
     #
+    # Publish still consumes parent/collapsed-session structured_output (same
+    # as today) for both osh-mode=collapse and fanout. Under fanout the Opus
+    # parent is prompted to gather worker artifacts into that SO; we do NOT
+    # wire multi-role findings files into the live gate yet — avoiding a
+    # half-broken aggregate path. This step still derives review-serial from
+    # the SO and compares aggregate.js in shadow only.
+    #
     # PR-C's plan is to replace structured_output with findings files on disk
     # and delete the repair/back-off/retry/salvage chain. That is the first
     # change in this migration that can wrongly BLOCK a developer's PR, and it
@@ -1490,7 +1581,9 @@ runs:
     # This step runs the new deterministic aggregation next to the live path
     # and records whether the two agree. It reads the files the Derive step
     # above produces from the schema-validated structured output (the model
-    # holds no Write grant — see that step's comment), runs lib/aggregate.js, feeds the result through the
+    # holds no Write grant on the collapse path for gate inputs — see that
+    # step's comment; fanout may Write worker JSON under `.ai-review/` for
+    # the parent to read), runs lib/aggregate.js, feeds the result through the
     # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
     # is a warning in the log and a row in the job summary.
     #

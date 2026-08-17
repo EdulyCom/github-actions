@@ -8,9 +8,10 @@ workflow can gate its own heavier build/test/deploy jobs on
 `verdict == 'pass'`.
 
 The verdict comes from a real two-stage AI review: a Haiku context stage
-summarizes the diff, then a diff-size-routed Sonnet/Opus review stage
-performs the full rubric scan (see `ai-review/rubric.md`) and returns a
-schema-validated structured result. Model IDs are **locked in the action**
+summarizes the diff, then a roster-K-routed Sonnet (collapse) or Opus
+(OSH fan-out) review stage performs the full rubric scan (see
+`ai-review/rubric.md`) and returns a schema-validated structured result.
+Model IDs are **locked in the action**
 (Claude primary → for context, Cursor `composer-2.5` then free; for schema
 reviews, structured_output free models only — Cursor has no SO on this
 gateway). The posted PR review footer names the model that
@@ -70,16 +71,13 @@ injection-safety rule.
    model turns — a model that derives the diff base from a false premise
    reviews the wrong range and reports confidently on it.
 
-   The same step routes ordinary diffs to the locked Sonnet primary
-   (`claude/claude-sonnet-5`), escalating to Opus (`claude/claude-opus-5`)
-   once a diff exceeds **either** `sonnet-files-threshold`
-   (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
-   sent nearly every real PR to Opus and moved the review stage from
-   ~10-13 min to a 35-min median. Widened 15/400 → 25/800 after measuring
-   682 review jobs across the consumer repos: 89% of all traffic still
-   routed to Opus, and Opus runs cost 3x the wall-clock and 4x the spend of
-   Sonnet ones. Still a **stopgap** — the real fix is reviewing in parallel
-   rather than in series, and both thresholds are removed once that lands.
+   The same step routes by roster **K** from `.ai-review/assignments.json`
+   (not file/churn size): **K≤1** → locked Sonnet (`claude/claude-sonnet-5`)
+   collapse — one session emits `--json-schema` directly; **K>1** → locked
+   Opus (`claude/claude-opus-5`) parent that fans out native Sonnet/Haiku
+   subagents per the roster (only the parent emits structured output).
+   Inputs `sonnet-files-threshold` / `sonnet-churn-threshold` remain accepted
+   for backward compatibility but are **deprecated for model routing**.
 
    It also writes `.ai-review/assignments.json`: the review roster —
    related changed files clustered, then packed into
@@ -94,11 +92,8 @@ injection-safety rule.
    independent of total bytes, and a cluster exceeding *either* budget is
    split at file boundaries (never inside a file — there is no byte-range
    field in the schema) with the affected paths recorded in
-   `split_clusters` for the tracer. **Nothing reads it yet** — the review
-   below is still one serial session. It ships early, and best-effort, so
-   the partition it asserts (bins pairwise disjoint, no stray path, union
-   equal to `changed_files`) is exercised on real diffs before any model
-   stage depends on it.
+   `split_clusters` for the tracer. Prep writes `.ai-review/osh-policy.md`
+   (`collapse` vs `fanout`) for the review prompt. Cap remains **K≤4**.
 
    The emitted `k` is how many coverage reviewers actually exist —
    `min(formula, piece count after splitting)`, and `0` on an empty diff —
@@ -132,7 +127,9 @@ injection-safety rule.
    `.ai-review/scores.json`. Each role states its own path in `artifact`,
    and `findings_roles` is the pre-filtered list to hand aggregation as its
    `roster` — passing all of `roles[]` would demand a findings file from
-   the scorer and fail every run.
+   the scorer and fail every run. Publish still gates on the parent (or
+   collapsed Sonnet) structured output; multi-role `aggregate.js` remains
+   shadow/non-gating.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
@@ -218,8 +215,8 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
-| `sonnet-files-threshold` | Max changed-file count for a diff to still route to the locked Sonnet primary (must hold together with `sonnet-churn-threshold`); larger diffs route to Opus. | No | `25` |
-| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to Sonnet. | No | `800` |
+| `sonnet-files-threshold` | **DEPRECATED** — accepted but ignored for model routing. Roster K selects Sonnet collapse vs Opus fan-out. | No | `25` |
+| `sonnet-churn-threshold` | **DEPRECATED** — accepted but ignored for model routing. Same as above. | No | `800` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
@@ -253,6 +250,19 @@ The model maps items to CI coverage; uncovered or weakly covered items become
 normal `findings[]` with severity P0–P3 via the rubric (then `recompute.js`).
 Checklist tick write-back is retired (`update-pr-body` is a no-op for that
 path). `test_execution` stays `"skipped"` — no test runners in the allowlist.
+
+## OSH routing (roster K)
+
+Prep packs the active-range files into coverage bins and writes
+`.ai-review/assignments.json` with `.k`:
+
+| K | Mode (`osh-mode`) | Review session |
+| --- | --- | --- |
+| ≤1 (incl. empty-diff `0`) | `collapse` | Single Sonnet + `--json-schema` (no Opus parent, no Haiku scorer) |
+| >1 (max 4) | `fanout` | Opus parent + native Sonnet/Haiku Task subagents; only Opus emits SO |
+
+Publish still gates on that session's structured output. Multi-role
+`aggregate.js` stays shadow/non-gating.
 
 ## Outputs
 
