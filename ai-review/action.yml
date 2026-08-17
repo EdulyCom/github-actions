@@ -198,11 +198,10 @@ inputs:
     required: false
   update-pr-body:
     description: >
-      When 'true' (default), the Publish step ticks verified checklist
-      boxes (`- [ ]` → `- [x]`) in the PR description in place and
-      maintains a managed `<!-- ai-review-status -->` block with per-item
-      verification evidence. It never unchecks a human-checked box. Set to
-      'false' to leave the PR body untouched.
+      Accepted for compatibility. Checklist tick / status-block write-back
+      is retired — Test Plan gaps become findings vs CI inventory instead.
+      The input is a no-op either way; PR body checkboxes are never ticked
+      or unticked by this action.
     required: false
     default: "true"
   update-linked-issues:
@@ -683,40 +682,64 @@ runs:
         echo "--- context.md preview (first 20 lines) ---"
         head -n 20 context.md
 
-    - name: CI signal (re-review only)
+    - name: CI inventory and signal
       id: ci-signal
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
-        EVENT_NAME: ${{ github.event_name }}
         REPO: ${{ github.repository }}
         HEAD_SHA: ${{ steps.pr-state.outputs.head-sha }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        TESTPLAN_CLI: ${{ github.action_path }}/lib/testplan-ci.js
       run: |
         # Best-effort only — this step must never hard-fail the job, so it
-        # deliberately omits `set -e`. A normal pull_request run is the
-        # *first* CI job: no required check has a completed conclusion yet,
-        # so a real CI signal only exists on a manual workflow_dispatch
-        # re-review, after CI has already run once.
+        # deliberately omits `set -e`. Inventories check runs on every PR
+        # event (not only workflow_dispatch) into .ai-review/ci-checks.json
+        # and parses the PR Test Plan into .ai-review/test-plan-items.json
+        # for the review prompt. Aggregate pass/fail SIGNAL still requires
+        # every returned check to be completed — a first pull_request run
+        # usually yields no_ci while sibling jobs are still in progress.
         set -uo pipefail
+        mkdir -p .ai-review
         SIGNAL="no_ci"
-        if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-          CHECK_RUNS="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '.check_runs' 2>/dev/null)"
-          if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
-            # If any returned check-run has not yet reached "completed"
-            # (queued/in_progress), the signal is inconclusive — never guess
-            # a pass/fail from a partial subset of still-running checks.
-            if echo "${CHECK_RUNS}" | jq -e 'any(.[]; .status != "completed")' >/dev/null 2>&1; then
-              SIGNAL="no_ci"
-            else
-              CONCLUSIONS="$(echo "${CHECK_RUNS}" | jq '[.[] | .conclusion]')"
-              if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
-                SIGNAL="timeout"
-              elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
-                SIGNAL="fail"
-              elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
-                SIGNAL="pass"
-              fi
+        CHECK_RUNS='[]'
+
+        if RAW="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/check-runs" 2>/dev/null)"; then
+          MERGED="$(printf '%s' "${RAW}" | jq -s '[.[].check_runs // [] | .[]]' 2>/dev/null || true)"
+          if [ -n "${MERGED}" ] && [ "${MERGED}" != "null" ]; then
+            CHECK_RUNS="${MERGED}"
+          fi
+        fi
+        printf '%s\n' "${CHECK_RUNS}" > .ai-review/check-runs.raw.json
+
+        PR_BODY=""
+        if [ -n "${PR_NUMBER:-}" ]; then
+          PR_BODY="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json body --jq '.body // ""' 2>/dev/null || true)"
+        fi
+        # Written to a file (never env): PR bodies can contain newlines and
+        # attacker-influenceable text.
+        printf '%s' "${PR_BODY}" > .ai-review/pr-body.md
+
+        PR_BODY_PATH=".ai-review/pr-body.md" \
+          CHECK_RUNS_PATH=".ai-review/check-runs.raw.json" \
+          AI_REVIEW_DIR=".ai-review" \
+          node "${TESTPLAN_CLI}" || true
+
+        if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
+          # If any returned check-run has not yet reached "completed"
+          # (queued/in_progress), the signal is inconclusive — never guess
+          # a pass/fail from a partial subset of still-running checks.
+          if echo "${CHECK_RUNS}" | jq -e 'any(.[]; .status != "completed")' >/dev/null 2>&1; then
+            SIGNAL="no_ci"
+          else
+            CONCLUSIONS="$(echo "${CHECK_RUNS}" | jq '[.[] | .conclusion]')"
+            if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
+              SIGNAL="timeout"
+            elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
+              SIGNAL="fail"
+            elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
+              SIGNAL="pass"
             fi
           fi
         fi
@@ -882,18 +905,16 @@ runs:
           exercise), report `no_tests_for_changed_logic: false` — that row
           requires no tests, so none missing is not a defect.
 
-          Evaluate the PR description's checklist. If the PR body (or a
-          linked issue) contains `- [ ]`/`- [x]` checklist items, return a
-          `checklist` array: one entry per item with its `text` copied
-          verbatim (without the `- [ ]`/`- [x]` prefix), a `status` of
-          `verified` (you confirmed it is satisfied — cite how in
-          `evidence`), `failed` (you confirmed it is NOT satisfied), or
-          `unverifiable` (cannot be checked from code/tests, e.g. a manual
-          or post-merge step). Only mark `verified` with real evidence per
-          `/verification-before-completion`. A later deterministic step uses
-          this to tick verified boxes in the PR body; do not edit the PR body
-          yourself. Per the rubric, checklist status is a P2 reminder at
-          most — do not fail the review solely on incomplete checklist items.
+          Read `.ai-review/test-plan-items.json` and `.ai-review/ci-checks.json`
+          (written by Prep). Map each Test Plan / checklist item to the
+          inventoried CI checks. For each item that is **not covered** (or
+          only weakly covered) by CI, emit a normal `findings[]` entry with
+          severity P0–P3 judged via the rubric — CI is the source of truth
+          for "was this exercised?", not PR-body ticks. Leave the structured
+          `checklist` array empty (or omit it); Publish no longer ticks
+          checklist boxes and must not edit the PR body. Manual/post-merge
+          items with no plausible CI mapping may be omitted or filed at low
+          severity at your judgment — do not invent coverage.
 
           Write a complete review as `comment_markdown`: findings grouped by
           severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
@@ -1150,7 +1171,7 @@ runs:
           your own `counts`; they do not affect this run's verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
-          scan + P0-P3 severities + checklist) and `context.md` at the repo root
+          scan + P0-P3 severities + review checklist) and `context.md` at the repo root
           if present. The PR number is in the `PR_NUMBER` environment variable;
           the PR head is already checked out. Read `.ai-review/manifest.json`
           for the staged `review_mode`/`base_sha`/`head_sha`/`delta_base_sha`/
@@ -1163,13 +1184,16 @@ runs:
           description only. Read
           `.ai-review/linked-issues.json` (repo root) if present and use each
           linked issue's acceptance criteria as the intent contract for Angle
-          H. Attempt to load `/verification-before-completion` and
+          H. Read `.ai-review/test-plan-items.json` and
+          `.ai-review/ci-checks.json` if present: uncovered/weakly covered
+          Test Plan items become normal `findings[]` (P0–P3 via the rubric);
+          leave `checklist` empty — Publish does not tick PR-body boxes.
+          Attempt to load `/verification-before-completion` and
           `/requesting-code-review` (best-effort). Read complete file contents,
           never just the diff hunks. Do NOT run tests or probe for a
           toolchain — set `test_execution: "skipped"` (you have no shell
-          access to a test runner). You MAY populate the optional
-          `checklist` and `verification_evidence` fields; omit them if you
-          cannot assess them.
+          access to a test runner). You MAY populate `verification_evidence`
+          when you have real command output; omit it if you cannot.
 
           Perform the full review per the rubric, then write `comment_markdown`
           (findings grouped by severity P0-P3 with "_None._" for empty sections,
@@ -1622,9 +1646,6 @@ runs:
             stripLeadingBannerArtifacts,
             buildReviewBody,
             buildInconclusiveBody,
-            tickVerifiedBoxes,
-            buildStatusBlock,
-            upsertStatusBlock,
           } = require(process.env.PUBLISH_LIB_PATH);
           const { resolveModelUsed } = require(process.env.METRICS_PATH);
 
@@ -1708,11 +1729,8 @@ runs:
             return;
           }
 
-          // verification_evidence is still needed below by the PR-body status
-          // block, independently of the verdict computation.
-          const verificationEvidence = Array.isArray(review.verification_evidence)
-            ? review.verification_evidence
-            : [];
+          // verification_evidence is consumed inside recompute (when present);
+          // no PR-body status-block write-back remains.
 
           const result = recompute(review, {
             confidenceThreshold,
@@ -1788,46 +1806,16 @@ runs:
             }
           }
 
-          // --- PR-body checklist verification (feature: update PR body) ------
-          // Reflect verified checklist items back into the PR description: tick
-          // boxes the model VERIFIED (with evidence) in place, and maintain a
-          // managed <!-- ai-review-status --> block with per-item status +
-          // evidence. Never unticks a human-checked box; never fails the job on
-          // error. Gated by the update-pr-body input. The PR body is re-fetched
-          // immediately before writing to minimize races with human edits.
-          if (
-            process.env.UPDATE_PR_BODY === "true" &&
-            Array.isArray(review.checklist) &&
-            review.checklist.length > 0
-          ) {
-            try {
-              const { data: prData } = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-              });
-              const originalBody = prData.body || "";
-
-              const { newBody: tickedBody, ticks } = tickVerifiedBoxes(originalBody, review.checklist);
-              const block = buildStatusBlock({ checklist: review.checklist, verificationEvidence, verdict });
-              const newBody = upsertStatusBlock(tickedBody, block);
-
-              if (newBody !== originalBody) {
-                await github.rest.pulls.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                  body: newBody,
-                });
-                core.info(
-                  `Updated PR body (ticked ${ticks} checkbox(es), refreshed status block).`
-                );
-              } else {
-                core.info("PR body already current; no change.");
-              }
-            } catch (err) {
-              core.warning(`Could not update PR body: ${err.message}`);
-            }
+          // --- PR-body checklist write-back (retired) ------------------------
+          // Spec §7.4: stop ticking verified boxes / status-block checklist
+          // write-back. update-pr-body remains accepted for compatibility but
+          // is a no-op — never tick or untick human boxes. Linked-issue
+          // updates are independent and unchanged.
+          if (process.env.UPDATE_PR_BODY === "true") {
+            core.info(
+              "update-pr-body: checklist tick / status-block write-back is retired; " +
+                "Test Plan gaps are findings vs CI (.ai-review/test-plan-items.json)."
+            );
           }
 
           core.setOutput("verdict", verdict);

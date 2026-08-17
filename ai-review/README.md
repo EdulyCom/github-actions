@@ -150,15 +150,20 @@ injection-safety rule.
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
    Set `enable-context-stage: 'false'` to skip this stage entirely; the
    review reads `context.md` only "if present", so the gate is unaffected.
-10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
-    reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
-    `no_ci`) so the Publish step can treat a failing/timed-out required
-    check as an automatic fail.
+10. **CI inventory + signal** — on every PR event (not only
+    `workflow_dispatch`), inventories check runs for the PR HEAD into
+    `.ai-review/ci-checks.json` and parses the PR Test Plan / checklists into
+    `.ai-review/test-plan-items.json`. Also derives an aggregate
+    `pass`/`fail`/`timeout`/`no_ci` signal for Publish when every returned
+    check has completed (a first `pull_request` run usually stays `no_ci`
+    while sibling jobs are still running).
 11. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
     diff and returns a schema-validated structured result (verdict,
     confidence, merge risk, intent alignment, P0-P3 counts, test-quality
-    signals, the review markdown body, and — new — a per-item `checklist`
-    verdict, `verification_evidence`, and a `test_execution` outcome). It
+    signals, the review markdown body, optional `verification_evidence`, and
+    a `test_execution` outcome). Uncovered Test Plan items vs CI become
+    normal findings; the `checklist` field is left empty (Publish no longer
+    ticks boxes). It
     reads **complete file contents** (never just diff hunks) and evaluates
     the diff against the linked issues' acceptance criteria. It does **not**
     run the project's tests — see
@@ -195,13 +200,10 @@ injection-safety rule.
     review stage's structured output (a `pass` claiming green tests without
     any `verification_evidence` is penalized, not trusted) and posts it as a
     native PR review and the corresponding pass/fail label, then sets the
-    four job outputs. When `update-pr-body` is `true` it also **ticks the
-    PR description's checklist boxes** that the review verified (`- [ ]` →
-    `- [x]`, never unchecking a human's box) and maintains a managed
-    `<!-- ai-review-status -->` block with the per-item verification
-    evidence. Editing the body is safe against the default trigger set
-    (which excludes `edited`); do **not** add `pull_request: [edited]` to
-    the caller or the review will loop on its own body edits.
+    four job outputs. It does **not** tick PR description checklist boxes
+    or write an `<!-- ai-review-status -->` block (`update-pr-body` is
+    accepted but is a no-op for that path). Test Plan gaps are already
+    findings from the review stage.
 
 ## Inputs
 
@@ -222,7 +224,7 @@ injection-safety rule.
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
-| `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
+| `update-pr-body` | Accepted for compatibility. Checklist tick / status-block write-back is **retired**; the input is a no-op. Test Plan gaps are findings vs CI instead. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
 | `force-full-review` | When `true`, always review merge-base…HEAD instead of a delta since the last published ai-review. | No | `false` |
 
@@ -236,6 +238,21 @@ merge-base matches, the active range is **delta** (`prior_head…HEAD`) —
 smaller numstat / must-read set, with `.ai-review/prior-review.md` for
 finding carry-forward. Full mode is used on first run, missing/inconclusive
 meta, force-push (non-ancestor), base SHA change, or `force-full-review: true`.
+
+## Test Plan ↔ CI
+
+The review does **not** execute the Test Plan and does **not** mark checklist
+items verified in the PR body. Prep inventories:
+
+- `.ai-review/test-plan-items.json` — items from a `Test Plan` section and/or
+  `- [ ]` / `- [x]` checkboxes in the PR body
+- `.ai-review/ci-checks.json` — check runs for the PR HEAD (`name`,
+  `conclusion`, `status`), fetched on all PR events
+
+The model maps items to CI coverage; uncovered or weakly covered items become
+normal `findings[]` with severity P0–P3 via the rubric (then `recompute.js`).
+Checklist tick write-back is retired (`update-pr-body` is a no-op for that
+path). `test_execution` stays `"skipped"` — no test runners in the allowlist.
 
 ## Outputs
 

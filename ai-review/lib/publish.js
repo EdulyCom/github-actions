@@ -186,6 +186,7 @@ function buildInconclusiveBody(salvaged, opts = {}) {
 /**
  * Ticks unchecked PR-body checkboxes whose text matches a VERIFIED checklist
  * item. Never unchecks a human-checked box (the regex only matches "[ ]").
+ * Kept for unit tests / compatibility; Publish no longer calls this (spec §7.4).
  * @param {string} originalBody
  * @param {{text: string, status: string, evidence?: string}[]} checklist
  * @returns {{newBody: string, ticks: number}}
