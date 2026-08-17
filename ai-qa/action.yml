@@ -401,6 +401,10 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         REVIEW_EXEC_FILE: ${{ steps.review.outputs.execution_file }}
         REPORT_FOOTER_PATH: ${{ github.action_path }}/lib/report-footer.js
+        # Same locked primary the review stage was started with (steps.models).
+        # Prefer the execution-log model when present; otherwise the requested
+        # primary — never a second hardcoded literal that can drift from --model.
+        QA_PRIMARY_MODEL: ${{ steps.models.outputs.primary }}
       with:
         github-token: ${{ steps.identity.outputs.author-token }}
         script: |
@@ -414,8 +418,12 @@ runs:
           } catch {
             // No execution log (review skipped / missing).
           }
+          // Only attribute a model when we have structured QA output. Prefer the
+          // log's resolved model (captures Cursor/free fallback). If the log is
+          // silent, fall back to the locked primary that this run requested —
+          // same shape as ai-review's resolveModelUsed({ fallback: ROUTED_MODEL }).
           if (!modelUsed && process.env.QA_OUTPUT) {
-            modelUsed = 'claude/claude-sonnet-5';
+            modelUsed = process.env.QA_PRIMARY_MODEL || '';
           }
 
           const prNumber = Number(process.env.PR_NUMBER);
