@@ -421,13 +421,21 @@ runs:
         mkdir -p .ai-review
 
         # Locked model IDs (not inputs). Keep in sync with ai-qa.
+        #
+        # Cursor tier MUST be composer-2.5 (or another CLI-proven Cursor ID).
+        # claude/cursor/claude-* IDs accept raw /v1/messages but hang Claude Code
+        # CLI (unrecognized_model → aborted_streaming), so a Claude-off cascade
+        # never reaches free if those IDs are first in --fallback-model.
+        # Claude Code caps fallback chains at 3 entries after dedupe.
         SONNET="claude/claude-sonnet-5"
         OPUS="claude/claude-opus-5"
         HAIKU="claude/claude-haiku-4-5-20251001"
-        FREE="oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
-        SONNET_FALLBACK="claude/cursor/claude-4.6-sonnet-medium-thinking,${FREE}"
-        OPUS_FALLBACK="claude/cursor/claude-opus-4-8-medium-fast,${FREE}"
-        HAIKU_FALLBACK="claude/cursor/composer-2.5,${FREE}"
+        CURSOR="claude/cursor/composer-2.5"
+        FREE="oc/nemotron-3.5-lightning-free,auto/best-free"
+        FALLBACK_CHAIN="${CURSOR},${FREE}"
+        SONNET_FALLBACK="${FALLBACK_CHAIN}"
+        OPUS_FALLBACK="${FALLBACK_CHAIN}"
+        HAIKU_FALLBACK="${FALLBACK_CHAIN}"
         export SONNET OPUS HAIKU
 
         # Resolve the review range once, deterministically. `git diff A...B`

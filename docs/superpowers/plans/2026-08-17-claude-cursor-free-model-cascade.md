@@ -17,7 +17,9 @@
 - Keep `sonnet-files-threshold` / `sonnet-churn-threshold` inputs on `ai-review`.
 - Prefer `claude/` and `claude/cursor/` prefixes (Anthropic Messages–compatible).
 - Free tail = **pinned usable `oc/*-free` IDs**, then **`auto/best-free` last** (hybrid). Do not use `auto/*` as Claude or Cursor slots. Do not use `auto/coding:free` (unsupported upstream). Prefer `oc/` over duplicate `opencode/` aliases.
-- Shared free tail (all roles): `oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free`
+- Shared fallback chain (all roles, CLI max 3): `claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free`
+  - Cursor tier is **composer-2.5 only** — not `claude/cursor/claude-*` (CLI hang)
+  - Longer free inventories are ignored past the 3-entry CLI cap
 - `--fallback-model` must not include the primary (CLI no-op otherwise).
 - Do not claim `--fallback-model` fixes silent ~27m gateway stalls (ADR 0005).
 - Injection safety: bind values via `env:`, never interpolate attacker-controlled text into `run:`/`script:` bodies with `${{ }}`.
@@ -78,16 +80,19 @@ Catalog free-ish IDs (excluding video `veo*`):
 Shared free tail constant (paste identically everywhere):
 
 ```text
-FREE=oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free
+FREE=oc/nemotron-3.5-lightning-free,auto/best-free
+# Full chain (Cursor + FREE) must stay ≤3 entries — Claude Code ignores the rest.
 ```
 
 Do **not** add `oc/big-pickle` while billing is unknown (not labeled free in the catalog). Revisit only after confirming it is zero-cost on the Eduly gateway.
 | Action / role | Primary | `--fallback-model` (ordered) |
 | --- | --- | --- |
-| ai-review context | `claude/claude-haiku-4-5-20251001` | `claude/cursor/composer-2.5,` + FREE |
-| ai-review review (tiny) | `claude/claude-sonnet-5` | `claude/cursor/claude-4.6-sonnet-medium-thinking,` + FREE |
-| ai-review review (large) | `claude/claude-opus-5` | `claude/cursor/claude-opus-4-8-medium-fast,` + FREE |
-| ai-qa review | `claude/claude-sonnet-5` | `claude/cursor/claude-4.6-sonnet-medium-thinking,` + FREE |
+| ai-review context | `claude/claude-haiku-4-5-20251001` | `claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free` |
+| ai-review review (tiny) | `claude/claude-sonnet-5` | same Cursor→free chain (CLI max 3) |
+| ai-review review (large) | `claude/claude-opus-5` | same Cursor→free chain (CLI max 3) |
+| ai-qa review | `claude/claude-sonnet-5` | same Cursor→free chain (CLI max 3) |
+
+> **Do not** put `claude/cursor/claude-*` in `--fallback-model`: raw `/v1/messages` may 200, but Claude Code CLI hangs (`unrecognized_model` → `aborted_streaming`) and never reaches free. Use `composer-2.5` as the Cursor tier.
 
 Comment footer copy (**successful** reviews / QA comments only):
 
@@ -305,9 +310,9 @@ In **Deterministic prep and model routing**, replace `inputs.*-model` with:
 SONNET="claude/claude-sonnet-5"
 OPUS="claude/claude-opus-5"
 HAIKU="claude/claude-haiku-4-5-20251001"
-SONNET_FALLBACK="claude/cursor/claude-4.6-sonnet-medium-thinking,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
-OPUS_FALLBACK="claude/cursor/claude-opus-4-8-medium-fast,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
-HAIKU_FALLBACK="claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
+SONNET_FALLBACK="claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free"
+OPUS_FALLBACK="claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free"
+HAIKU_FALLBACK="claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free"
 ```
 
 Export `HAIKU` / `OPUS` / `SONNET` to the environment for `write-manifest.js` (same as today). After choosing `MODEL`, also set `FALLBACK` to the matching list and write:
@@ -432,7 +437,7 @@ In `ai-qa/action.yml`, delete `qa-model`. Replace review `claude_args` model lin
 # Locked at action level — keep in sync with ai-review cascade.
 # Claude primary → Cursor if Claude blocked → free if Cursor blocked.
 --model claude/claude-sonnet-5
---fallback-model claude/cursor/claude-4.6-sonnet-medium-thinking,oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free
+--fallback-model claude/cursor/composer-2.5,oc/nemotron-3.5-lightning-free,auto/best-free
 ```
 
 Update the comment that currently describes `claude-sonnet-4-6,claude-opus-4-8`.
