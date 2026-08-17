@@ -227,6 +227,9 @@ test("buildManifest: assembles the frozen shape", () => {
   assert.equal(m.schema, 1);
   assert.equal(m.base_sha, "a".repeat(40));
   assert.equal(m.head_sha, "b".repeat(40));
+  assert.equal(m.review_mode, "full");
+  assert.equal(m.delta_base_sha, null);
+  assert.equal(m.prior_head_sha, null);
   assert.deepEqual(m.changed_files, ["src/a.ts", "src/a.test.ts"]);
   assert.equal(m.file_count, 2);
   assert.equal(m.churn, 4);
@@ -236,6 +239,31 @@ test("buildManifest: assembles the frozen shape", () => {
   assert.equal(m.has_logic_change, true);
   assert.equal(m.no_tests_for_changed_logic, false);
   assert.equal(m.symbol_manifest[0].name, "alpha");
+});
+
+test("buildManifest: delta mode keeps merge-base telemetry but lists only delta-range files", () => {
+  const prior = "c".repeat(40);
+  // numstat already scoped to prior…HEAD by the prep step — only the file
+  // touched after the last review appears, not the full PR set.
+  const m = buildManifest({
+    baseSha: "a".repeat(40),
+    headSha: "b".repeat(40),
+    numstat: "2\t0\tsrc/only-delta.ts\n",
+    diff: "diff --git a/src/only-delta.ts b/src/only-delta.ts\n@@ -0,0 +1 @@ function deltaOnly() {",
+    sizes: { "src/only-delta.ts": 40 },
+    title: "fix: tighten delta",
+    reviewMode: "delta",
+    deltaBaseSha: prior,
+    priorHeadSha: prior,
+  });
+
+  assert.equal(m.review_mode, "delta");
+  assert.equal(m.base_sha, "a".repeat(40));
+  assert.equal(m.delta_base_sha, prior);
+  assert.equal(m.prior_head_sha, prior);
+  assert.deepEqual(m.changed_files, ["src/only-delta.ts"]);
+  assert.equal(m.file_count, 1);
+  assert.equal(m.symbol_manifest[0].name, "deltaOnly");
 });
 
 test("buildManifest: missing size entries do not produce NaN", () => {

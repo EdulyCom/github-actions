@@ -76,7 +76,8 @@ function stripLeadingBannerArtifacts(markdown) {
  *   modelUsed?: string|null,
  *   reviewMeta?: { headSha: string, baseSha: string, mode: 'full'|'delta' }|null}} args
  *   `commentBody` must already be run through stripLeadingBannerArtifacts.
- *   `reviewMeta` stamps the delta baseline (spec §6.1); omit until Publish wires SHAs.
+ *   `reviewMeta` stamps the delta baseline (spec §6.1); Publish passes
+ *   current HEAD + PR merge-base + this run's full|delta mode.
  */
 function modelLine(modelUsed) {
   if (!modelUsed || typeof modelUsed !== "string" || !modelUsed.trim()) return [];

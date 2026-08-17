@@ -214,6 +214,15 @@ inputs:
       state (that is ai-qa's post-merge job).
     required: false
     default: "true"
+  force-full-review:
+    description: >
+      When 'true', always review the full merge-base…HEAD range instead of
+      a delta since the last published `<!-- ai-review -->`. Use after a
+      rebase, base-branch change you want to force, or when debugging a
+      missed finding. Default 'false' — re-runs use delta when a valid
+      prior meta baseline exists.
+    required: false
+    default: "false"
 
 outputs:
   verdict:
@@ -413,7 +422,10 @@ runs:
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
         CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
-        GH_TOKEN: ${{ inputs.github-token }}
+        DELTA_CLI: ${{ github.action_path }}/lib/write-delta.js
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
+        FORCE_FULL_REVIEW: ${{ inputs.force-full-review }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       run: |
@@ -440,18 +452,39 @@ runs:
         OPUS_FALLBACK="${FREE_SO}"
         export SONNET OPUS HAIKU
 
-        # Resolve the review range once, deterministically. `git diff A...B`
-        # already means "merge base of A and B", but resolving the SHA
-        # explicitly puts it in the manifest and the job log, so a wrong-range
-        # review becomes diagnosable after the fact instead of invisible.
+        # Resolve the PR merge-base once (telemetry + meta base_sha). The
+        # active review range may be a delta since the last published review.
         BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
         HEAD_SHA="$(git rev-parse HEAD)"
-        echo "prep: range ${BASE_SHA}..${HEAD_SHA}"
 
-        git diff --numstat "${BASE_SHA}" HEAD > .ai-review/numstat.txt
+        # List prior reviews by this bot; write-delta.js decides full vs delta
+        # (ancestor check via git), writes .ai-review/delta.json and optional
+        # prior-review.md. Fail open to [] → full mode on API errors.
+        if ! gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
+          | jq -s 'add // []' > .ai-review/reviews.json; then
+          echo '[]' > .ai-review/reviews.json
+        fi
+
+        DELTA_OUT="$(
+          BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" \
+          FORCE_FULL_REVIEW="${FORCE_FULL_REVIEW:-false}" \
+          AUTHOR_LOGIN="${AUTHOR_LOGIN}" \
+          REVIEWS_JSON_PATH=".ai-review/reviews.json" \
+          node "${DELTA_CLI}"
+        )"
+        REVIEW_MODE="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^mode=//p' | tail -n1)"
+        REVIEW_BASE_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^review-base-sha=//p' | tail -n1)"
+        DELTA_BASE_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^delta-base-sha=//p' | tail -n1)"
+        PRIOR_HEAD_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^prior-head-sha=//p' | tail -n1)"
+        REVIEW_MODE="${REVIEW_MODE:-full}"
+        REVIEW_BASE_SHA="${REVIEW_BASE_SHA:-${BASE_SHA}}"
+
+        echo "prep: merge-base ${BASE_SHA}..${HEAD_SHA} review_mode=${REVIEW_MODE} range ${REVIEW_BASE_SHA}..${HEAD_SHA}"
+
+        git diff --numstat "${REVIEW_BASE_SHA}" HEAD > .ai-review/numstat.txt
         # -U0 keeps the hunk headers (which carry the enclosing declaration)
         # without any body lines; only `diff --git` and `@@` lines are parsed.
-        git diff -U0 "${BASE_SHA}" HEAD \
+        git diff -U0 "${REVIEW_BASE_SHA}" HEAD \
           | grep -E '^(diff --git|@@)' > .ai-review/diff-headers.txt || true
         # Written to a file, never a step output: a PR title is attacker-
         # influenceable text and can contain newlines, which $GITHUB_OUTPUT
@@ -459,7 +492,11 @@ runs:
         gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title \
           --jq '.title' > .ai-review/pr-title.txt
 
-        BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" node "${MANIFEST_CLI}"
+        BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" \
+          REVIEW_MODE="${REVIEW_MODE}" \
+          DELTA_BASE_SHA="${DELTA_BASE_SHA}" \
+          PRIOR_HEAD_SHA="${PRIOR_HEAD_SHA}" \
+          node "${MANIFEST_CLI}"
 
         FILES="$(jq -r '.file_count' .ai-review/manifest.json)"
         CHURN="$(jq -r '.churn' .ai-review/manifest.json)"
@@ -498,6 +535,10 @@ runs:
           echo "fallback-model=${FALLBACK}"
           echo "haiku-model=${HAIKU}"
           echo "haiku-fallback-model=${HAIKU_FALLBACK}"
+          echo "review-mode=${REVIEW_MODE}"
+          echo "merge-base-sha=${BASE_SHA}"
+          echo "head-sha=${HEAD_SHA}"
+          echo "delta-base-sha=${DELTA_BASE_SHA}"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Resolve linked issues
@@ -582,11 +623,13 @@ runs:
           --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read `.ai-review/manifest.json` first: a prior deterministic step
-          already staged `base_sha`, `head_sha` and `changed_files`. Trust them —
+          already staged `base_sha`, `head_sha`, `review_mode`, `changed_files`,
+          and (when `review_mode` is `delta`) `delta_base_sha`. Trust them —
           do not run `git symbolic-ref`, `git merge-base` or `git remote show` to
           rediscover the default branch or the diff base. Diff with
-          `git diff <base_sha> HEAD` using the staged SHA, then read
-          the full contents of every changed file. Grep the repository for callers,
+          `git diff <delta_base_sha> HEAD` when `review_mode` is `delta`, else
+          `git diff <base_sha> HEAD`, then read the full contents of every
+          changed file. Grep the repository for callers,
           callees, and helper functions related to the changed code, so a reviewer
           has the surrounding context without re-deriving it.
 
@@ -781,16 +824,29 @@ runs:
 
           Read `.ai-review/manifest.json` FIRST. A prior deterministic step
           already resolved the review range and staged the facts you would
-          otherwise re-derive: `base_sha` and `head_sha` (the exact range),
-          `changed_files` (the authoritative list), `symbol_manifest`
-          (declarations touched by the diff), plus `title_ok`,
-          `has_test_change` and `no_tests_for_changed_logic`.
+          otherwise re-derive: `base_sha` and `head_sha` (PR merge-base and
+          HEAD for telemetry), `review_mode` (`full` or `delta`),
+          `delta_base_sha` when mode is delta (the prior published review
+          HEAD — the start of this run's active range), `changed_files`
+          (the authoritative list for the active range only),
+          `symbol_manifest` (declarations touched by the diff), plus
+          `title_ok`, `has_test_change` and `no_tests_for_changed_logic`.
 
           TRUST THOSE VALUES. Do NOT run `git symbolic-ref`, `git merge-base`,
           `git remote show`, or `gh pr view` to work out the default branch,
           the diff base, or the changed-file list — they are already settled,
           and re-deriving them costs turns and risks reviewing the wrong range.
-          Diff with `git diff <base_sha> HEAD` using the staged SHA.
+          Diff with `git diff <delta_base_sha> HEAD` when `review_mode` is
+          `delta`, otherwise `git diff <base_sha> HEAD`.
+
+          When `review_mode` is `delta`, this run covers only commits after
+          the last published ai-review. If `.ai-review/prior-review.md`
+          exists, READ IT and carry findings forward: mark each prior
+          finding resolved (cite what fixed it) or still open (restate it
+          if it still applies). Do not drop open prior findings silently.
+          Neighbor files outside `changed_files` may be read when a prior
+          finding or an import requires it — that is targeted expansion,
+          not a second full-PR read.
 
           Read the COMPLETE contents of every file in `changed_files` with
           `Read` — never sample, truncate, or reason from the diff hunks alone.
@@ -1097,10 +1153,13 @@ runs:
           scan + P0-P3 severities + checklist) and `context.md` at the repo root
           if present. The PR number is in the `PR_NUMBER` environment variable;
           the PR head is already checked out. Read `.ai-review/manifest.json`
-          for the staged `base_sha`/`head_sha`/`changed_files` and trust them
-          rather than re-deriving the range; diff with
-          `git diff <base_sha> HEAD`. Run
-          `gh pr view "$PR_NUMBER" --json title,body,url,number` for the PR
+          for the staged `review_mode`/`base_sha`/`head_sha`/`delta_base_sha`/
+          `changed_files` and trust them rather than re-deriving the range;
+          diff with `git diff <delta_base_sha> HEAD` when `review_mode` is
+          `delta`, otherwise `git diff <base_sha> HEAD`. When
+          `.ai-review/prior-review.md` is present (delta or forced-full with
+          a prior), read it and mark prior findings resolved vs still-open.
+          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` for the PR
           description only. Read
           `.ai-review/linked-issues.json` (repo root) if present and use each
           linked issue's acceptance criteria as the intent contract for Angle
@@ -1551,6 +1610,9 @@ runs:
         REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
         REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
         RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
+        HEAD_SHA: ${{ steps.route.outputs.head-sha }}
+        MERGE_BASE_SHA: ${{ steps.route.outputs.merge-base-sha }}
+        REVIEW_MODE: ${{ steps.route.outputs.review-mode }}
       with:
         github-token: ${{ steps.identity-refresh.outputs.author-token }}
         script: |
@@ -1582,6 +1644,15 @@ runs:
             fallback: process.env.ROUTED_MODEL || "",
           });
 
+          const reviewMeta =
+            process.env.HEAD_SHA && process.env.MERGE_BASE_SHA
+              ? {
+                  headSha: process.env.HEAD_SHA,
+                  baseSha: process.env.MERGE_BASE_SHA,
+                  mode: process.env.REVIEW_MODE === "delta" ? "delta" : "full",
+                }
+              : null;
+
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
           const failLabel = process.env.FAIL_LABEL;
@@ -1605,7 +1676,10 @@ runs:
             } catch (e) {
               // No salvage file (step skipped, or nothing recoverable).
             }
-            const inconclusiveBody = buildInconclusiveBody(salvaged, { modelUsed });
+            const inconclusiveBody = buildInconclusiveBody(salvaged, {
+              modelUsed,
+              reviewMeta,
+            });
             try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -1678,6 +1752,7 @@ runs:
             blockers,
             commentBody,
             modelUsed,
+            reviewMeta,
           });
 
           await github.rest.pulls.createReview({

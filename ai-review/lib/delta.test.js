@@ -9,6 +9,8 @@ const {
   resolveReviewRange,
   findLatestAiReview,
   resolveDeltaBaseline,
+  resolveActiveReviewBase,
+  buildDeltaArtifact,
 } = require("./delta.js");
 
 const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -211,4 +213,61 @@ test("resolveDeltaBaseline: base change → full even when ancestor", () => {
   assert.equal(out.mode, "full");
   assert.equal(out.reason, "base-sha-changed");
   assert.equal(out.priorHeadSha, PRIOR);
+});
+
+test("resolveDeltaBaseline: forceFull still preserves priorBody for carry-forward", () => {
+  const body = [
+    "<!-- ai-review -->",
+    formatReviewMeta({ headSha: PRIOR, baseSha: BASE, mode: "full" }),
+    "**✅ PASS**",
+  ].join("\n");
+  const out = resolveDeltaBaseline({
+    reviews: [{ id: 1, submitted_at: "2026-06-01T00:00:00Z", body }],
+    headSha: HEAD,
+    mergeBaseSha: BASE,
+    priorHeadIsAncestor: true,
+    forceFull: true,
+  });
+  assert.deepEqual(out, {
+    mode: "full",
+    deltaBaseSha: null,
+    priorHeadSha: PRIOR,
+    priorBody: body,
+    reason: "force-full-review",
+  });
+});
+
+test("resolveActiveReviewBase: delta uses prior head; full uses merge-base", () => {
+  assert.equal(
+    resolveActiveReviewBase({ mode: "delta", mergeBaseSha: BASE, deltaBaseSha: PRIOR }),
+    PRIOR,
+  );
+  assert.equal(
+    resolveActiveReviewBase({ mode: "full", mergeBaseSha: BASE, deltaBaseSha: PRIOR }),
+    BASE,
+  );
+});
+
+test("buildDeltaArtifact: frozen §10 shape", () => {
+  assert.deepEqual(
+    buildDeltaArtifact({
+      mode: "delta",
+      reason: "prior-meta-ancestor",
+      deltaBaseSha: PRIOR,
+      priorHeadSha: PRIOR,
+      headSha: HEAD,
+      mergeBaseSha: BASE,
+      priorBodyPath: ".ai-review/prior-review.md",
+    }),
+    {
+      schema: 1,
+      mode: "delta",
+      reason: "prior-meta-ancestor",
+      delta_base_sha: PRIOR,
+      prior_head_sha: PRIOR,
+      head_sha: HEAD,
+      merge_base_sha: BASE,
+      prior_body_path: ".ai-review/prior-review.md",
+    },
+  );
 });

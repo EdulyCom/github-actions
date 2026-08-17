@@ -148,16 +148,6 @@ function resolveDeltaBaseline({
   forceFull = false,
   priorHeadIsAncestor,
 }) {
-  if (forceFull) {
-    return {
-      mode: "full",
-      deltaBaseSha: null,
-      priorHeadSha: null,
-      priorBody: null,
-      reason: "force-full-review",
-    };
-  }
-
   const prior = findLatestAiReview(reviews);
   if (!prior) {
     return {
@@ -165,11 +155,23 @@ function resolveDeltaBaseline({
       deltaBaseSha: null,
       priorHeadSha: null,
       priorBody: null,
-      reason: "no-prior-review",
+      reason: forceFull ? "force-full-review" : "no-prior-review",
     };
   }
 
   const meta = parseReviewMeta(prior.body);
+  // forceFull still carries priorBody / priorHeadSha so Prep can write
+  // prior-review.md for finding carry-forward on a forced full run.
+  if (forceFull) {
+    return {
+      mode: "full",
+      deltaBaseSha: null,
+      priorHeadSha: meta && meta.headSha ? meta.headSha : null,
+      priorBody: prior.body,
+      reason: "force-full-review",
+    };
+  }
+
   if (!meta || !meta.headSha) {
     return {
       mode: "full",
@@ -207,6 +209,52 @@ function resolveDeltaBaseline({
   };
 }
 
+/**
+ * Git base for numstat / unified diff this run. Telemetry `base_sha` stays
+ * the PR merge-base; this is the active review range start.
+ *
+ * @param {{ mode: string, mergeBaseSha: string, deltaBaseSha?: string|null }} args
+ * @returns {string}
+ */
+function resolveActiveReviewBase({ mode, mergeBaseSha, deltaBaseSha }) {
+  if (mode === "delta" && deltaBaseSha) return deltaBaseSha;
+  return mergeBaseSha;
+}
+
+/**
+ * Frozen `.ai-review/delta.json` shape (spec §10).
+ *
+ * @param {{
+ *   mode: string,
+ *   reason: string,
+ *   deltaBaseSha: string|null,
+ *   priorHeadSha: string|null,
+ *   headSha: string,
+ *   mergeBaseSha: string,
+ *   priorBodyPath: string|null,
+ * }} args
+ */
+function buildDeltaArtifact({
+  mode,
+  reason,
+  deltaBaseSha,
+  priorHeadSha,
+  headSha,
+  mergeBaseSha,
+  priorBodyPath,
+}) {
+  return {
+    schema: 1,
+    mode,
+    reason,
+    delta_base_sha: deltaBaseSha,
+    prior_head_sha: priorHeadSha,
+    head_sha: headSha,
+    merge_base_sha: mergeBaseSha,
+    prior_body_path: priorBodyPath,
+  };
+}
+
 module.exports = {
   AI_REVIEW_MARKER,
   parseReviewMeta,
@@ -214,4 +262,6 @@ module.exports = {
   resolveReviewRange,
   findLatestAiReview,
   resolveDeltaBaseline,
+  resolveActiveReviewBase,
+  buildDeltaArtifact,
 };

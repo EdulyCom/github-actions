@@ -356,6 +356,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
   const prevCwd = process.cwd();
   const prevBase = process.env.BASE_SHA;
   const prevHead = process.env.HEAD_SHA;
+  const prevMode = process.env.REVIEW_MODE;
+  const prevDelta = process.env.DELTA_BASE_SHA;
+  const prevPrior = process.env.PRIOR_HEAD_SHA;
   // Spies on the real fs.renameSync so this test proves the DEFAULT wiring --
   // main() -> writeRoster()/manifest write -> atomicWriteJson -> fs.renameSync
   // -- actually runs in production, not just that atomicWriteJson behaves
@@ -384,6 +387,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     fs.writeFileSync("src/a.ts", "export function widget() {\n  return 1;\n}\n");
     process.env.BASE_SHA = "base000";
     process.env.HEAD_SHA = "head111";
+    process.env.REVIEW_MODE = "delta";
+    process.env.DELTA_BASE_SHA = "prior222";
+    process.env.PRIOR_HEAD_SHA = "prior222";
 
     main();
 
@@ -392,6 +398,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     assert.deepEqual(manifest.changed_files, ["src/a.ts"]);
     assert.equal(manifest.base_sha, "base000");
     assert.equal(manifest.head_sha, "head111");
+    assert.equal(manifest.review_mode, "delta");
+    assert.equal(manifest.delta_base_sha, "prior222");
+    assert.equal(manifest.prior_head_sha, "prior222");
 
     const roster = JSON.parse(fs.readFileSync(".ai-review/assignments.json", "utf8"));
     assert.equal(roster.schema, 1);
@@ -416,6 +425,12 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     else process.env.BASE_SHA = prevBase;
     if (prevHead === undefined) delete process.env.HEAD_SHA;
     else process.env.HEAD_SHA = prevHead;
+    if (prevMode === undefined) delete process.env.REVIEW_MODE;
+    else process.env.REVIEW_MODE = prevMode;
+    if (prevDelta === undefined) delete process.env.DELTA_BASE_SHA;
+    else process.env.DELTA_BASE_SHA = prevDelta;
+    if (prevPrior === undefined) delete process.env.PRIOR_HEAD_SHA;
+    else process.env.PRIOR_HEAD_SHA = prevPrior;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

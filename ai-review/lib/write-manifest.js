@@ -126,6 +126,10 @@ function main() {
     if (size !== undefined) sizes[f.path] = size;
   }
 
+  const reviewMode = process.env.REVIEW_MODE === "delta" ? "delta" : "full";
+  const deltaBaseSha = process.env.DELTA_BASE_SHA || null;
+  const priorHeadSha = process.env.PRIOR_HEAD_SHA || null;
+
   const manifest = buildManifest({
     baseSha: process.env.BASE_SHA || null,
     headSha: process.env.HEAD_SHA || null,
@@ -133,12 +137,15 @@ function main() {
     diff,
     sizes,
     title,
+    reviewMode,
+    deltaBaseSha: deltaBaseSha || null,
+    priorHeadSha: priorHeadSha || null,
   });
 
   atomicWriteJson(path.join(DIR, "manifest.json"), manifest);
 
   process.stdout.write(
-    `prep: ${manifest.file_count} files, churn ${manifest.churn}, ` +
+    `prep: mode=${manifest.review_mode} ${manifest.file_count} files, churn ${manifest.churn}, ` +
       `${manifest.total_fullfile_bytes} bytes at HEAD, ` +
       `${manifest.symbol_manifest.length} symbols, ` +
       `title_ok=${manifest.title_ok}, ` +

@@ -56,13 +56,19 @@ injection-safety rule.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
 7. **Checkout / deterministic prep and model routing** — checks out the PR
-   head commit, then resolves the merge base, the changed-file list, each
-   file's full byte size at HEAD, a symbol manifest from the diff hunk
-   headers, and the Conventional-Commits title check into
-   `.ai-review/manifest.json`. The review stage is told to trust those
-   values instead of re-deriving them in paid model turns — a model that
-   derives the diff base from a false premise reviews the wrong range and
-   reports confidently on it.
+   head commit, then resolves the merge base, decides **full vs delta**
+   review from the last published `<!-- ai-review -->` meta (unless
+   `force-full-review` is set), writes `.ai-review/delta.json` and optional
+   `.ai-review/prior-review.md`, and stages the changed-file list for the
+   *active* range (delta = commits after the prior review HEAD; full =
+   merge-base…HEAD), each file's full byte size at HEAD, a symbol manifest
+   from the diff hunk headers, and the Conventional-Commits title check into
+   `.ai-review/manifest.json`. Manifest `base_sha`/`head_sha` stay the PR
+   merge-base and HEAD for telemetry; `review_mode` /
+   `delta_base_sha` / `prior_head_sha` describe the active range. The review
+   stage is told to trust those values instead of re-deriving them in paid
+   model turns — a model that derives the diff base from a false premise
+   reviews the wrong range and reports confidently on it.
 
    The same step routes ordinary diffs to the locked Sonnet primary
    (`claude/claude-sonnet-5`), escalating to Opus (`claude/claude-opus-5`)
@@ -218,6 +224,18 @@ injection-safety rule.
 | `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
+| `force-full-review` | When `true`, always review merge-base…HEAD instead of a delta since the last published ai-review. | No | `false` |
+
+## Delta reviews
+
+On re-runs, prep looks for the latest published review body with
+`<!-- ai-review -->` and a parseable
+`<!-- ai-review-meta head_sha=… base_sha=… mode=full|delta -->` line.
+When that prior `head_sha` is an ancestor of the current HEAD and the
+merge-base matches, the active range is **delta** (`prior_head…HEAD`) —
+smaller numstat / must-read set, with `.ai-review/prior-review.md` for
+finding carry-forward. Full mode is used on first run, missing/inconclusive
+meta, force-push (non-ancestor), base SHA change, or `force-full-review: true`.
 
 ## Outputs
 
