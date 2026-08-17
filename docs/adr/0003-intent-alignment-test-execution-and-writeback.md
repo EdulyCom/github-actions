@@ -1,10 +1,12 @@
 # ADR 0003 — Linked-issue intent, real test execution, and PR/issue write-back
 
-- **Status:** Accepted
+- **Status:** Accepted (partially superseded by ADR 0006 for `ai-review`
+  checklist tick / status-block write-back and size-based Sonnet/Opus routing)
 - **Date:** 2026-07-21
 - **Relates to:** ADR 0001 (gate/identity/injection posture) and ADR 0002
   (`ai-qa` agentic review). Those decisions still hold; this ADR layers new
   capability onto both actions without changing the gate contract.
+  **Superseded in part by** ADR 0006 (Test Plan ↔ CI findings; roster-K OSH).
 
 ## Context
 

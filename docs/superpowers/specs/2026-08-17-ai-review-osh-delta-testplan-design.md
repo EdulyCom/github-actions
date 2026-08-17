@@ -1,6 +1,6 @@
 # `ai-review` OSH + delta + Test-Plan/CI — design
 
-**Status:** approved shape; Slices 1–2 landed; Slice 3 (OSH fan-out) landing on this branch.
+**Status:** Slices 1–3 landed on branch `feat/ai-review-osh-delta-testplan` (delta, Test Plan ↔ CI, OSH fan-out); consumer docs + ADR 0006 record the checklist-tick retirement.
 **Extends:** [`2026-08-07-ai-review-parallel-review-design.md`](./2026-08-07-ai-review-parallel-review-design.md)
 (parallel OSH / coverage–coherence / rubric scoring). This document does **not** supersede that
 design’s §1 binding constraints or its scoring/`recompute.js` contract.

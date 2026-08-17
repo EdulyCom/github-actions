@@ -51,7 +51,7 @@ lives inside your own CI's job graph and shares its concurrency group:
 
 permissions:
   contents: read
-  pull-requests: write   # post the review; tick PR-body checkboxes
+  pull-requests: write   # post the native PR review + labels
   issues: read           # resolve + read the issues this PR closes
 
 concurrency:
@@ -63,10 +63,10 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     # Wall-clock backstop. Composite-action steps can't set timeout-minutes,
     # so this job-level cap is the only bound on a hung Anthropic gateway /
-    # plugin-marketplace load. Give it headroom for an Opus review that reads
-    # full files and runs your tests, but keep it tight enough to fail fast on
-    # a stall (the internal Haiku context stage is best-effort and won't sink
-    # the review on its own).
+    # plugin-marketplace load. Give it headroom for a roster-K review (Sonnet
+    # collapse or Opus fan-out) that reads full files, but keep it tight enough
+    # to fail fast on a stall (the Haiku context stage is best-effort and won't
+    # sink the review on its own).
     timeout-minutes: 25
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
@@ -83,7 +83,7 @@ jobs:
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          # test-command: npm test   # optional; empty ⇒ auto-detect / skip
+          # force-full-review: true   # optional; skip delta and review merge-base…HEAD
 
   review-gate:
     runs-on: ubuntu-latest
@@ -107,12 +107,14 @@ jobs:
 ```
 
 This version of `ai-review` also **reads the issues your PR closes** (to
-judge intent against their acceptance criteria — hence `issues: read`) and,
-when `update-pr-body` is left on, **ticks verified checklist boxes** in the
-PR description and maintains a managed `<!-- ai-review-status -->` block. It
-never unchecks a human's box. Keep your `on: pull_request` trigger at its
-default event types — do **not** add `edited`, or the body edits it makes
-would re-trigger the review in a loop.
+judge intent against their acceptance criteria — hence `issues: read`). It
+maps the PR **Test Plan** / checklists to CI coverage and turns gaps into
+normal findings; it does **not** tick checklist boxes or write an
+`<!-- ai-review-status -->` block (`update-pr-body` is accepted but a no-op
+for that path — see ADR 0006). On re-runs it prefers a **delta** range since
+the last published `<!-- ai-review -->` unless `force-full-review` is set.
+Roster **K** selects Sonnet collapse (K≤1) vs Opus fan-out (K>1); size-based
+`sonnet-*-threshold` inputs are deprecated for routing.
 
 Then, in branch protection, require the `review-gate` job's status (and
 your terminal CI job, e.g. `build`) as required status checks. If this repo

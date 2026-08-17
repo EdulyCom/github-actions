@@ -249,7 +249,9 @@ items verified in the PR body. Prep inventories:
 The model maps items to CI coverage; uncovered or weakly covered items become
 normal `findings[]` with severity P0–P3 via the rubric (then `recompute.js`).
 Checklist tick write-back is retired (`update-pr-body` is a no-op for that
-path). `test_execution` stays `"skipped"` — no test runners in the allowlist.
+path); see
+[`docs/adr/0006-test-plan-ci-findings-and-osh-routing.md`](../docs/adr/0006-test-plan-ci-findings-and-osh-routing.md).
+`test_execution` stays `"skipped"` — no test runners in the allowlist.
 
 ## OSH routing (roster K)
 
