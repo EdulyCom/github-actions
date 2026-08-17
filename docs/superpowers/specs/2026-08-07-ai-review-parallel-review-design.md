@@ -1,6 +1,9 @@
 # `ai-review` parallel code-review architecture — design
 
 **Status:** approved shape, not yet implemented. Sequencing in §8 governs how it lands.
+**Extended by:** [`2026-08-17-ai-review-osh-delta-testplan-design.md`](./2026-08-17-ai-review-osh-delta-testplan-design.md)
+(delta baseline, Test Plan ↔ CI findings / no checklist ticks, OSH ship order). That document does
+not rewrite this one; §1 binding constraints and the scoring/`recompute.js` contract here still apply.
 **Supersedes:** the 8-angle/14-section vendored rubric as the *finding* methodology (the rubric's
 *scoring* vocabulary survives — see §3).
 **Authors:** Opus (architecture), Fable (coverage/coherence redesign + calibration review), synthesized
