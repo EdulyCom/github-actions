@@ -503,8 +503,8 @@ runs:
         K="${K:-0}"
 
         # K≤1 (including empty-diff k:0): single Sonnet session emits
-        # --json-schema directly — no Opus parent, no Haiku scorer.
-        # K>1: Opus parent + native Sonnet/Haiku subagents; only Opus emits SO.
+        # --json-schema directly — no Opus parent, no independent scorer.
+        # K>1: Opus parent + Sonnet Task --agents; only Opus emits SO.
         if [ "${K}" -le 1 ]; then
           MODEL="${SONNET}"
           FALLBACK="${SONNET_FALLBACK}"
@@ -970,7 +970,7 @@ runs:
           report. Under **collapse**, include your own confidence 0/25/50/75/100
           and, where you would reclassify it, `severity_confirmed`. Under
           **fanout**, copy each finding's `confidence` and `severity_confirmed`
-          from the Haiku scorer (finder ≠ scorer) — do not self-score when a
+          from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
           scorer ran; worker severity labels may still seed the finding.
           `files_reviewed` lists every file
           read in full for the active range (yours under collapse; union of
