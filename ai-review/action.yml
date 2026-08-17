@@ -54,18 +54,6 @@ inputs:
       controls — scope this to named bots, not `'*'`.
     required: false
     default: ""
-  allowed-non-write-users:
-    description: >
-      Passed through to `claude-code-action`'s `allowed_non_write_users`.
-      Comma-separated usernames (or `*`) allowed to run without a successful
-      collaborator write-permission lookup. Only takes effect when
-      `github-token` is provided (the default). Use when that GitHub API is
-      flaky (503) or for workflows whose Claude stages already use a
-      read-scoped token and never post via that token. WARNING: bypasses a
-      security check — prefer named users; `*` only in tightly scoped
-      callers (e.g. this repo's selftest).
-    required: false
-    default: ""
   pr-number:
     description: >
       Pull request number to review. Optional — defaults to the
@@ -632,10 +620,6 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        # allowed_non_write_users enables CCA subprocess isolation by
-        # default; that writes an invalid root package.json and breaks
-        # later node requires (Publish/telemetry). Opt out.
-        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token: this stage only
@@ -645,7 +629,6 @@ runs:
         # steps later in this action.
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
-        allowed_non_write_users: ${{ inputs.allowed-non-write-users }}
         # Root cause of the context.md handoff failure (Task 2.4 fix round): this
         # step ran with NO --allowedTools at all, so claude-code-action's headless
         # permission model silently denied every Write and most Bash tool calls
@@ -841,10 +824,6 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        # allowed_non_write_users enables CCA subprocess isolation by
-        # default; that writes an invalid root package.json and breaks
-        # later node requires (Publish/telemetry). Opt out.
-        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
@@ -859,7 +838,6 @@ runs:
         # Derive). The App-minted identity is reserved for Publish below.
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
-        allowed_non_write_users: ${{ inputs.allowed-non-write-users }}
         plugins: superpowers@superpowers-marketplace
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
@@ -1135,15 +1113,10 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        # allowed_non_write_users enables CCA subprocess isolation by
-        # default; that writes an invalid root package.json and breaks
-        # later node requires (Publish/telemetry). Opt out.
-        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
-        allowed_non_write_users: ${{ inputs.allowed-non-write-users }}
         claude_args: |
           --resume ${{ steps.retry_budget.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
@@ -1227,17 +1200,12 @@ runs:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
-        # allowed_non_write_users enables CCA subprocess isolation by
-        # default; that writes an invalid root package.json and breaks
-        # later node requires (Publish/telemetry). Opt out.
-        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
         OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
-        allowed_non_write_users: ${{ inputs.allowed-non-write-users }}
         plugins: superpowers@superpowers-marketplace
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
