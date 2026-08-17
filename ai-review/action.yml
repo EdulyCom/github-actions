@@ -436,13 +436,18 @@ runs:
         #     inconclusive "success but no structured_output" failure mode.
         SONNET="claude/claude-sonnet-5"
         OPUS="claude/claude-opus-5"
+        # Context stage (top-level session) can use Haiku.
         HAIKU="claude/claude-haiku-4-5-20251001"
+        # Task subagents under Opus inherit adaptive thinking; Haiku returns
+        # HTTP 400 on this gateway. Helper roster roles (history/scorer) use
+        # Sonnet so fan-out workers actually run (finder ≠ scorer still holds).
+        HELPER_MODEL="${SONNET}"
         CURSOR="claude/cursor/composer-2.5"
         FREE_SO="oc/nemotron-3.5-lightning-free,oc/deepseek-v4-flash-free,auto/best-free"
         HAIKU_FALLBACK="${CURSOR},oc/nemotron-3.5-lightning-free,auto/best-free"
         SONNET_FALLBACK="${FREE_SO}"
         OPUS_FALLBACK="${FREE_SO}"
-        export SONNET OPUS HAIKU
+        export SONNET OPUS HAIKU HELPER_MODEL
 
         # Resolve the PR merge-base once (telemetry + meta base_sha). The
         # active review range may be a delta since the last published review.
@@ -533,6 +538,11 @@ runs:
           cp "${ACTION_PATH}/osh-policy-collapse.md" .ai-review/osh-policy.md
         fi
 
+        # Pre-register Task agents (Sonnet) so the Opus parent can fan out in
+        # one parallel wave without improvising agent defs mid-review.
+        jq -c . "${ACTION_PATH}/osh-agents.json" > .ai-review/osh-agents.json
+        OSH_AGENTS="$(cat .ai-review/osh-agents.json)"
+
         {
           echo "files=${FILES}"
           echo "churn=${CHURN}"
@@ -547,6 +557,10 @@ runs:
           echo "merge-base-sha=${BASE_SHA}"
           echo "head-sha=${HEAD_SHA}"
           echo "delta-base-sha=${DELTA_BASE_SHA}"
+          # Multiline-safe: agents JSON is one jq -c line but may be large.
+          echo "osh-agents<<OSH_AGENTS_EOF"
+          printf '%s\n' "${OSH_AGENTS}"
+          echo "OSH_AGENTS_EOF"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Resolve linked issues
@@ -822,6 +836,7 @@ runs:
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
           --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
+          --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -836,10 +851,12 @@ runs:
           Read `.ai-review/osh-policy.md` FIRST and obey it. Prep set
           `OSH_MODE` (`collapse` or `fanout`) to match that file:
           - collapse: single-session Sonnet review; no subagent fan-out.
-          - fanout: you are the Opus parent; spawn Sonnet/Haiku Task
-            subagents per `.ai-review/assignments.json`; only YOU emit
-            structured output. Workers return findings via Task results
-            (no Write tool).
+          - fanout: you are the Opus parent; spawn Task subagents using the
+            pre-registered `--agents` (`osh-coverage`, `osh-tracer`,
+            `osh-history`, `osh-scorer`) per `.ai-review/assignments.json` in
+            one parallel wave; only YOU emit structured output. Do not spawn
+            Haiku (inherits adaptive thinking → gateway 400). Workers return
+            findings via Task results (no Write tool).
 
           Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
@@ -1187,6 +1204,7 @@ runs:
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
           --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
+          --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
@@ -1195,15 +1213,17 @@ runs:
 
           Read `.ai-review/osh-policy.md` and obey it (`OSH_MODE` is
           `collapse` or `fanout`). Under fanout you are the Opus parent —
-          spawn Sonnet/Haiku Task subagents per `.ai-review/assignments.json`;
-          only YOU emit structured output. Under collapse, do not fan out.
+          spawn Task subagents via pre-registered `--agents` (`osh-coverage`,
+          `osh-tracer`, `osh-history`, `osh-scorer`) per assignments.json in
+          one parallel wave; only YOU emit structured output. Do not spawn
+          Haiku. Under collapse, do not fan out.
 
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
           report. Under **collapse**, include your own confidence 0/25/50/75/100
           and, where you would reclassify it, `severity_confirmed`. Under
           **fanout**, copy each finding's `confidence` and `severity_confirmed`
-          from the Haiku scorer (finder ≠ scorer) — do not self-score when a
+          from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
           scorer ran. `files_reviewed` lists every file
           read in full for the active range — it is cross-checked against the
           staged manifest, so a short list reads as incomplete coverage. A

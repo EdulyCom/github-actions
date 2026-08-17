@@ -363,19 +363,31 @@ and must not invent a second partition.
 | Tier | Primary ID used in action / roster |
 |---|---|
 | Opus (parent / intent tier) | `claude/claude-opus-5` |
-| Sonnet (coverage + tracer) | `claude/claude-sonnet-5` |
-| Haiku (history + independent scorer) | `claude/claude-haiku-4-5-20251001` |
+| Sonnet (coverage + tracer + Task helpers) | `claude/claude-sonnet-5` |
+| Haiku (context stage only — top-level session) | `claude/claude-haiku-4-5-20251001` |
 
-Subagents use the `model` field on each role in `assignments.json` (same strings). Cap remains
+**Task subagents must not use Haiku under an Opus parent.** Claude Code Task
+subagents inherit the parent's adaptive/extended thinking; Haiku returns
+`400 adaptive thinking is not supported on this model` on this gateway.
+History + independent scorer therefore run as **Sonnet** Task agents
+(`osh-history`, `osh-scorer` via `--agents`); finder ≠ scorer still holds
+because they are separate sessions. Context-stage Haiku remains valid (not a
+Task child of Opus).
+
+Subagents use pre-registered `--agents` (`osh-coverage`, `osh-tracer`,
+`osh-history`, `osh-scorer`) plus `assignments.json` role partition. Cap remains
 **K ≤ 4** coverage reviewers (`roster.js` `MAX_K`).
 
 ### Fan-out path (`assignments.json` `.k` > 1)
 
 1. Parent session `--model` is Opus. Only this session may use `--json-schema` / emit
    structured output for Publish.
-2. Read `.ai-review/assignments.json`. Spawn native Claude Code **Task/Agent** subagents:
-   - **Sonnet** for each `reviewer-*` (coverage) and for `tracer` (coherence).
-   - **Haiku** for `history` and for `scorer` (independent confidence / `severity_confirmed`).
+2. Read `.ai-review/assignments.json`. Spawn native Claude Code **Task** subagents
+   in **one parallel wave** using `--agents`:
+   - **`osh-coverage`** (Sonnet) — one Task per `reviewer-*`.
+   - **`osh-tracer`** (Sonnet) — coherence.
+   - **`osh-history`** (Sonnet) — perspective gathers.
+   - **`osh-scorer`** (Sonnet) — independent confidence / `severity_confirmed`.
    - **Intent** (`kind: frame`): Opus owns it (parent may run it itself or dispatch an Opus-tier
      subagent). Keep intent isolated from coverage analysis.
 3. Workers return freeform or JSON **via Task tool results** (Review allowlist
@@ -386,7 +398,7 @@ Subagents use the `model` field on each role in `assignments.json` (same strings
    coverage workers' union of `assigned_files` (plus tracer / neighbor expansion rules).
 5. Parent aggregates worker outputs into the schema contract (`comment_markdown`, `findings`,
    `counts`, `intent`, etc.). On fan-out, each finding's `confidence` /
-   `severity_confirmed` must come from the Haiku **scorer** (finder ≠ scorer) —
+   `severity_confirmed` must come from **`osh-scorer`** (finder ≠ scorer) —
    the parent must not self-score when a scorer ran. Publish continues to consume
    **parent structured output** (same fail-closed gate as today); multi-file
    `aggregate.js` remains shadow/non-gating until a follow-up wires it live.

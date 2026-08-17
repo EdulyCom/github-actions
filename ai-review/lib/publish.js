@@ -79,15 +79,13 @@ function stripLeadingBannerArtifacts(markdown) {
  *   `reviewMeta` stamps the delta baseline (spec §6.1); Publish passes
  *   current HEAD + PR merge-base + this run's full|delta mode.
  */
-function modelLine(modelUsed) {
-  if (!modelUsed || typeof modelUsed !== "string" || !modelUsed.trim()) return [];
-  return ["", `Model: \`${modelUsed.trim()}\``];
+function modelLine(_modelUsed) {
+  // Model attribution removed from published review bodies (consumer ask).
+  return [];
 }
 
-function modelFooter(modelUsed) {
-  const line = modelLine(modelUsed);
-  if (!line.length) return [];
-  return [...line, "_Re-run this job if you need another review pass._"];
+function modelFooter(_modelUsed) {
+  return ["", "_Re-run this job if you need another review pass._"];
 }
 
 function buildReviewBody({

@@ -152,18 +152,20 @@ test("always leads with the <!-- ai-review --> marker", () => {
   assert.match(body, /^<!-- ai-review -->\n/);
 });
 
-test("buildReviewBody includes model used and re-review hint", () => {
+test("buildReviewBody omits Model line but keeps re-review hint", () => {
   const body = buildReviewBody({
     ...BASE_ARGS,
     modelUsed: "claude/claude-sonnet-5",
   });
-  assert.match(body, /Model: `claude\/claude-sonnet-5`/);
+  assert.doesNotMatch(body, /^Model:/m);
+  assert.doesNotMatch(body, /Model: `claude\/claude-sonnet-5`/);
   assert.match(body, /Re-run this job if you need another review pass/);
 });
 
-test("buildReviewBody omits Model line when modelUsed is empty", () => {
+test("buildReviewBody still omits Model line when modelUsed is empty", () => {
   const body = buildReviewBody({ ...BASE_ARGS, modelUsed: "" });
   assert.doesNotMatch(body, /^Model:/m);
+  assert.match(body, /Re-run this job if you need another review pass/);
 });
 
 test("buildReviewBody stamps ai-review-meta immediately after the marker", () => {
@@ -201,11 +203,12 @@ test("with salvaged text the details block contains it", () => {
   assert.match(body, /<\/details>/);
 });
 
-test("buildInconclusiveBody includes Model line but not a second italic re-run hint", () => {
+test("buildInconclusiveBody omits Model line and keeps job re-run instruction", () => {
   const body = buildInconclusiveBody("salvaged text", {
     modelUsed: "claude/cursor/composer-2.5",
   });
-  assert.match(body, /Model: `claude\/cursor\/composer-2.5`/);
+  assert.doesNotMatch(body, /Model: `claude\/cursor\/composer-2.5`/);
+  assert.doesNotMatch(body, /^Model:/m);
   assert.match(body, /\*\*Re-run the `ai-review` job\*\*/);
   assert.doesNotMatch(body, /_Re-run this job if you need another review pass\._/);
 });

@@ -74,8 +74,11 @@ injection-safety rule.
    The same step routes by roster **K** from `.ai-review/assignments.json`
    (not file/churn size): **K≤1** → locked Sonnet (`claude/claude-sonnet-5`)
    collapse — one session emits `--json-schema` directly; **K>1** → locked
-   Opus (`claude/claude-opus-5`) parent that fans out native Sonnet/Haiku
-   subagents per the roster (only the parent emits structured output).
+   Opus (`claude/claude-opus-5`) parent that fans out native Sonnet Task
+   subagents (`osh-coverage` / `osh-tracer` / `osh-history` / `osh-scorer`
+   via `--agents`; only the parent emits structured output). Haiku is not
+   used as a Task child of Opus (inherits adaptive thinking → gateway 400);
+   the optional context stage still uses Haiku as a top-level session.
    Inputs `sonnet-files-threshold` / `sonnet-churn-threshold` remain accepted
    for backward compatibility but are **deprecated for model routing**.
 
@@ -261,7 +264,7 @@ Prep packs the active-range files into coverage bins and writes
 | K | Mode (`osh-mode`) | Review session |
 | --- | --- | --- |
 | ≤1 (incl. empty-diff `0`) | `collapse` | Single Sonnet + `--json-schema` (no Opus parent, no Haiku scorer) |
-| >1 (max 4) | `fanout` | Opus parent + native Sonnet/Haiku Task subagents; only Opus emits SO |
+| >1 (max 4) | `fanout` | Opus parent + Sonnet Task agents (`--agents`); only Opus emits SO |
 
 Publish still gates on that session's structured output. Multi-role
 `aggregate.js` stays shadow/non-gating.
