@@ -10,8 +10,20 @@
 // `github`/`context` objects actions/github-script injects at runtime, and
 // this module intentionally has zero I/O.
 
+const { formatReviewMeta } = require("./delta.js");
+
 const STATUS_BLOCK_START = "<!-- ai-review-status -->";
 const STATUS_BLOCK_END = "<!-- /ai-review-status -->";
+
+/**
+ * Meta line immediately after `<!-- ai-review -->` (spec §6.1).
+ * @param {{ headSha?: string, baseSha?: string, mode?: string|null }|null|undefined} reviewMeta
+ * @returns {string[]}
+ */
+function metaLines(reviewMeta) {
+  if (!reviewMeta || !reviewMeta.headSha || !reviewMeta.baseSha) return [];
+  return [formatReviewMeta(reviewMeta)];
+}
 
 // Some structured-output paths deliver comment_markdown with literal
 // two-character "\n" sequences instead of real newlines (observed on
@@ -61,8 +73,10 @@ function stripLeadingBannerArtifacts(markdown) {
  * @param {{verdict: string, confidence: number, mergeRisk: string,
  *   counts: {p0:number,p1:number,p2:number,p3:number}, intentDeviated: boolean,
  *   modelVerdict: string|undefined, blockers: string[], commentBody: string,
- *   modelUsed?: string|null}} args
+ *   modelUsed?: string|null,
+ *   reviewMeta?: { headSha: string, baseSha: string, mode: 'full'|'delta' }|null}} args
  *   `commentBody` must already be run through stripLeadingBannerArtifacts.
+ *   `reviewMeta` stamps the delta baseline (spec §6.1); omit until Publish wires SHAs.
  */
 function modelLine(modelUsed) {
   if (!modelUsed || typeof modelUsed !== "string" || !modelUsed.trim()) return [];
@@ -85,6 +99,7 @@ function buildReviewBody({
   blockers,
   commentBody,
   modelUsed,
+  reviewMeta,
 }) {
   const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
   const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
@@ -112,6 +127,7 @@ function buildReviewBody({
 
   return [
     "<!-- ai-review -->",
+    ...metaLines(reviewMeta),
     `${rejectedBanner}${verdictLine}`,
     ...(mismatchNote ? [mismatchNote] : []),
     ...(reasonNote ? [reasonNote] : []),
@@ -127,13 +143,22 @@ function buildReviewBody({
 
 /**
  * @param {string} salvaged possibly-empty text recovered from a missed structured output.
- * @param {{modelUsed?: string|null}} [opts]
+ * @param {{modelUsed?: string|null,
+ *   reviewMeta?: { headSha: string, baseSha: string }|null}} [opts]
+ *   Inconclusive publishes omit mode or set mode=inconclusive so the next run
+ *   cannot treat the body as a delta baseline (spec §6.1).
  */
 function buildInconclusiveBody(salvaged, opts = {}) {
   const modelUsed = opts && opts.modelUsed;
+  const reviewMeta = opts && opts.reviewMeta;
+  const inconclusiveMeta =
+    reviewMeta && reviewMeta.headSha && reviewMeta.baseSha
+      ? { headSha: reviewMeta.headSha, baseSha: reviewMeta.baseSha, mode: "inconclusive" }
+      : null;
   salvaged = unescapeLiteralNewlines(salvaged || "");
   return [
     "<!-- ai-review -->",
+    ...metaLines(inconclusiveMeta),
     "### ⚠️ AI Review — inconclusive (re-run required)",
     "",
     "The review model did not return a structured result after a",

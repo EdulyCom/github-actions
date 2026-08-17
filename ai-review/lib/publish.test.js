@@ -166,6 +166,26 @@ test("buildReviewBody omits Model line when modelUsed is empty", () => {
   assert.doesNotMatch(body, /^Model:/m);
 });
 
+test("buildReviewBody stamps ai-review-meta immediately after the marker", () => {
+  const body = buildReviewBody({
+    ...BASE_ARGS,
+    reviewMeta: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      mode: "delta",
+    },
+  });
+  assert.match(
+    body,
+    /^<!-- ai-review -->\n<!-- ai-review-meta head_sha=a{40} base_sha=b{40} mode=delta -->\n/
+  );
+});
+
+test("buildReviewBody omits meta when reviewMeta is absent", () => {
+  const body = buildReviewBody(BASE_ARGS);
+  assert.doesNotMatch(body, /ai-review-meta/);
+});
+
 // --- buildInconclusiveBody ---------------------------------------------------
 
 test("without salvaged text there is no details block", () => {
@@ -188,6 +208,19 @@ test("buildInconclusiveBody includes Model line but not a second italic re-run h
   assert.match(body, /Model: `claude\/cursor\/composer-2.5`/);
   assert.match(body, /\*\*Re-run the `ai-review` job\*\*/);
   assert.doesNotMatch(body, /_Re-run this job if you need another review pass\._/);
+});
+
+test("buildInconclusiveBody stamps meta with mode=inconclusive", () => {
+  const body = buildInconclusiveBody("", {
+    reviewMeta: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    },
+  });
+  assert.match(
+    body,
+    /^<!-- ai-review -->\n<!-- ai-review-meta head_sha=a{40} base_sha=b{40} mode=inconclusive -->\n/
+  );
 });
 
 // --- tickVerifiedBoxes --------------------------------------------------------
