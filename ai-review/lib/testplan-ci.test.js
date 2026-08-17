@@ -46,6 +46,39 @@ test("extractTestPlanItems: plain bullets under Test Plan when no checkboxes", (
   ]);
 });
 
+test("extractTestPlanItems: unions checkboxes with plain/numbered in same section", () => {
+  const body = [
+    "## Test Plan",
+    "- [ ] Automated unit suite",
+    "- Manual smoke on staging",
+    "2. Load-test the API",
+  ].join("\n");
+
+  assert.deepEqual(extractTestPlanItems(body), [
+    "Automated unit suite",
+    "Manual smoke on staging",
+    "Load-test the API",
+  ]);
+});
+
+test("extractTestPlanItems: empty Test Plan section falls back to body checkboxes", () => {
+  const body = [
+    "## Summary",
+    "- [ ] Outside checklist item",
+    "",
+    "## Test Plan",
+    "See checklist above.",
+    "",
+    "## Notes",
+    "- [x] Another outside item",
+  ].join("\n");
+
+  assert.deepEqual(extractTestPlanItems(body), [
+    "Outside checklist item",
+    "Another outside item",
+  ]);
+});
+
 test("extractTestPlanItems: falls back to all body checkboxes without section", () => {
   const body = [
     "Please verify:",
@@ -57,6 +90,16 @@ test("extractTestPlanItems: falls back to all body checkboxes without section", 
     "Handles empty input",
     "Docs updated",
   ]);
+});
+
+test("extractTestPlanItems: dedupes same text checked and unchecked", () => {
+  const body = [
+    "## Test Plan",
+    "- [ ] Handles empty input",
+    "- [x] Handles empty input",
+  ].join("\n");
+
+  assert.deepEqual(extractTestPlanItems(body), ["Handles empty input"]);
 });
 
 test("extractTestPlanItems: empty / non-string → []", () => {

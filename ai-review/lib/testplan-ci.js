@@ -28,10 +28,15 @@ function extractTestPlanItems(prBody) {
 
   const section = extractTestPlanSection(prBody);
   if (section != null) {
-    const boxes = extractCheckboxes(section);
-    if (boxes.length) return unique(boxes);
-    const plain = extractPlainListItems(section);
-    return unique(plain);
+    // Union checkboxes and plain/numbered bullets (neither extractor alone).
+    const fromSection = unique([
+      ...extractCheckboxes(section),
+      ...extractPlainListItems(section),
+    ]);
+    if (fromSection.length) return fromSection;
+    // Empty Test Plan section → still honor body checkboxes elsewhere
+    // (spec: section and/or checklist items).
+    return unique(extractCheckboxes(prBody));
   }
 
   return unique(extractCheckboxes(prBody));
