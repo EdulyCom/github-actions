@@ -59,8 +59,9 @@ injection-safety rule.
    derives the diff base from a false premise reviews the wrong range and
    reports confidently on it.
 
-   The same step routes ordinary diffs to `sonnet-model`, escalating to
-   `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
+   The same step routes ordinary diffs to the locked Sonnet primary
+   (`claude/claude-sonnet-5`), escalating to Opus (`claude/claude-opus-5`)
+   once a diff exceeds **either** `sonnet-files-threshold`
    (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
    sent nearly every real PR to Opus and moved the review stage from
    ~10-13 min to a 35-min median. Widened 15/400 → 25/800 after measuring
@@ -204,11 +205,8 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
-| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `25` |
-| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `800` |
-| `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
-| `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
-| `haiku-model` | Model used by the context stage, and stamped on the roster's `history`/`scorer` roles by the prep step. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage or role running it passes `--effort` — the roster resolves that against the model id, not the tier, so overriding another tier to a literal Haiku id (e.g. `sonnet-model: claude-haiku-4-5`) is also covered. A gateway alias that *routes* to Haiku under an unrelated string is not detected; the check is a substring match, not alias resolution. | No | `claude-haiku-4-5` |
+| `sonnet-files-threshold` | Max changed-file count for a diff to still route to the locked Sonnet primary (must hold together with `sonnet-churn-threshold`); larger diffs route to Opus. | No | `25` |
+| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to Sonnet. | No | `800` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |

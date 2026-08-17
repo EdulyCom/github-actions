@@ -94,30 +94,12 @@ inputs:
       docs/adr/0004-non-blocking-findings-and-structured-output-repair.md.
     required: false
     default: "90"
-  sonnet-model:
-    description: >
-      Model ID used by the diff-size routing step ONLY for tiny diffs
-      (≤`sonnet-files-threshold` files AND ≤`sonnet-churn-threshold`
-      changed lines). Every larger diff routes to `opus-model`. Consumed
-      by the routing step, whose output feeds the Review stage as the
-      model to run. Override when a gateway aliases model names.
-    required: false
-    default: "claude-sonnet-5"
-  opus-model:
-    description: >
-      Model ID used by the diff-size routing step for all non-tiny diffs
-      (the default — the review stage prefers Opus, dropping to
-      `sonnet-model` only for trivially small changes). Consumed by the
-      routing step, whose output feeds the Review stage as the model to
-      run. Override when a gateway aliases model names.
-    required: false
-    default: "claude-opus-5"
   sonnet-files-threshold:
     description: >
       Max changed-file count for a diff to still be considered "tiny" and
-      routed to `sonnet-model`. A diff qualifies for Sonnet only when it
+      routed to the locked Sonnet primary. A diff qualifies for Sonnet only when it
       is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to `opus-model`. Widened to 25 (from 15) — measured over
+      larger routes to the locked Opus primary. Widened to 25 (from 15) — measured over
       682 review jobs, 89% of all traffic routed to Opus, and Opus runs cost
       3x the wall-clock (28.1 min median vs 9.2) and 4x the spend ($13.22 vs
       $3.27) of Sonnet ones. This is NOT a depth concession: the parallel
@@ -129,23 +111,11 @@ inputs:
   sonnet-churn-threshold:
     description: >
       Max changed-line count (additions + deletions) for a diff to still
-      be considered "tiny" and routed to `sonnet-model`. Applied together
+      be considered "tiny" and routed to the locked Sonnet primary. Applied together
       with `sonnet-files-threshold` (both must hold for Sonnet). Widened to
       800 alongside `sonnet-files-threshold` — see the note there.
     required: false
     default: "800"
-  haiku-model:
-    description: >
-      Model ID used by the context stage (this phase) to read the diff and changed
-      files and write context.md for the review stage to consume. Also stamped by
-      the deterministic-prep step onto the roster's `history` and `scorer` roles,
-      so an override here reaches those too. Override when a gateway aliases model
-      names. NOTE: Haiku 4.5 does not accept the `effort` parameter, so no stage
-      running this model may pass `--effort` — the roster resolves that against
-      the model id rather than the tier, so pointing another tier at a Haiku id is
-      covered as well.
-    required: false
-    default: "claude-haiku-4-5"
   enable-context-stage:
     description: >
       When 'true' (default) the Haiku context stage runs and writes
@@ -438,12 +408,8 @@ runs:
       shell: bash
       env:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
-        SONNET: ${{ inputs.sonnet-model }}
-        OPUS: ${{ inputs.opus-model }}
-        # Read by lib/write-manifest.js only (lib/roster.js is pure and never
-        # touches the environment), to stamp the OSH tiering onto the roster
-        # with the consumer's overrides rather than hardcoded ids.
-        HAIKU: ${{ inputs.haiku-model }}
+        # Locked at action level — keep in sync with ai-qa cascade comments.
+        # Claude primary → Cursor if Claude blocked → free if Cursor blocked.
         FILES_MAX: ${{ inputs.sonnet-files-threshold }}
         CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
@@ -453,6 +419,16 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p .ai-review
+
+        # Locked model IDs (not inputs). Keep in sync with ai-qa.
+        SONNET="claude/claude-sonnet-5"
+        OPUS="claude/claude-opus-5"
+        HAIKU="claude/claude-haiku-4-5-20251001"
+        FREE="oc/nemotron-3.5-lightning-free,oc/nemotron-3-ultra-free,oc/deepseek-v4-flash-free,oc/mimo-v2.5-free,oc/laguna-s-2.1-free,auto/best-free"
+        SONNET_FALLBACK="claude/cursor/claude-4.6-sonnet-medium-thinking,${FREE}"
+        OPUS_FALLBACK="claude/cursor/claude-opus-4-8-medium-fast,${FREE}"
+        HAIKU_FALLBACK="claude/cursor/composer-2.5,${FREE}"
+        export SONNET OPUS HAIKU
 
         # Resolve the review range once, deterministically. `git diff A...B`
         # already means "merge base of A and B", but resolving the SHA
@@ -499,14 +475,19 @@ runs:
         FILES_MAX="${FILES_MAX:-25}"
         CHURN_MAX="${CHURN_MAX:-800}"
         if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
-          MODEL="${SONNET:-claude-sonnet-5}"
+          MODEL="${SONNET}"
+          FALLBACK="${SONNET_FALLBACK}"
         else
-          MODEL="${OPUS:-claude-opus-5}"
+          MODEL="${OPUS}"
+          FALLBACK="${OPUS_FALLBACK}"
         fi
         {
           echo "files=${FILES}"
           echo "churn=${CHURN}"
           echo "model=${MODEL}"
+          echo "fallback-model=${FALLBACK}"
+          echo "haiku-model=${HAIKU}"
+          echo "haiku-fallback-model=${HAIKU_FALLBACK}"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Resolve linked issues
@@ -586,7 +567,8 @@ runs:
         # Review stage's relative-path read of `context.md` at the repository root
         # resolves to the same file.
         claude_args: |
-          --model ${{ inputs.haiku-model }}
+          --model ${{ steps.route.outputs.haiku-model }}
+          --fallback-model ${{ steps.route.outputs.haiku-fallback-model }}
           --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read `.ai-review/manifest.json` first: a prior deterministic step
@@ -748,6 +730,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
@@ -957,6 +940,7 @@ runs:
         claude_args: |
           --resume ${{ steps.review.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
           --allowedTools "Read"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
@@ -1045,6 +1029,7 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
           --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'

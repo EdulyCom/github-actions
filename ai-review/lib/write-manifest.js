@@ -182,9 +182,9 @@ function writeRoster(manifest, sizes, io) {
     roster = buildRoster({
       files: manifest.changed_files.map((p) => ({ path: p, bytes: sizes[p] ?? 0 })),
       models: {
-        opus: process.env.OPUS || "claude-opus-5",
-        sonnet: process.env.SONNET || "claude-sonnet-5",
-        haiku: process.env.HAIKU || "claude-haiku-4-5",
+        opus: process.env.OPUS || "claude/claude-opus-5",
+        sonnet: process.env.SONNET || "claude/claude-sonnet-5",
+        haiku: process.env.HAIKU || "claude/claude-haiku-4-5-20251001",
       },
       importEdges: resolveImportEdges(specifiers, manifest.changed_files),
       symbolManifest: manifest.symbol_manifest,
