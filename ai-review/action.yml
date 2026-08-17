@@ -1515,6 +1515,11 @@ runs:
           || steps.review.outputs.structured_output) }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
         PUBLISH_LIB_PATH: ${{ github.action_path }}/lib/publish.js
+        METRICS_PATH: ${{ github.action_path }}/lib/metrics.js
+        ROUTED_MODEL: ${{ steps.route.outputs.model }}
+        REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
+        REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
+        RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
       with:
         github-token: ${{ steps.identity-refresh.outputs.author-token }}
         script: |
@@ -1528,6 +1533,23 @@ runs:
             buildStatusBlock,
             upsertStatusBlock,
           } = require(process.env.PUBLISH_LIB_PATH);
+          const { resolveModelUsed } = require(process.env.METRICS_PATH);
+
+          const readLog = (p) => {
+            try {
+              return JSON.parse(fs.readFileSync(p, "utf8"));
+            } catch {
+              return null;
+            }
+          };
+          const modelUsed = resolveModelUsed({
+            logs: [
+              readLog(process.env.RETRY_LOG),
+              readLog(process.env.REPAIR_LOG),
+              readLog(process.env.REVIEW_LOG),
+            ],
+            fallback: process.env.ROUTED_MODEL || "",
+          });
 
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
@@ -1552,7 +1574,7 @@ runs:
             } catch (e) {
               // No salvage file (step skipped, or nothing recoverable).
             }
-            const inconclusiveBody = buildInconclusiveBody(salvaged);
+            const inconclusiveBody = buildInconclusiveBody(salvaged, { modelUsed });
             try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -1624,6 +1646,7 @@ runs:
             modelVerdict: review.verdict,
             blockers,
             commentBody,
+            modelUsed,
           });
 
           await github.rest.pulls.createReview({

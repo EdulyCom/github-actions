@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { parseExecutionLog, collectMetrics, renderSummary } = require("./metrics.js");
+const { parseExecutionLog, collectMetrics, renderSummary, resolveModelUsed } = require("./metrics.js");
 
 // A minimal execution log in claude-code-action's shape: a top-level array of
 // stream entries, terminated by a `result` entry. The shape is pinned by the
@@ -235,4 +235,22 @@ test("renderSummary surfaces a stall rather than burying it in the table", () =>
   const md = renderSummary(collectMetrics([{ name: "review", log: stalledLog() }]));
   assert.match(md, /stall/i);
   assert.match(md, /review/);
+});
+
+// --- resolveModelUsed ------------------------------------------------------
+
+test("resolveModelUsed prefers first log that names a model", () => {
+  const retry = logFor({ turns: 1, cost: 0, ms: 10, model: "oc/mimo-v2.5-free" });
+  const review = logFor({ turns: 1, cost: 0, ms: 10, model: "claude/claude-opus-5" });
+  assert.equal(
+    resolveModelUsed({ logs: [retry, review], fallback: "claude/claude-opus-5" }),
+    "oc/mimo-v2.5-free",
+  );
+});
+
+test("resolveModelUsed falls back when logs empty", () => {
+  assert.equal(
+    resolveModelUsed({ logs: [null, []], fallback: "claude/claude-sonnet-5" }),
+    "claude/claude-sonnet-5",
+  );
 });
