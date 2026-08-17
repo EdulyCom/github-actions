@@ -818,7 +818,7 @@ function buildRoster({
     // claude-haiku-4-5`), but not a gateway alias that ROUTES to Haiku under an
     // unrelated string (e.g. `gw-fast-1`) — `anthropic-base-url`'s own
     // description documents that such aliases exist. No live effect either way:
-    // nothing consumes the roster yet, so nothing reads `effort`.
+    // No live effect either way until a consumer reads `effort` from the roster.
     if (spec.effort && !/haiku/i.test(String(model ?? ""))) out.effort = spec.effort;
     return out;
   };

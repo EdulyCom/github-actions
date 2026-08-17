@@ -510,6 +510,18 @@ runs:
         fi
         echo "prep: osh-mode=${OSH_MODE} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
 
+        # Mode-conditional review allowlist (collapse = prior least-privilege;
+        # fanout adds Task only). No Write on either path: Claude Code cannot
+        # scope Write to `.ai-review/` (see Derive step), so workers return
+        # findings via Task results and the parent aggregates into SO.
+        REVIEW_TOOLS_COLLAPSE='Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)'
+        REVIEW_TOOLS_FANOUT='Read,Grep,Glob,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)'
+        if [ "${OSH_MODE}" = "fanout" ]; then
+          REVIEW_ALLOWED_TOOLS="${REVIEW_TOOLS_FANOUT}"
+        else
+          REVIEW_ALLOWED_TOOLS="${REVIEW_TOOLS_COLLAPSE}"
+        fi
+
         # Policy file the review/retry prompts must obey (keeps one shared
         # prompt body with mode-specific orchestration rules).
         if [ "${OSH_MODE}" = "fanout" ]; then
@@ -531,27 +543,26 @@ Locked model IDs (match `roles[].model` when spawning):
 - Sonnet coverage + tracer: `claude/claude-sonnet-5`
 - Haiku history + scorer: `claude/claude-haiku-4-5-20251001`
 
-## Subagents (native Claude Code Task/Agent tool)
+## Subagents (native Claude Code Task tool)
 
-Spawn concurrent subagents:
+Spawn concurrent Task subagents (no Write tool — return results in the Task
+response text/JSON; you aggregate into structured output):
 
 1. **Sonnet** — one per `reviewer-*` (`kind: coverage`): read 100% of every
    `assigned_files` path with `Read`; run per-file rubric angles; propose
-   findings with P0–P3 severity. Write JSON to the role's `artifact` path
-   under `.ai-review/` when useful.
+   findings with P0–P3 severity (finder labels only — do not self-score).
 2. **Sonnet** — `tracer` (`kind: coherence`): zero assigned files; follow
    `symbol_manifest` / `split_clusters` for cross-file breakage (Angle C).
 3. **Haiku** — `history` (`kind: perspective`): git blame / prior comments /
    code-comment angles; cheap gathers, not full-file exhaustiveness.
-4. **Haiku** — `scorer` (`kind: scoring`): independent confidence 0/25/50/75/100
-   and `severity_confirmed` for findings you (or workers) raised. Finder ≠
-   scorer. Prefer writing `.ai-review/scores.json`.
+4. **Haiku** — `scorer` (`kind: scoring`): independent confidence
+   0/25/50/75/100 and `severity_confirmed` for every finding raised by
+   finders. **Finder ≠ scorer** — you must copy these into the SO
+   `findings[].confidence` / `severity_confirmed` fields; do not invent
+   your own scores when the scorer ran.
 5. **Intent** (`kind: frame`): you own Angle H (or dispatch an Opus-tier
    subagent). Frame from linked issues + PR body **before** treating coverage
    findings as settled.
-
-Workers return freeform or JSON under `.ai-review/`; they must not emit
-Publish structured output.
 
 ## What you must not re-read
 
@@ -565,9 +576,9 @@ require it).
 
 Resolve conflicts, prioritize, own intent, map Test Plan↔CI gaps to findings,
 apply delta prior-review carry-forward rules, then emit the single structured
-output (`comment_markdown`, `findings`, `files_reviewed`, `counts`, `intent`,
-…). Aggregate worker outputs yourself into that schema — Publish gates on your
-SO only.
+output. For each finding in SO: take `confidence` and `severity_confirmed`
+from the Haiku scorer; severity labels may originate from workers. Publish
+gates on your SO only.
 EOF
         else
           cat > .ai-review/osh-policy.md <<'EOF'
@@ -582,6 +593,8 @@ output directly.
   with `Read` — never sample, truncate, or reason from diff hunks alone.
 - Perform the full rubric review yourself (all angles that apply), including
   intent, Test Plan↔CI findings, and delta carry-forward when present.
+- Self-report finding `confidence` 0/25/50/75/100 and optional
+  `severity_confirmed` (no independent scorer on this path).
 EOF
         fi
 
@@ -590,6 +603,7 @@ EOF
           echo "churn=${CHURN}"
           echo "k=${K}"
           echo "osh-mode=${OSH_MODE}"
+          echo "review-allowed-tools=${REVIEW_ALLOWED_TOOLS}"
           echo "model=${MODEL}"
           echo "fallback-model=${FALLBACK}"
           echo "haiku-model=${HAIKU}"
@@ -857,10 +871,13 @@ EOF
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token, for the same
-        # least-privilege reason as the Context stage: this step only reads the
-        # repo, calls the Anthropic API, and returns structured output — it
-        # never calls the GitHub API to post anything. The App-minted identity
-        # is reserved for the deterministic Publish review step below.
+        # least-privilege reason as the Context stage: this step reads the
+        # repo (and on fanout may spawn Task subagents), calls the Anthropic
+        # API, and returns structured output — it never calls the GitHub API
+        # to post anything. Allowlist is mode-conditional
+        # (`steps.route.outputs.review-allowed-tools`): collapse has no
+        # Write/Task; fanout adds Task only (no Write — unscopeable; see
+        # Derive). The App-minted identity is reserved for Publish below.
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
         plugins: superpowers@superpowers-marketplace
@@ -869,7 +886,7 @@ EOF
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Write,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -886,7 +903,8 @@ EOF
           - collapse: single-session Sonnet review; no subagent fan-out.
           - fanout: you are the Opus parent; spawn Sonnet/Haiku Task
             subagents per `.ai-review/assignments.json`; only YOU emit
-            structured output. Workers may Write under `.ai-review/`.
+            structured output. Workers return findings via Task results
+            (no Write tool).
 
           Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
@@ -997,8 +1015,12 @@ EOF
 
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
-          report, with your own confidence 0/25/50/75/100 and, where you would
-          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          report. Under **collapse**, include your own confidence 0/25/50/75/100
+          and, where you would reclassify it, `severity_confirmed`. Under
+          **fanout**, copy each finding's `confidence` and `severity_confirmed`
+          from the Haiku scorer (finder ≠ scorer) — do not self-score when a
+          scorer ran; worker severity labels may still seed the finding.
+          `files_reviewed` lists every file
           read in full for the active range (yours under collapse; union of
           coverage workers under fanout) — it is cross-checked against the
           staged manifest, so a short list reads as incomplete coverage. A
@@ -1229,7 +1251,7 @@ EOF
           --model ${{ steps.route.outputs.model }}
           --fallback-model ${{ steps.route.outputs.fallback-model }}
           --max-turns 200
-          --allowedTools "Read,Grep,Glob,Write,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
@@ -1243,8 +1265,11 @@ EOF
 
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
-          report, with your own confidence 0/25/50/75/100 and, where you would
-          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
+          report. Under **collapse**, include your own confidence 0/25/50/75/100
+          and, where you would reclassify it, `severity_confirmed`. Under
+          **fanout**, copy each finding's `confidence` and `severity_confirmed`
+          from the Haiku scorer (finder ≠ scorer) — do not self-score when a
+          scorer ran. `files_reviewed` lists every file
           read in full for the active range — it is cross-checked against the
           staged manifest, so a short list reads as incomplete coverage. A
           later non-gating step aggregates these deterministically and compares
@@ -1567,7 +1592,7 @@ EOF
     #
     # Publish still consumes parent/collapsed-session structured_output (same
     # as today) for both osh-mode=collapse and fanout. Under fanout the Opus
-    # parent is prompted to gather worker artifacts into that SO; we do NOT
+    # parent is prompted to gather worker Task results into that SO; we do NOT
     # wire multi-role findings files into the live gate yet — avoiding a
     # half-broken aggregate path. This step still derives review-serial from
     # the SO and compares aggregate.js in shadow only.
@@ -1580,12 +1605,11 @@ EOF
     #
     # This step runs the new deterministic aggregation next to the live path
     # and records whether the two agree. It reads the files the Derive step
-    # above produces from the schema-validated structured output (the model
-    # holds no Write grant on the collapse path for gate inputs — see that
-    # step's comment; fanout may Write worker JSON under `.ai-review/` for
-    # the parent to read), runs lib/aggregate.js, feeds the result through the
-    # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
-    # is a warning in the log and a row in the job summary.
+    # above produces from the schema-validated structured output (Review has
+    # no Write grant on collapse or fanout — workers return via Task; Derive
+    # writes the shadow artifacts), runs lib/aggregate.js, feeds the result
+    # through the SAME lib/recompute.js the real verdict uses, and compares.
+    # Any divergence is a warning in the log and a row in the job summary.
     #
     # Deliberately non-gating: `continue-on-error`, no outputs consumed by any
     # later step, and Publish below is untouched. Deleting --json-schema and the

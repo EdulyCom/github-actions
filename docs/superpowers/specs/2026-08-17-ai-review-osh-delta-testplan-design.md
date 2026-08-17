@@ -126,7 +126,8 @@ flowchart TD
 | **H**aiku (helpers) | History / mechanical gathers + **independent confidence scoring** | Cheap collection and scoring that must not be the same model that found the issue (parallel design §3). |
 
 Only the **Opus parent** emits `--json-schema` structured output for Publish. Workers return freeform
-or JSON files under `.ai-review/`; the parent aggregates into the schema contract. Aggregation
+or JSON **via Task results** (no unscopeable Write on the review allowlist); the parent aggregates into
+the schema contract. Aggregation
 (`lib/aggregate.js` when landed) and `recompute.js` remain deterministic consumers — model-reported
 counts are never trusted as gate inputs.
 
@@ -377,15 +378,18 @@ Subagents use the `model` field on each role in `assignments.json` (same strings
    - **Haiku** for `history` and for `scorer` (independent confidence / `severity_confirmed`).
    - **Intent** (`kind: frame`): Opus owns it (parent may run it itself or dispatch an Opus-tier
      subagent). Keep intent isolated from coverage analysis.
-3. Workers may write freeform or JSON under `.ai-review/` (e.g. `findings/<role>.json`,
-   `scores.json`). They must **not** emit the Publish `--json-schema` blob.
+3. Workers return freeform or JSON **via Task tool results** (Review allowlist
+   has Task on fanout only — **no Write**; Claude Code cannot scope Write to
+   `.ai-review/`). They must **not** emit the Publish `--json-schema` blob.
 4. Opus **must not** exhaustively re-read every file workers already covered unless conflict
    resolution or a spot-check needs it. Must-read-all for the active range is satisfied by the
    coverage workers' union of `assigned_files` (plus tracer / neighbor expansion rules).
 5. Parent aggregates worker outputs into the schema contract (`comment_markdown`, `findings`,
-   `counts`, `intent`, etc.). Publish continues to consume **parent structured output** (same
-   fail-closed gate as today); multi-file `aggregate.js` remains shadow/non-gating until a
-   follow-up wires it live.
+   `counts`, `intent`, etc.). On fan-out, each finding's `confidence` /
+   `severity_confirmed` must come from the Haiku **scorer** (finder ≠ scorer) —
+   the parent must not self-score when a scorer ran. Publish continues to consume
+   **parent structured output** (same fail-closed gate as today); multi-file
+   `aggregate.js` remains shadow/non-gating until a follow-up wires it live.
 
 ### Collapse path (`assignments.json` `.k` ≤ 1, including empty-diff `k: 0`)
 
