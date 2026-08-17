@@ -45,9 +45,21 @@ function stripLeadingBannerArtifacts(markdown) {
 /**
  * @param {{verdict: string, confidence: number, mergeRisk: string,
  *   counts: {p0:number,p1:number,p2:number,p3:number}, intentDeviated: boolean,
- *   modelVerdict: string|undefined, blockers: string[], commentBody: string}} args
+ *   modelVerdict: string|undefined, blockers: string[], commentBody: string,
+ *   modelUsed?: string|null}} args
  *   `commentBody` must already be run through stripLeadingBannerArtifacts.
  */
+function modelLine(modelUsed) {
+  if (!modelUsed || typeof modelUsed !== "string" || !modelUsed.trim()) return [];
+  return ["", `Model: \`${modelUsed.trim()}\``];
+}
+
+function modelFooter(modelUsed) {
+  const line = modelLine(modelUsed);
+  if (!line.length) return [];
+  return [...line, "_Re-run this job if you need another review pass._"];
+}
+
 function buildReviewBody({
   verdict,
   confidence,
@@ -57,6 +69,7 @@ function buildReviewBody({
   modelVerdict,
   blockers,
   commentBody,
+  modelUsed,
 }) {
   const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
   const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
@@ -91,13 +104,18 @@ function buildReviewBody({
     "",
     `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
     `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
+    ...modelFooter(modelUsed),
     "",
     commentBody || "_No review content returned._",
   ].join("\n");
 }
 
-/** @param {string} salvaged possibly-empty text recovered from a missed structured output. */
-function buildInconclusiveBody(salvaged) {
+/**
+ * @param {string} salvaged possibly-empty text recovered from a missed structured output.
+ * @param {{modelUsed?: string|null}} [opts]
+ */
+function buildInconclusiveBody(salvaged, opts = {}) {
+  const modelUsed = opts && opts.modelUsed;
   return [
     "<!-- ai-review -->",
     "### ⚠️ AI Review — inconclusive (re-run required)",
@@ -109,6 +127,7 @@ function buildInconclusiveBody(salvaged) {
     "fails closed.",
     "",
     "**Re-run the `ai-review` job** to get a verdict.",
+    ...modelLine(modelUsed),
     ...(salvaged
       ? [
           "",

@@ -121,6 +121,20 @@ test("always leads with the <!-- ai-review --> marker", () => {
   assert.match(body, /^<!-- ai-review -->\n/);
 });
 
+test("buildReviewBody includes model used and re-review hint", () => {
+  const body = buildReviewBody({
+    ...BASE_ARGS,
+    modelUsed: "claude/claude-sonnet-5",
+  });
+  assert.match(body, /Model: `claude\/claude-sonnet-5`/);
+  assert.match(body, /Re-run this job if you need another review pass/);
+});
+
+test("buildReviewBody omits Model line when modelUsed is empty", () => {
+  const body = buildReviewBody({ ...BASE_ARGS, modelUsed: "" });
+  assert.doesNotMatch(body, /^Model:/m);
+});
+
 // --- buildInconclusiveBody ---------------------------------------------------
 
 test("without salvaged text there is no details block", () => {
@@ -134,6 +148,15 @@ test("with salvaged text the details block contains it", () => {
   assert.match(body, /<details><summary>Unstructured model output recovered/);
   assert.match(body, /The diff looked fine but I ran out of turns\./);
   assert.match(body, /<\/details>/);
+});
+
+test("buildInconclusiveBody includes Model line but not a second italic re-run hint", () => {
+  const body = buildInconclusiveBody("salvaged text", {
+    modelUsed: "claude/cursor/composer-2.5",
+  });
+  assert.match(body, /Model: `claude\/cursor\/composer-2.5`/);
+  assert.match(body, /\*\*Re-run the `ai-review` job\*\*/);
+  assert.doesNotMatch(body, /_Re-run this job if you need another review pass\._/);
 });
 
 // --- tickVerifiedBoxes --------------------------------------------------------
