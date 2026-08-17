@@ -10,7 +10,11 @@ workflow can gate its own heavier build/test/deploy jobs on
 The verdict comes from a real two-stage AI review: a Haiku context stage
 summarizes the diff, then a diff-size-routed Sonnet/Opus review stage
 performs the full rubric scan (see `ai-review/rubric.md`) and returns a
-schema-validated structured result. The `Publish review` step never trusts
+schema-validated structured result. Model IDs are **locked in the action**
+(Claude primary → Cursor if Claude is blocked → pinned OpenCode free models,
+then `auto/best-free`). The posted PR review footer names the model that
+actually ran and hints to re-run the job for another pass. The `Publish review`
+step never trusts
 the model's self-reported verdict directly — it deterministically
 recomputes confidence, verdict, and merge risk from the model's reported
 P0-P3 finding counts and test-quality signals, then posts that as a native

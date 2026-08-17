@@ -115,7 +115,6 @@ prompt.)
 | `health-url` | URL polled with `curl --fail` until healthy or `deploy-timeout` elapses; also smoke-tested directly by the review. No sensible generic default exists. | **Yes** | — |
 | `deploy-timeout` | Seconds to keep polling `health-url` before giving up. | No | `180` |
 | `test-hint` | Optional free-text describing how to build/test this repo. Handed to the review as context — Claude MAY run it at its discretion to confirm a suspected regression, never mechanically. Consumer must provision the toolchain first. | No | `""` |
-| `qa-model` | Model used for the agentic QA review. | No | `claude-sonnet-5` |
 | `allowed-tools` | Tool allowlist passed to the review's `--allowedTools` (read/grep the code, `curl` the deploy, `git` the diff, optionally run a JS/TS build/test). Override to widen or narrow. | No | *(read/grep/glob + curl/git + node/npm/npx/yarn/pnpm/corepack)* |
 | `pass-label` | Label applied when the overall QA signal (health + review) passes. Also applied to linked issues when `update-linked-issues` is on. | No | `✓ /ai-qa` |
 | `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues (and the merge-auto-closed issue is reopened) when `update-linked-issues` is on. | No | `✗ /ai-qa` |
