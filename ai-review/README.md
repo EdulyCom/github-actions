@@ -237,6 +237,10 @@ smaller numstat / must-read set, with `.ai-review/prior-review.md` for
 finding carry-forward. Full mode is used on first run, missing/inconclusive
 meta, force-push (non-ancestor), base SHA change, or `force-full-review: true`.
 
+Coverage: `ai-review/lib/write-delta.test.js` exercises the ancestor check
+against a real git history (delta only includes the follow-up commit’s files;
+rewritten history falls back to full). Selftest asserts the published review
+body carries a parseable `<!-- ai-review-meta … -->` line.
 ## Test Plan ↔ CI
 
 The review does **not** execute the Test Plan and does **not** mark checklist
