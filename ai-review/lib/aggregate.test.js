@@ -133,11 +133,9 @@ test("row 5: an assigned_files that isn't an array is malformed, not a partition
   }
 });
 
-test("row 6: coverage mismatch reports reviewed_files intersected with the diff", () => {
-  // `seen` is the failing role's raw files_reviewed, which is allowed to range
-  // outside the diff — so unfiltered it could report MORE reviewed files than
-  // exist in the PR, on an exit whose entire meaning is "a file was not
-  // reviewed". The success path twelve lines below already does this right.
+test("row 6: partial files_reviewed is ok — /code-review does not require full-file claims", () => {
+  // Skill-led /code-review: reviewers may leave large files as hunk-only.
+  // Partition still requires ownership; coverage counts are telemetry only.
   const out = run({
     findings: {
       "review-serial": roleFile({
@@ -145,20 +143,18 @@ test("row 6: coverage mismatch reports reviewed_files intersected with the diff"
       }),
     },
   });
-  assert.equal(out.status, "inconclusive");
-  assert.match(out.reason, /coverage/);
+  assert.equal(out.status, "ok");
   assert.equal(out.coverage.reviewed_files, 1, "out-of-diff neighbours must not inflate the count");
   assert.equal(out.coverage.expected_files, 2);
 });
 
-test("row 6: coverage mismatch — reviewed fewer files than assigned", () => {
+test("row 6: reviewed fewer files than assigned is ok under /code-review reads", () => {
   const out = run({
     findings: {
       "review-serial": roleFile({ files_reviewed: ["src/a.ts"] }),
     },
   });
-  assert.equal(out.status, "inconclusive");
-  assert.match(out.reason, /coverage/);
+  assert.equal(out.status, "ok");
   assert.equal(out.coverage.reviewed_files, 1);
   assert.equal(out.coverage.expected_files, 2);
 });
@@ -173,7 +169,7 @@ test("row 6: partition integrity — roles must cover changed_files exactly", ()
     },
   });
   assert.equal(out.status, "inconclusive");
-  assert.match(out.reason, /coverage|partition/);
+  assert.match(out.reason, /partition/);
 });
 
 test("finding ids must be unique ACROSS roles, not just within one", () => {
@@ -865,11 +861,13 @@ test("a P2 at 75 now survives; at 50 it still drops", () => {
 
 // --- coverage diagnostics ----------------------------------------------------
 
-test("a coverage failure names the offending path", () => {
+test("partial files_reviewed no longer fails closed (/code-review reads)", () => {
   const out = run({
     findings: { "review-serial": roleFile({ files_reviewed: ["src/a.ts"] }) },
   });
-  assert.match(out.reason, /src\/b\.ts/);
+  assert.equal(out.status, "ok");
+  assert.equal(out.reason, null);
+  assert.equal(out.coverage.reviewed_files, 1);
 });
 
 test("a leading ./ on a model-typed path is not a coverage failure", () => {

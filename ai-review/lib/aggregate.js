@@ -24,12 +24,13 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
-// Spec §6 step 2 is now implemented in full, over `assigned_files`: pairwise
-// disjoint, no stray path, union equal to `changed_files`, and every assigned
-// file claimed as reviewed. Disjointness was vacuous at roster size 1. All four
-// are asserted here as well as in `lib/roster.js` because that module can only
+// Spec §6 step 2's assignment partition is implemented over `assigned_files`:
+// pairwise disjoint, no stray path, union equal to `changed_files`.
+// Disjointness was vacuous at roster size 1. Those three properties are
+// asserted here as well as in `lib/roster.js` because that module can only
 // assert the roster it *emits*; a role file arrives from a model stage and can
-// claim an assignment the roster never made.
+// claim an assignment the roster never made. Completeness of `files_reviewed`
+// is telemetry only (/code-review may leave large files as hunk-only).
 //
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 
@@ -227,36 +228,15 @@ function aggregate({ manifest, roster, findings, scores }) {
     }
   }
 
-  // PASS 2 — each role reviewed everything it was assigned. This checks the
-  // *claim*, not comprehension: a tripwire against silent truncation, not proof
-  // of reading. Said plainly here so nobody reads more into it. Combined with
-  // pass 1, every changed file is now owned by a role that says it read it.
+  // PASS 2 — /code-review reads: `files_reviewed` is what the model actually
+  // opened, not a claim that every assigned path was read end-to-end. Partition
+  // (pass 1) still guarantees each changed file has an owning role; incomplete
+  // `files_reviewed` no longer fails closed — that tripwire fought skill-led
+  // review of large files with tiny diffs. Coverage counts remain for telemetry.
   const reviewed = new Set();
   for (const role of roles) {
     const f = byRole[role];
-    const assigned = (Array.isArray(f.assigned_files) ? f.assigned_files : []).map(normPath);
-    const seen = new Set(f.files_reviewed.map(normPath));
-    for (const p of assigned) {
-      if (!seen.has(p)) {
-        // Name the path. This step's only product is a diagnosable log line,
-        // and "assigned 11, reviewed 8" cannot be acted on.
-        //
-        // Intersected with the diff, like the success path twelve lines below —
-        // `seen` is the failing role's raw files_reviewed, which is explicitly
-        // allowed to range outside changed_files. A role assigned 5 files that
-        // reviewed 4 plus 10 out-of-diff neighbours would otherwise report
-        // "expected 5, reviewed 14" on an exit whose entire meaning is that a
-        // file was NOT reviewed.
-        return inconclusive(
-          `coverage:${role} did not review ${p} (assigned ${assigned.length}, reviewed ${seen.size})`,
-          {
-            expected_files: changed.length,
-            reviewed_files: [...seen].filter((r) => changedSet.has(r)).length,
-          },
-        );
-      }
-    }
-    for (const p of seen) reviewed.add(p);
+    for (const p of f.files_reviewed.map(normPath)) reviewed.add(p);
   }
   const coverage = {
     expected_files: changed.length,
