@@ -7,10 +7,17 @@ exposes the verdict as this action's own outputs
 workflow can gate its own heavier build/test/deploy jobs on
 `verdict == 'pass'`.
 
-The verdict comes from a real two-stage AI review: a Haiku context stage
-summarizes the diff, then a diff-size-routed Sonnet/Opus review stage
-performs the full rubric scan (see `ai-review/rubric.md`) and returns a
-schema-validated structured result. The `Publish review` step never trusts
+The verdict comes from a real AI review: prep writes a deterministic
+`context.md`, an optional Haiku Context stage may enrich it (auto-skipped on
+delta + K≤1), then a roster-K-routed Sonnet (collapse) or Opus (OSH fan-out)
+review stage performs the full rubric scan (see `ai-review/rubric.md`) and
+returns a schema-validated structured result.
+Model IDs are **locked in the action**
+(Claude primary → for context, Cursor `composer-2.5` then free; for schema
+reviews, structured_output free models only — Cursor has no SO on this
+gateway). The posted PR review footer names the model that
+actually ran and hints to re-run the job for another pass. The `Publish review`
+step never trusts
 the model's self-reported verdict directly — it deterministically
 recomputes confidence, verdict, and merge risk from the model's reported
 P0-P3 finding counts and test-quality signals, then posts that as a native
@@ -51,23 +58,30 @@ injection-safety rule.
 6. **Draft/closed gate** — `gh pr view` the PR; a draft, closed, or merged
    PR skips every remaining step (logs `skipped — PR is draft or closed`).
 7. **Checkout / deterministic prep and model routing** — checks out the PR
-   head commit, then resolves the merge base, the changed-file list, each
-   file's full byte size at HEAD, a symbol manifest from the diff hunk
-   headers, and the Conventional-Commits title check into
-   `.ai-review/manifest.json`. The review stage is told to trust those
-   values instead of re-deriving them in paid model turns — a model that
-   derives the diff base from a false premise reviews the wrong range and
-   reports confidently on it.
+   head commit, then resolves the merge base, decides **full vs delta**
+   review from the last published `<!-- ai-review -->` meta (unless
+   `force-full-review` is set), writes `.ai-review/delta.json` and optional
+   `.ai-review/prior-review.md`, and stages the changed-file list for the
+   *active* range (delta = commits after the prior review HEAD; full =
+   merge-base…HEAD), each file's full byte size at HEAD, a symbol manifest
+   from the diff hunk headers, and the Conventional-Commits title check into
+   `.ai-review/manifest.json`. Manifest `base_sha`/`head_sha` stay the PR
+   merge-base and HEAD for telemetry; `review_mode` /
+   `delta_base_sha` / `prior_head_sha` describe the active range. The review
+   stage is told to trust those values instead of re-deriving them in paid
+   model turns — a model that derives the diff base from a false premise
+   reviews the wrong range and reports confidently on it.
 
-   The same step routes ordinary diffs to `sonnet-model`, escalating to
-   `opus-model` once a diff exceeds **either** `sonnet-files-threshold`
-   (25) or `sonnet-churn-threshold` (800). These were briefly 3/60, which
-   sent nearly every real PR to Opus and moved the review stage from
-   ~10-13 min to a 35-min median. Widened 15/400 → 25/800 after measuring
-   682 review jobs across the consumer repos: 89% of all traffic still
-   routed to Opus, and Opus runs cost 3x the wall-clock and 4x the spend of
-   Sonnet ones. Still a **stopgap** — the real fix is reviewing in parallel
-   rather than in series, and both thresholds are removed once that lands.
+   The same step routes by roster **K** from `.ai-review/assignments.json`
+   (not file/churn size): **K≤1** → locked Sonnet (`claude/claude-sonnet-5`)
+   collapse — one session emits `--json-schema` directly; **K>1** → locked
+   Opus (`claude/claude-opus-5`) parent that fans out native Sonnet Task
+   subagents (`osh-coverage` / `osh-tracer` / `osh-history` / `osh-scorer`
+   via `--agents`; only the parent emits structured output). Haiku is not
+   used as a Task child of Opus (inherits adaptive thinking → gateway 400);
+   the optional context stage still uses Haiku as a top-level session.
+   Inputs `sonnet-files-threshold` / `sonnet-churn-threshold` remain accepted
+   for backward compatibility but are **deprecated for model routing**.
 
    It also writes `.ai-review/assignments.json`: the review roster —
    related changed files clustered, then packed into
@@ -82,11 +96,8 @@ injection-safety rule.
    independent of total bytes, and a cluster exceeding *either* budget is
    split at file boundaries (never inside a file — there is no byte-range
    field in the schema) with the affected paths recorded in
-   `split_clusters` for the tracer. **Nothing reads it yet** — the review
-   below is still one serial session. It ships early, and best-effort, so
-   the partition it asserts (bins pairwise disjoint, no stray path, union
-   equal to `changed_files`) is exercised on real diffs before any model
-   stage depends on it.
+   `split_clusters` for the tracer. Prep writes `.ai-review/osh-policy.md`
+   (`collapse` vs `fanout`) for the review prompt. Cap remains **K≤4**.
 
    The emitted `k` is how many coverage reviewers actually exist —
    `min(formula, piece count after splitting)`, and `0` on an empty diff —
@@ -120,7 +131,9 @@ injection-safety rule.
    `.ai-review/scores.json`. Each role states its own path in `artifact`,
    and `findings_roles` is the pre-filtered list to hand aggregation as its
    `roster` — passing all of `roles[]` would demand a findings file from
-   the scorer and fail every run.
+   the scorer and fail every run. Publish still gates on the parent (or
+   collapsed Sonnet) structured output; multi-role `aggregate.js` remains
+   shadow/non-gating.
 8. **Resolve linked issues** — deterministically resolves every issue the
    PR closes (closing keywords *and* GitHub's linked-issue graph, via the
    PR's `closingIssuesReferences`) into `.ai-review/linked-issues.json`.
@@ -128,25 +141,28 @@ injection-safety rule.
    primary intent contract for the rubric's Angle H. ai-review only
    **reads** linked issues; it never mutates issue state (that is `ai-qa`'s
    post-merge job).
-9. **Context stage (Haiku)** — summarizes the diff and its
-   callers/callees/related helpers into `context.md` for the review stage
-   to read. This stage is **best-effort** (`continue-on-error`): `context.md`
-   is a non-essential optimization the review reads only "if present", so a
-   flaky Anthropic gateway or plugin-marketplace load that hangs/errors this
-   cheap Haiku call degrades gracefully instead of sinking the whole review.
+9. **Context handoff** — prep always writes a deterministic `context.md`
+   (changed files, symbols, roster). An optional **Haiku Context stage**
+   may enrich it with callers/callees. Haiku is **auto-skipped** on
+   `delta` + roster `K≤1` (and whenever `enable-context-stage: 'false'`).
+   The stage is **best-effort** (`continue-on-error`); Review reads
+   `context.md` only "if present" and still must-reads every changed file.
    (Composite-action steps cannot set `timeout-minutes`; the caller job's
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
-   Set `enable-context-stage: 'false'` to skip this stage entirely; the
-   review reads `context.md` only "if present", so the gate is unaffected.
-10. **CI signal (re-review only)** — on a `workflow_dispatch` re-review,
-    reads the PR's required-check conclusions (`pass`/`fail`/`timeout`/
-    `no_ci`) so the Publish step can treat a failing/timed-out required
-    check as an automatic fail.
+10. **CI inventory + signal** — on every PR event (not only
+    `workflow_dispatch`), inventories check runs for the PR HEAD into
+    `.ai-review/ci-checks.json` and parses the PR Test Plan / checklists into
+    `.ai-review/test-plan-items.json`. Also derives an aggregate
+    `pass`/`fail`/`timeout`/`no_ci` signal for Publish when every returned
+    check has completed (a first `pull_request` run usually stays `no_ci`
+    while sibling jobs are still running).
 11. **Review stage (Sonnet/Opus)** — runs the full rubric scan against the
     diff and returns a schema-validated structured result (verdict,
     confidence, merge risk, intent alignment, P0-P3 counts, test-quality
-    signals, the review markdown body, and — new — a per-item `checklist`
-    verdict, `verification_evidence`, and a `test_execution` outcome). It
+    signals, the review markdown body, optional `verification_evidence`, and
+    a `test_execution` outcome). Uncovered Test Plan items vs CI become
+    normal findings; the `checklist` field is left empty (Publish no longer
+    ticks boxes). It
     reads **complete file contents** (never just diff hunks) and evaluates
     the diff against the linked issues' acceptance criteria. It does **not**
     run the project's tests — see
@@ -183,13 +199,10 @@ injection-safety rule.
     review stage's structured output (a `pass` claiming green tests without
     any `verification_evidence` is penalized, not trusted) and posts it as a
     native PR review and the corresponding pass/fail label, then sets the
-    four job outputs. When `update-pr-body` is `true` it also **ticks the
-    PR description's checklist boxes** that the review verified (`- [ ]` →
-    `- [x]`, never unchecking a human's box) and maintains a managed
-    `<!-- ai-review-status -->` block with the per-item verification
-    evidence. Editing the body is safe against the default trigger set
-    (which excludes `edited`); do **not** add `pull_request: [edited]` to
-    the caller or the review will loop on its own body edits.
+    four job outputs. It does **not** tick PR description checklist boxes
+    or write an `<!-- ai-review-status -->` block (`update-pr-body` is
+    accepted but is a no-op for that path). Test Plan gaps are already
+    findings from the review stage.
 
 ## Inputs
 
@@ -204,17 +217,58 @@ injection-safety rule.
 | `qa-pass-label` | Post-merge `ai-qa` pass label; cleared (not applied) by this action on every new commit. | No | `✓ /ai-qa` |
 | `qa-fail-label` | Post-merge `ai-qa` fail label; cleared (not applied) by this action on every new commit. | No | `✗ /ai-qa` |
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
-| `sonnet-files-threshold` | Max changed-file count for a diff to still route to `sonnet-model` (must hold together with `sonnet-churn-threshold`); larger diffs route to `opus-model`. | No | `25` |
-| `sonnet-churn-threshold` | Max changed-line count (adds + deletes) for a diff to still route to `sonnet-model`. | No | `800` |
-| `sonnet-model` | Model the routing step selects for diffs within **both** thresholds. Override when a gateway aliases model names. | No | `claude-sonnet-5` |
-| `opus-model` | Model the routing step selects for every larger diff. Override when a gateway aliases model names. | No | `claude-opus-5` |
-| `haiku-model` | Model used by the context stage, and stamped on the roster's `history`/`scorer` roles by the prep step. Note: Haiku 4.5 does not accept the `effort` parameter, so no stage or role running it passes `--effort` — the roster resolves that against the model id, not the tier, so overriding another tier to a literal Haiku id (e.g. `sonnet-model: claude-haiku-4-5`) is also covered. A gateway alias that *routes* to Haiku under an unrelated string is not detected; the check is a substring match, not alias resolution. | No | `claude-haiku-4-5` |
-| `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
+| `sonnet-files-threshold` | **DEPRECATED** — accepted but ignored for model routing. Roster K selects Sonnet collapse vs Opus fan-out. | No | `25` |
+| `sonnet-churn-threshold` | **DEPRECATED** — accepted but ignored for model routing. Same as above. | No | `800` |
+| `enable-context-stage` | When `false`, never runs the Haiku Context stage. When `true` (default), Haiku may enrich `context.md`, but is still auto-skipped on delta + K≤1. Prep always writes a deterministic `context.md` first. Gate contract unchanged. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
-| `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
-| `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
-| `update-pr-body` | When `true`, the Publish step ticks verified checklist boxes in the PR description and maintains a managed `<!-- ai-review-status -->` block. Never unchecks a human-checked box. | No | `true` |
+| `update-pr-body` | Accepted for compatibility. Checklist tick / status-block write-back is **retired**; the input is a no-op. Test Plan gaps are findings vs CI instead. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
+| `force-full-review` | When `true`, always review merge-base…HEAD instead of a delta since the last published ai-review. | No | `false` |
+
+## Delta reviews
+
+On re-runs, prep looks for the latest published review body with
+`<!-- ai-review -->` and a parseable
+`<!-- ai-review-meta head_sha=… base_sha=… mode=full|delta -->` line.
+When that prior `head_sha` is an ancestor of the current HEAD and the
+merge-base matches, the active range is **delta** (`prior_head…HEAD`) —
+smaller numstat / must-read set, with `.ai-review/prior-review.md` for
+finding carry-forward. Full mode is used on first run, missing/inconclusive
+meta, force-push (non-ancestor), base SHA change, or `force-full-review: true`.
+
+Coverage: `ai-review/lib/write-delta.test.js` exercises the ancestor check
+against a real git history (delta only includes the follow-up commit’s files;
+rewritten history falls back to full). Selftest asserts the published review
+body carries a parseable `<!-- ai-review-meta … -->` line.
+## Test Plan ↔ CI
+
+The review does **not** execute the Test Plan and does **not** mark checklist
+items verified in the PR body. Prep inventories:
+
+- `.ai-review/test-plan-items.json` — items from a `Test Plan` section and/or
+  `- [ ]` / `- [x]` checkboxes in the PR body
+- `.ai-review/ci-checks.json` — check runs for the PR HEAD (`name`,
+  `conclusion`, `status`), fetched on all PR events
+
+The model maps items to CI coverage; uncovered or weakly covered items become
+normal `findings[]` with severity P0–P3 via the rubric (then `recompute.js`).
+Checklist tick write-back is retired (`update-pr-body` is a no-op for that
+path); see
+[`docs/adr/0006-test-plan-ci-findings-and-osh-routing.md`](../docs/adr/0006-test-plan-ci-findings-and-osh-routing.md).
+`test_execution` stays `"skipped"` — no test runners in the allowlist.
+
+## OSH routing (roster K)
+
+Prep packs the active-range files into coverage bins and writes
+`.ai-review/assignments.json` with `.k`:
+
+| K | Mode (`osh-mode`) | Review session |
+| --- | --- | --- |
+| ≤1 (incl. empty-diff `0`) | `collapse` | Single Sonnet + `--json-schema` (no Opus parent, no Haiku scorer) |
+| >1 (max 4) | `fanout` | Opus parent + Sonnet Task agents (`--agents`); only Opus emits SO |
+
+Publish still gates on that session's structured output. Multi-role
+`aggregate.js` stays shadow/non-gating.
 
 ## Outputs
 
@@ -227,10 +281,10 @@ injection-safety rule.
 
 ## Why the review no longer runs tests
 
-The Review stage used to be told to run the project's test suite. It no longer is, and
-`test-command` / `test-hint` are accepted but ignored.
+The Review stage used to be told to run the project's test suite. It no longer is;
+the old `test-command` / `test-hint` inputs were removed (not accepted, not ignored).
 
-**It never actually ran.** No consumer ever set `test-command`, no caller installs a
+**It never actually ran.** No consumer ever set those inputs, no caller installs a
 toolchain before the action, and this action ships none of its own
 ([ADR 0003](../docs/adr/0003-intent-alignment-test-execution-and-writeback.md) §2). Every
 sampled run reported `test_execution: skipped` after probing and failing —
@@ -243,7 +297,7 @@ sampled run reported `test_execution: skipped` after probing and failing —
 commit**. Allowlisting `npm`/`npx`/`yarn`/`pnpm`/`node`/`make`/`pytest` so it *could*
 run tests meant PR-authored scripts — a modified `package.json` `test` script, say —
 had a permitted path to execute on the runner, which for self-hosted fleets is
-persistent shared infrastructure. Those entries are now removed from `--allowedTools`,
+persistent shared infrastructure. Those entries are gone from `--allowedTools`,
 so this is enforced structurally rather than by prompt instruction.
 
 **Tests still gate your merges.** They run in your own CI lanes, downstream of this
@@ -270,7 +324,7 @@ concurrency:
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 55
     permissions:
       contents: read
       pull-requests: write

@@ -207,4 +207,27 @@ function renderSummary(metrics) {
   );
 }
 
-module.exports = { parseExecutionLog, collectMetrics, renderSummary, formatDuration, isStalled, STALL_MIN_MS };
+/**
+ * Prefer the first execution log that names a model (retry → repair → review
+ * order is the caller's responsibility). Fall back to the routed primary when
+ * logs are missing or silent.
+ * @param {{logs: unknown[], fallback: string}} args
+ * @returns {string}
+ */
+function resolveModelUsed({ logs, fallback }) {
+  for (const log of logs || []) {
+    const m = parseExecutionLog(log).model;
+    if (typeof m === "string" && m.trim()) return m.trim();
+  }
+  return typeof fallback === "string" ? fallback : "";
+}
+
+module.exports = {
+  parseExecutionLog,
+  collectMetrics,
+  renderSummary,
+  formatDuration,
+  isStalled,
+  STALL_MIN_MS,
+  resolveModelUsed,
+};

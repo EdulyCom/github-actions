@@ -14,6 +14,37 @@ const {
 
 // --- stripLeadingBannerArtifacts --------------------------------------------
 
+test("unescapes literal \\\\n when comment_markdown was double-escaped", () => {
+  // Observed on PR #52 review 4949356509: model/schema path left `\\n` as
+  // two characters, so GitHub rendered the body as one smashed line.
+  const raw =
+    "### P0 — Blockers\\n\\n_None._\\n\\n### P1 — Should Fix\\n\\n_None._\\n\\n### P2 — Nice-to-Have\\n\\n- drift risk";
+  const out = stripLeadingBannerArtifacts(raw);
+  assert.equal(
+    out,
+    [
+      "### P0 — Blockers",
+      "",
+      "_None._",
+      "",
+      "### P1 — Should Fix",
+      "",
+      "_None._",
+      "",
+      "### P2 — Nice-to-Have",
+      "",
+      "- drift risk",
+    ].join("\n")
+  );
+  assert.equal(out.includes("\\n"), false);
+});
+
+test("leaves normal markdown with real newlines alone", () => {
+  const raw = "### P0 — Blockers\n\n_None._\n\nUse `\\\\n` in a code span occasionally.";
+  const out = stripLeadingBannerArtifacts(raw);
+  assert.equal(out, raw);
+});
+
 test("strips a leading verdict token line", () => {
   const out = stripLeadingBannerArtifacts("**✅ PASS**\n\nReal content here.");
   assert.equal(out, "Real content here.");
@@ -121,6 +152,42 @@ test("always leads with the <!-- ai-review --> marker", () => {
   assert.match(body, /^<!-- ai-review -->\n/);
 });
 
+test("buildReviewBody omits Model line but keeps re-review hint", () => {
+  const body = buildReviewBody({
+    ...BASE_ARGS,
+    modelUsed: "claude/claude-sonnet-5",
+  });
+  assert.doesNotMatch(body, /^Model:/m);
+  assert.doesNotMatch(body, /Model: `claude\/claude-sonnet-5`/);
+  assert.match(body, /Re-run this job if you need another review pass/);
+});
+
+test("buildReviewBody still omits Model line when modelUsed is empty", () => {
+  const body = buildReviewBody({ ...BASE_ARGS, modelUsed: "" });
+  assert.doesNotMatch(body, /^Model:/m);
+  assert.match(body, /Re-run this job if you need another review pass/);
+});
+
+test("buildReviewBody stamps ai-review-meta immediately after the marker", () => {
+  const body = buildReviewBody({
+    ...BASE_ARGS,
+    reviewMeta: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      mode: "delta",
+    },
+  });
+  assert.match(
+    body,
+    /^<!-- ai-review -->\n<!-- ai-review-meta head_sha=a{40} base_sha=b{40} mode=delta -->\n/
+  );
+});
+
+test("buildReviewBody omits meta when reviewMeta is absent", () => {
+  const body = buildReviewBody(BASE_ARGS);
+  assert.doesNotMatch(body, /ai-review-meta/);
+});
+
 // --- buildInconclusiveBody ---------------------------------------------------
 
 test("without salvaged text there is no details block", () => {
@@ -134,6 +201,29 @@ test("with salvaged text the details block contains it", () => {
   assert.match(body, /<details><summary>Unstructured model output recovered/);
   assert.match(body, /The diff looked fine but I ran out of turns\./);
   assert.match(body, /<\/details>/);
+});
+
+test("buildInconclusiveBody omits Model line and keeps job re-run instruction", () => {
+  const body = buildInconclusiveBody("salvaged text", {
+    modelUsed: "claude/cursor/composer-2.5",
+  });
+  assert.doesNotMatch(body, /Model: `claude\/cursor\/composer-2.5`/);
+  assert.doesNotMatch(body, /^Model:/m);
+  assert.match(body, /\*\*Re-run the `ai-review` job\*\*/);
+  assert.doesNotMatch(body, /_Re-run this job if you need another review pass\._/);
+});
+
+test("buildInconclusiveBody stamps meta with mode=inconclusive", () => {
+  const body = buildInconclusiveBody("", {
+    reviewMeta: {
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    },
+  });
+  assert.match(
+    body,
+    /^<!-- ai-review -->\n<!-- ai-review-meta head_sha=a{40} base_sha=b{40} mode=inconclusive -->\n/
+  );
 });
 
 // --- tickVerifiedBoxes --------------------------------------------------------

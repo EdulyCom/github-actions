@@ -77,7 +77,8 @@ prompt.)
 7. **Stage QA rubric** — copies the action's own `rubric.md` into the
    workspace so the review can read it with a stable path.
 8. **Post-merge QA review (agentic)** — only runs when an Anthropic
-   credential is configured. Claude (`qa-model`, Sonnet by default) reads the
+   credential is configured. Claude (locked Sonnet primary with
+   Cursor → free fallbacks) reads the
    rubric, inspects the merged diff via `git`, **smoke-tests the deployed app
    over HTTP** (the health URL plus any routes the diff touches), **evaluates
    the PR's Test Plan** if one is present (running each item it can against
@@ -114,7 +115,6 @@ prompt.)
 | `health-url` | URL polled with `curl --fail` until healthy or `deploy-timeout` elapses; also smoke-tested directly by the review. No sensible generic default exists. | **Yes** | — |
 | `deploy-timeout` | Seconds to keep polling `health-url` before giving up. | No | `180` |
 | `test-hint` | Optional free-text describing how to build/test this repo. Handed to the review as context — Claude MAY run it at its discretion to confirm a suspected regression, never mechanically. Consumer must provision the toolchain first. | No | `""` |
-| `qa-model` | Model used for the agentic QA review. | No | `claude-sonnet-5` |
 | `allowed-tools` | Tool allowlist passed to the review's `--allowedTools` (read/grep the code, `curl` the deploy, `git` the diff, optionally run a JS/TS build/test). Override to widen or narrow. | No | *(read/grep/glob + curl/git + node/npm/npx/yarn/pnpm/corepack)* |
 | `pass-label` | Label applied when the overall QA signal (health + review) passes. Also applied to linked issues when `update-linked-issues` is on. | No | `✓ /ai-qa` |
 | `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues (and the merge-auto-closed issue is reopened) when `update-linked-issues` is on. | No | `✗ /ai-qa` |

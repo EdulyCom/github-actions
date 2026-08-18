@@ -17,10 +17,8 @@
 // exactly the byte count a reviewer reading the file will face. A deleted path
 // has no entry and contributes 0.
 //
-// The roster is emitted on every run, including K=1, and nothing consumes it
-// yet — the review stage is still serial. It is written now so the partition it
-// asserts is exercised on real diffs, across all 7 consumers, before any model
-// stage depends on it.
+// The roster is load-bearing for Slice 3 OSH routing (K → collapse vs fanout).
+// A failed build/write must fail the prep step — never silently skip.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -33,15 +31,13 @@ const DIR = ".ai-review";
  * Write JSON to `p` atomically: temp file in the same directory, then rename.
  *
  * A bare `fs.writeFileSync(p, ...)` can leave a truncated file at `p` if it
- * fails partway through (ENOSPC, a killed process). `writeRoster`'s catch
- * already reconciles four signals on a write failure — return value, log
- * line, `::warning::`, telemetry — but none of them touch the artifact on
- * disk, so a truncated `assignments.json` could outlive a failure the rest of
- * the system already reported as NOT EMITTED. `rename(2)` on the same
- * filesystem is atomic: `p` either has the old content (nothing existed) or
- * the complete new content, never a partial write, regardless of where the
- * temp write failed. `writeFile`/`renameSync` are injectable for the same
- * reason the rest of this module's I/O is.
+ * fails partway through (ENOSPC, a killed process). On a write failure
+ * `writeRoster` logs then rethrows (fail-closed); without an atomic rename a
+ * truncated `assignments.json` could still sit on disk after prep already
+ * failed. `rename(2)` on the same filesystem is atomic: `p` either has the
+ * old content (nothing existed) or the complete new content, never a partial
+ * write. `writeFile`/`renameSync` are injectable for the same reason the rest
+ * of this module's I/O is.
  */
 function atomicWriteJson(p, obj, io) {
   const writeFile = (io && io.writeFile) || fs.writeFileSync;
@@ -126,6 +122,10 @@ function main() {
     if (size !== undefined) sizes[f.path] = size;
   }
 
+  const reviewMode = process.env.REVIEW_MODE === "delta" ? "delta" : "full";
+  const deltaBaseSha = process.env.DELTA_BASE_SHA || null;
+  const priorHeadSha = process.env.PRIOR_HEAD_SHA || null;
+
   const manifest = buildManifest({
     baseSha: process.env.BASE_SHA || null,
     headSha: process.env.HEAD_SHA || null,
@@ -133,12 +133,15 @@ function main() {
     diff,
     sizes,
     title,
+    reviewMode,
+    deltaBaseSha: deltaBaseSha || null,
+    priorHeadSha: priorHeadSha || null,
   });
 
   atomicWriteJson(path.join(DIR, "manifest.json"), manifest);
 
   process.stdout.write(
-    `prep: ${manifest.file_count} files, churn ${manifest.churn}, ` +
+    `prep: mode=${manifest.review_mode} ${manifest.file_count} files, churn ${manifest.churn}, ` +
       `${manifest.total_fullfile_bytes} bytes at HEAD, ` +
       `${manifest.symbol_manifest.length} symbols, ` +
       `title_ok=${manifest.title_ok}, ` +
@@ -151,16 +154,11 @@ function main() {
 /**
  * Emit `.ai-review/assignments.json`.
  *
- * Best-effort **for now, deliberately**: nothing consumes this file yet, so a
- * defect in brand-new roster code must not fail a review on seven consumer
- * repos that all track `@main`. The failure is named in the job log, never
- * swallowed — and it is the same shadow-mode discipline `lib/aggregate.js`
- * shipped under.
- *
- * When the review stage actually fans out, `assertPartition` becomes
- * load-bearing and this guard must be removed: at that point an unassigned file
- * is a file nobody reads, and continuing would be the fail-open the assertion
- * exists to prevent.
+ * Fail-closed: Slice 3 routes the review model on `.k` and the review prompt
+ * consumes the role list. A build or write failure is logged (including
+ * scrapable `ai-review-roster` telemetry) then rethrown so the prep step exits
+ * non-zero. Atomic write is preserved — a failed rename must not leave a
+ * truncated assignments file.
  */
 function writeRoster(manifest, sizes, io) {
   const readText = (io && io.readText) || ((p) => fs.readFileSync(p, "utf8"));
@@ -169,12 +167,8 @@ function writeRoster(manifest, sizes, io) {
 
   let roster = null;
   try {
-    // Required inside the try, not at module scope: a load-time throw from
-    // roster.js — a syntax error surviving to production, or any future
-    // module-scope code that throws — would otherwise crash this require()
-    // before writeRoster ever runs, taking manifest.json and the whole prep
-    // step down with it. That is exactly the failure this function's own
-    // JSDoc promises cannot happen.
+    // Required inside the try so a load-time throw from roster.js is logged
+    // with the same FAILED / telemetry / rethrow path as a build failure.
     const { buildRoster, resolveImportEdges } = require("./roster.js");
 
     const specifiers = collectSpecifiers(manifest.changed_files, sizes, readText);
@@ -182,9 +176,11 @@ function writeRoster(manifest, sizes, io) {
     roster = buildRoster({
       files: manifest.changed_files.map((p) => ({ path: p, bytes: sizes[p] ?? 0 })),
       models: {
-        opus: process.env.OPUS || "claude-opus-5",
-        sonnet: process.env.SONNET || "claude-sonnet-5",
-        haiku: process.env.HAIKU || "claude-haiku-4-5",
+        opus: process.env.OPUS || "claude/claude-opus-5",
+        sonnet: process.env.SONNET || "claude/claude-sonnet-5",
+        // Helper tier (history/scorer): Task under Opus cannot use Haiku on
+        // this gateway (adaptive thinking 400). Always Sonnet unless overridden.
+        haiku: process.env.HELPER_MODEL || "claude/claude-sonnet-5",
       },
       importEdges: resolveImportEdges(specifiers, manifest.changed_files),
       symbolManifest: manifest.symbol_manifest,
@@ -194,6 +190,27 @@ function writeRoster(manifest, sizes, io) {
     });
 
     writeJson(path.join(DIR, "assignments.json"), roster);
+
+    // Always land a factual context.md before any optional Haiku stage so
+    // Review has handoff even when Context is skipped (delta+K≤1) or stalls.
+    // When `io` is injected for unit tests, skip the real write unless the
+    // test supplies `writeContext` (avoids polluting the workspace cwd).
+    try {
+      const { writeDeterministicContext } = require("./write-context.js");
+      let ctxWrite = writeDeterministicContext;
+      if (io) {
+        ctxWrite =
+          "writeContext" in io ? io.writeContext : () => {};
+      }
+      if (typeof ctxWrite === "function") {
+        ctxWrite(manifest, roster);
+        log("prep: wrote deterministic context.md\n");
+      }
+    } catch (err) {
+      log(
+        `::warning::prep: deterministic context.md failed (${err && err.message ? err.message : err}); Review will proceed without it\n`,
+      );
+    }
 
     log(
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
@@ -229,23 +246,19 @@ function writeRoster(manifest, sizes, io) {
     }
     log(`${rosterTelemetry(roster)}\n`);
   } catch (err) {
-    // `roster` may already be a built object here — buildRoster can succeed and
-    // writeJson can still throw. Null it out: the log line, the annotation and
-    // the telemetry all say NOT EMITTED, and the return value has to agree.
-    // Latent while main() is the only caller and ignores it; load-bearing once
-    // PR-D/2 reads this to decide whether to fan out.
+    // buildRoster can succeed and writeJson can still throw — null the local
+    // so telemetry says failed, then rethrow so prep fails closed.
     roster = null;
     // one(), like the two lines below it — a multi-line error message would
     // otherwise split this record across lines, the exact failure one()'s own
     // comment exists to prevent.
-    log(`roster: NOT EMITTED — ${one(err)}\n`);
-    // An annotation as well as a log line: a `run:` step's stdout is not
-    // surfaced anywhere a maintainer looks unless they open the job.
+    log(`roster: FAILED — ${one(err)}\n`);
     log(
-      `::warning::ai-review could not build the review roster: ${one(err)}. ` +
-        "Nothing consumes it yet, so the review is unaffected — but PR-D/2 will.\n",
+      `::error::ai-review could not build the review roster: ${one(err)}. ` +
+        "Prep fails closed — Slice 3 routes on assignments.json.\n",
     );
     log(`${rosterTelemetry(null, err)}\n`);
+    throw err;
   }
   return roster;
 }
@@ -266,9 +279,8 @@ function one(v) {
  */
 function collectSpecifiers(changedFiles, sizes, readText) {
   // Lazy, matching writeRoster's require above — a load-time throw in
-  // roster.js must not crash this module before writeRoster's try/catch is
-  // even reached. Cheap: Node caches the module, so this is a second lookup,
-  // not a second load.
+  // roster.js is handled by writeRoster's fail-closed path (log + rethrow).
+  // Cheap: Node caches the module, so this is a second lookup, not a second load.
   const { extractImports } = require("./roster.js");
   const out = Object.create(null);
   for (const p of Array.isArray(changedFiles) ? changedFiles : []) {
@@ -306,15 +318,10 @@ function overBudget(roster) {
 /**
  * One scrapable line per run, in the `ai-review-metrics {json}` shape.
  *
- * The case for shipping the roster before anything reads it rests entirely on
- * exercising the partition across seven consumers first. A lone unstructured
- * stdout line cannot carry that: the 682-job latency baseline was gathered by
- * grepping `ai-review-metrics {...}` out of raw logs, and a roster failure needs
- * to be countable the same way. A systematic `buildRoster` defect that produced
- * nothing aggregatable would hold for as long as nobody happened to open a job.
- *
- * Failure is a record, not a blank — absence and cleanliness must never be the
- * same byte pattern.
+ * Roster failures must be countable the same way as successes (the 682-job
+ * latency baseline was gathered by grepping `ai-review-metrics {...}` out of
+ * raw logs). Failure is a record, not a blank — absence and cleanliness must
+ * never be the same byte pattern. Prep then exits non-zero (fail-closed).
  */
 function rosterTelemetry(roster, err) {
   const payload = roster

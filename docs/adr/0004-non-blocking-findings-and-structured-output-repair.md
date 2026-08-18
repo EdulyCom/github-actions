@@ -112,7 +112,7 @@ re-run notice.
   the rubric and the banner.
 - **Slightly longer worst case.** A run that misses structured output twice now
   costs one extra cheap resume call plus a 45 s sleep. Callers' job-level
-  `timeout-minutes` (25 recommended, self-test 30) still bounds it.
+  `timeout-minutes` (55 recommended; fan-out regularly exceeds 25m) still bounds it.
 - **New CI lane** (`unit.yml`) and the repo's first JavaScript module. No
   `package.json` and no dependencies — `node --test` on the runner's stock Node.
 - **`--resume` through `claude_args` is not an explicitly documented

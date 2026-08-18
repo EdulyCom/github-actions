@@ -1,10 +1,16 @@
 # ADR 0003 — Linked-issue intent, real test execution, and PR/issue write-back
 
-- **Status:** Accepted
+- **Status:** Accepted (partially superseded by ADR 0006 for `ai-review`
+  checklist tick / status-block write-back and size-based Sonnet/Opus routing;
+  §2's in-review `test-command` / `test-hint` were later removed entirely —
+  the Review stage never successfully ran tests and no longer accepts those
+  inputs)
 - **Date:** 2026-07-21
 - **Relates to:** ADR 0001 (gate/identity/injection posture) and ADR 0002
   (`ai-qa` agentic review). Those decisions still hold; this ADR layers new
   capability onto both actions without changing the gate contract.
+  **Superseded in part by** ADR 0006 (Test Plan ↔ CI findings; roster-K OSH).
+  `ai-qa`'s `test-hint` (post-merge guidance) is unaffected.
 
 ## Context
 
@@ -36,6 +42,12 @@ issue's acceptance criteria as the primary intent contract. This retires the
 dead `/tmp/*.json` rubric references.
 
 ### 2. `ai-review` runs tests best-effort; `ai-qa` verifies the PR test plan
+
+> **Superseded for `ai-review`:** in-review test execution and the
+> `test-command` / `test-hint` inputs were removed. The allowlist no longer
+> includes test runners; `test_execution` is always `"skipped"`. Callers' own
+> CI lanes remain the authoritative suite signal. `ai-qa`'s optional
+> `test-hint` for post-merge agentic QA is unchanged.
 
 - `ai-review`'s review allowlist now includes the JS/Python/`make` test
   runners; new `test-command` / `test-hint` inputs steer it. It records a
@@ -81,9 +93,9 @@ churn). Full file contents are always read — never diff hunks alone.
 - **Gate contract unchanged.** `ai-review` still exposes the same four outputs
   and `ai-qa` is still informational-only. Verdicts are still recomputed
   deterministically, never taken from the model's self-report.
-- **New permission:** `ai-review` callers add `issues: read` (to resolve linked
-  issues); `ai-qa` already required `issues: write`, which now also covers the
-  linked-issue comments/state changes.
+- **New permission:** `ai-review` callers need `issues: write` (labels use
+  the Issues API; linked-issue resolution only needs read). `ai-qa` already
+  required `issues: write`, which also covers linked-issue comments/state.
 - **Trigger caveat:** because `ai-review` edits the PR body, callers must keep
   the default `pull_request` event types — adding `edited` would loop the
   review on its own body edits.

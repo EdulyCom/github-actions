@@ -71,6 +71,9 @@ owning organization.
   identity model, the composite-actions-vs-reusable-workflow choice, the
   parameterization surface, the public/generalized posture, and the
   supply-chain and least-privilege posture this repo follows.
+- [`docs/adr/0006-test-plan-ci-findings-and-osh-routing.md`](docs/adr/0006-test-plan-ci-findings-and-osh-routing.md)
+  — Test Plan ↔ CI findings (checklist ticks retired), delta reviews, and
+  roster-K Sonnet collapse / Opus fan-out routing.
 - [`docs/plan.md`](docs/plan.md) — the full build-out plan this repo is
   being implemented against, including the phase/task breakdown and the
   locked design decisions behind it.

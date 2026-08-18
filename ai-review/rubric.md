@@ -28,9 +28,13 @@ these establish the **stated goal**: what was this change supposed to do? (If
 `gh issue view <n>` is available if you need more detail on a linked issue.)
 
 Extract acceptance criteria in this priority order:
-1. Explicit checklist items (`- [ ]` / `- [x]`) in a linked issue or the PR body
+1. Explicit Test Plan / checklist items (`- [ ]` / `- [x]`) in a linked issue or the PR body
+   (Prep may also stage them in `.ai-review/test-plan-items.json`)
 2. Numbered requirements or "must/should" statements
 3. Inferred intent from title + description narrative
+
+For Test Plan items specifically, also read `.ai-review/ci-checks.json` when present:
+uncovered or weakly covered items are findings (P0–P3), not PR-body ticks.
 
 Compare against the diff:
 
@@ -176,15 +180,15 @@ Examples: formatting preference, typo in comment, minor refactoring opportunity.
 - [ ] Description explains the WHY, not just the WHAT.
 - [ ] Breaking changes called out explicitly.
 - [ ] `Closes #NNN` link present when the PR closes an issue.
-- [ ] If a linked issue or the PR description has a checklist, evaluate each item
-  and return it in the structured `checklist` array with a `status` of `verified`
-  (confirmed satisfied — cite how in `evidence`), `failed` (confirmed NOT
-  satisfied), or `unverifiable` (a manual/post-merge step you cannot check from
-  code or tests). Only mark `verified` with real evidence — a later deterministic
-  step ticks verified boxes in the PR body, so an unfounded `verified` writes a
-  false claim into the description. Still report the completed-vs-incomplete ratio
-  as a P2 reminder; do NOT fail the review on checklist status alone (checklists
-  often track post-merge activities).
+- [ ] If a linked issue or the PR description has a Test Plan / checklist,
+  map each item to CI coverage using `.ai-review/test-plan-items.json` and
+  `.ai-review/ci-checks.json` when present. Uncovered or only weakly covered
+  items become normal `findings[]` entries with severity P0–P3 via this
+  rubric (model-judged; do not floor all gaps at P1). Leave the structured
+  `checklist` array empty — Publish no longer ticks PR-body boxes. Never
+  invent CI coverage; manual/post-merge items with no plausible check mapping
+  may be omitted or filed at low severity. Do NOT fail the review solely
+  because a human left boxes unchecked.
 
 ### 2. Merge Conflict Handling
 
@@ -295,6 +299,13 @@ Flag security issues as **P0** (vulnerability) or **P1** (weak-but-not-broken co
 Flag as P0 (breaks feature) or P1 (incorrect behavior).
 
 ### 12. Testing
+
+**Test Plan ↔ CI (do not tick PR checklists):** Prep writes
+`.ai-review/test-plan-items.json` and `.ai-review/ci-checks.json`. Map each
+Test Plan item to inventoried checks. Gaps (uncovered / weakly covered) are
+normal findings with P0–P3 severity per this rubric. Leave `checklist` empty —
+Publish does not tick PR-body boxes. Still report `test_execution: "skipped"`;
+do not run tests.
 
 **Coverage expectations** (flag misses at the severity shown):
 

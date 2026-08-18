@@ -211,18 +211,33 @@ function classifyPaths(paths) {
  * Assemble the manifest the review stage is told to trust.
  *
  * @param {object} args
- * @param {string} args.baseSha   merge-base commit, resolved by the caller
+ * @param {string} args.baseSha   PR merge-base (telemetry; not always the diff base)
  * @param {string} args.headSha   PR head commit
- * @param {string} args.numstat   stdout of `git diff --numstat base...HEAD`
- * @param {string} args.diff      stdout of `git diff -U0 base...HEAD` (headers only are used)
+ * @param {string} args.numstat   stdout of `git diff --numstat <reviewBase> HEAD`
+ *   where reviewBase is delta_base_sha in delta mode, else the merge-base
+ * @param {string} args.diff      stdout of `git diff -U0 <reviewBase> HEAD` (headers only)
  * @param {object} args.sizes     path -> full-file byte size at HEAD (`git cat-file -s`)
  * @param {string} args.title     PR title
+ * @param {'full'|'delta'} [args.reviewMode='full']
+ * @param {string|null} [args.deltaBaseSha=null]  prior published head when delta
+ * @param {string|null} [args.priorHeadSha=null]
  */
-function buildManifest({ baseSha, headSha, numstat, diff, sizes, title }) {
+function buildManifest({
+  baseSha,
+  headSha,
+  numstat,
+  diff,
+  sizes,
+  title,
+  reviewMode,
+  deltaBaseSha,
+  priorHeadSha,
+}) {
   const { files, fileCount, churn } = parseNumstat(numstat);
   const changed = files.map((f) => f.path);
   const sizeMap = sizes && typeof sizes === "object" ? sizes : {};
   const classes = classifyPaths(changed);
+  const mode = reviewMode === "delta" ? "delta" : "full";
 
   const totalBytes = changed.reduce((sum, p) => {
     const n = Number(sizeMap[p]);
@@ -233,6 +248,9 @@ function buildManifest({ baseSha, headSha, numstat, diff, sizes, title }) {
     schema: 1,
     base_sha: baseSha ?? null,
     head_sha: headSha ?? null,
+    review_mode: mode,
+    delta_base_sha: mode === "delta" ? deltaBaseSha ?? null : null,
+    prior_head_sha: priorHeadSha ?? null,
     changed_files: changed,
     file_count: fileCount,
     churn,

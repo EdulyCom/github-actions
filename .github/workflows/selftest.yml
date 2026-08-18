@@ -19,7 +19,9 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Fan-out (Opus + Sonnet Tasks) regularly exceeds 25m wall-clock; 30m was
+    # cancelling mid-review before Publish. Budget covers review + repair/retry.
+    timeout-minutes: 55
     permissions:
       contents: read
       pull-requests: write
@@ -57,15 +59,61 @@ jobs:
         uses: ./ai-review
         with:
           # Deliberately does NOT pass enable-context-stage: this self-test must
-          # exercise the same default configuration consumers get, and the
-          # context stage is on by default. A temporary "false" here during the
-          # 2026-08-09 stall diagnosis meant the default path went untested
-          # while it was live for every consumer — don't reintroduce that.
+          # exercise the same default configuration consumers get. Haiku Context
+          # still auto-skips on delta + K≤1 (deterministic context.md remains).
+          # Do not force 'false' here — that would leave the default path
+          # untested for full/K>1 reviews.
           pr-number: ${{ inputs.pr_number }}
           app-id: ${{ vars.MTM_BOT_APP_ID }}
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}
           anthropic-auth-token: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           anthropic-base-url: ${{ vars.ANTHROPIC_BASE_URL }}
+
+      # Pins the delta baseline contract without a second push (which would
+      # re-enter this workflow and race cancel-in-progress). Unit tests cover
+      # prior_head…HEAD range selection with a real git history; this step
+      # asserts Publish actually stamped parseable meta on the live review.
+      - name: Assert published ai-review-meta
+        if: steps.r.outputs.verdict != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          EXPECT_HEAD: ${{ github.event.pull_request.head.sha }}
+          # Bound via env (never ${{ }} inside run:) so zizmor template-injection
+          # stays clean — verdict is only pass|fail from Publish, but the audit
+          # treats any in-run expansion as attacker-controllable.
+          VERDICT: ${{ steps.r.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPECT_HEAD}" ]; then
+            EXPECT_HEAD="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')"
+          fi
+          BODY="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
+            | jq -rs '
+                (add // [])
+                | map(select(.body != null and (.body | contains("<!-- ai-review-meta"))))
+                | sort_by(.submitted_at) | reverse
+                | .[0].body // empty
+              ')"
+          if [ -z "${BODY}" ]; then
+            echo "::error::No published review body containing <!-- ai-review-meta -->"
+            exit 1
+          fi
+          META="$(printf '%s\n' "${BODY}" | grep -E '<!--[[:space:]]*ai-review-meta' | head -n1 || true)"
+          echo "meta: ${META}"
+          echo "${META}" | grep -Eq 'head_sha=[0-9a-f]{40}'
+          echo "${META}" | grep -Eq 'base_sha=[0-9a-f]{40}'
+          echo "${META}" | grep -Eq 'mode=(full|delta|inconclusive)'
+          # Successful structured publishes stamp the PR tip; inconclusive may
+          # still carry head_sha for the next full-force. When verdict is set
+          # from Publish, expect the tip to match when mode is full|delta.
+          if [ "${VERDICT}" = "pass" ] || [ "${VERDICT}" = "fail" ]; then
+            if echo "${META}" | grep -Eq 'mode=(full|delta)'; then
+              echo "${META}" | grep -F "head_sha=${EXPECT_HEAD}"
+            fi
+          fi
+          echo "ai-review-meta OK (verdict=${VERDICT})"
 
   gated-demo:
     needs: [review]

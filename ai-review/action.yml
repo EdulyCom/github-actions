@@ -9,9 +9,9 @@ description: >
   job output rather than an identity-pinned Check Run, and why the review
   identity is cosmetic. The verdict is produced by a real two-stage AI
   review pipeline: a Haiku context stage summarizes the diff, then a
-  diff-size-routed Sonnet/Opus review stage performs the full rubric scan
-  and returns a schema-validated result that a deterministic step
-  recomputes the pass/fail decision from.
+  roster-K-routed Sonnet (collapse) or Opus (OSH fan-out) review stage
+  performs the full rubric scan and returns a schema-validated result that
+  a deterministic step recomputes the pass/fail decision from.
 
 inputs:
   app-id:
@@ -94,63 +94,30 @@ inputs:
       docs/adr/0004-non-blocking-findings-and-structured-output-repair.md.
     required: false
     default: "90"
-  sonnet-model:
-    description: >
-      Model ID used by the diff-size routing step ONLY for tiny diffs
-      (≤`sonnet-files-threshold` files AND ≤`sonnet-churn-threshold`
-      changed lines). Every larger diff routes to `opus-model`. Consumed
-      by the routing step, whose output feeds the Review stage as the
-      model to run. Override when a gateway aliases model names.
-    required: false
-    default: "claude-sonnet-5"
-  opus-model:
-    description: >
-      Model ID used by the diff-size routing step for all non-tiny diffs
-      (the default — the review stage prefers Opus, dropping to
-      `sonnet-model` only for trivially small changes). Consumed by the
-      routing step, whose output feeds the Review stage as the model to
-      run. Override when a gateway aliases model names.
-    required: false
-    default: "claude-opus-5"
   sonnet-files-threshold:
     description: >
-      Max changed-file count for a diff to still be considered "tiny" and
-      routed to `sonnet-model`. A diff qualifies for Sonnet only when it
-      is at or under BOTH this and `sonnet-churn-threshold`; anything
-      larger routes to `opus-model`. Widened to 25 (from 15) — measured over
-      682 review jobs, 89% of all traffic routed to Opus, and Opus runs cost
-      3x the wall-clock (28.1 min median vs 9.2) and 4x the spend ($13.22 vs
-      $3.27) of Sonnet ones. This is NOT a depth concession: the parallel
-      design puts every coverage reviewer on Sonnet under the approved OSH
-      tiering, so widening early previews that end state. Both thresholds go
-      away entirely once the review stage fans out.
+      DEPRECATED — accepted for backward compatibility but ignored for model
+      routing. Review model selection uses roster K from
+      `.ai-review/assignments.json` (K≤1 → Sonnet collapse; K>1 → Opus OSH
+      parent). Formerly: max changed-file count for Sonnet when paired with
+      `sonnet-churn-threshold`.
     required: false
     default: "25"
   sonnet-churn-threshold:
     description: >
-      Max changed-line count (additions + deletions) for a diff to still
-      be considered "tiny" and routed to `sonnet-model`. Applied together
-      with `sonnet-files-threshold` (both must hold for Sonnet). Widened to
-      800 alongside `sonnet-files-threshold` — see the note there.
+      DEPRECATED — accepted for backward compatibility but ignored for model
+      routing. See `sonnet-files-threshold`. Formerly: max changed-line count
+      (additions + deletions) for Sonnet when paired with that input.
     required: false
     default: "800"
-  haiku-model:
-    description: >
-      Model ID used by the context stage (this phase) to read the diff and changed
-      files and write context.md for the review stage to consume. Also stamped by
-      the deterministic-prep step onto the roster's `history` and `scorer` roles,
-      so an override here reaches those too. Override when a gateway aliases model
-      names. NOTE: Haiku 4.5 does not accept the `effort` parameter, so no stage
-      running this model may pass `--effort` — the roster resolves that against
-      the model id rather than the tier, so pointing another tier at a Haiku id is
-      covered as well.
-    required: false
-    default: "claude-haiku-4-5"
   enable-context-stage:
     description: >
-      When 'true' (default) the Haiku context stage runs and writes
-      `context.md` for the review stage to read "if present". Set to 'false'
-      to skip it entirely.
+      When 'true' (default) the Haiku context stage may run and enrich
+      `context.md` for the review stage. Prep always writes a deterministic
+      `context.md` first. Even when this input is 'true', Haiku is auto-skipped
+      on delta reviews with roster K≤1 (small incremental scope) to cut
+      wall-clock without changing the must-read gate. Set to 'false' to never
+      run Haiku Context.
 
       Escape hatch, added after a measured stall: on run 31317613715 this
       stage sat silent for 27m27s between "Claude Code initialized" and its
@@ -163,8 +130,8 @@ inputs:
 
       The stage is already best-effort (`continue-on-error`) and its output is
       already optional, so disabling it removes a wall-clock risk without
-      changing the gate's contract. Defaults to 'true' so no consumer
-      behaviour changes on upgrade.
+      changing the gate's contract. Defaults to 'true' so large/full reviews
+      still get Haiku enrichment on upgrade.
     required: false
     default: "true"
   api-timeout-ms:
@@ -208,31 +175,12 @@ inputs:
       Optional override for the Anthropic API base URL (e.g. a caller's custom
       gateway). When omitted, the standard Anthropic endpoint is used.
     required: false
-  test-command:
-    description: >
-      DEPRECATED — accepted but ignored; the Review stage no longer runs
-      tests. It never successfully did: no consumer ever set this input, no
-      caller installs a toolchain before the action, and every sampled run
-      reported `test_execution: skipped`. Meanwhile the allowlist needed to
-      support it granted the review session shell access to npm/npx/yarn/
-      pnpm/node/make/pytest while checked out at the PR head commit — a
-      code-execution path from PR content onto the runner, for a capability
-      that never worked. Tests run in the caller's own CI lanes downstream
-      of this gate. Still accepted so existing callers do not break; will be
-      deleted in a future release. See ai-review/README.md.
-    required: false
-  test-hint:
-    description: >
-      DEPRECATED — accepted but ignored, for the same reason as
-      `test-command`. See that input's description.
-    required: false
   update-pr-body:
     description: >
-      When 'true' (default), the Publish step ticks verified checklist
-      boxes (`- [ ]` → `- [x]`) in the PR description in place and
-      maintains a managed `<!-- ai-review-status -->` block with per-item
-      verification evidence. It never unchecks a human-checked box. Set to
-      'false' to leave the PR body untouched.
+      Accepted for compatibility. Checklist tick / status-block write-back
+      is retired — Test Plan gaps become findings vs CI inventory instead.
+      The input is a no-op either way; PR body checkboxes are never ticked
+      or unticked by this action.
     required: false
     default: "true"
   update-linked-issues:
@@ -244,6 +192,15 @@ inputs:
       state (that is ai-qa's post-merge job).
     required: false
     default: "true"
+  force-full-review:
+    description: >
+      When 'true', always review the full merge-base…HEAD range instead of
+      a delta since the last published `<!-- ai-review -->`. Use after a
+      rebase, base-branch change you want to force, or when debugging a
+      missed finding. Default 'false' — re-runs use delta when a valid
+      prior meta baseline exists.
+    required: false
+    default: "false"
 
 outputs:
   verdict:
@@ -425,11 +382,10 @@ runs:
       #
       # It also emits `.ai-review/assignments.json` — the review roster from
       # lib/roster.js: which reviewer reads which files, and under which model.
-      # NOTHING CONSUMES IT YET; the review below is still one serial session.
-      # It ships now, and best-effort, so the partition it asserts (bins
-      # pairwise disjoint, union equal to changed_files) is exercised on real
-      # diffs across every consumer before a model stage depends on it. Same
-      # shadow-mode discipline the aggregation step shipped under.
+      # Slice 3 (OSH): routing and the review prompt consume `.k` and the role
+      # list. K≤1 → single Sonnet session (collapse); K>1 → Opus parent that
+      # fans out native Sonnet Task workers per the roster. No Node
+      # Promise.race orchestrator — concurrency is Claude Code's scheduler.
       #
       # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
       # this step only runs git and hands stdout over. Nothing here is
@@ -438,34 +394,80 @@ runs:
       shell: bash
       env:
         BASE_REF: ${{ steps.pr-state.outputs.base-ref }}
-        SONNET: ${{ inputs.sonnet-model }}
-        OPUS: ${{ inputs.opus-model }}
-        # Read by lib/write-manifest.js only (lib/roster.js is pure and never
-        # touches the environment), to stamp the OSH tiering onto the roster
-        # with the consumer's overrides rather than hardcoded ids.
-        HAIKU: ${{ inputs.haiku-model }}
-        FILES_MAX: ${{ inputs.sonnet-files-threshold }}
-        CHURN_MAX: ${{ inputs.sonnet-churn-threshold }}
+        # Locked at action level — keep in sync with ai-qa cascade comments.
+        # Claude primary → Cursor if Claude blocked → free if Cursor blocked.
+        # sonnet-*-threshold inputs are deprecated for routing (kept unused).
         MANIFEST_CLI: ${{ github.action_path }}/lib/write-manifest.js
-        GH_TOKEN: ${{ inputs.github-token }}
+        DELTA_CLI: ${{ github.action_path }}/lib/write-delta.js
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
+        FORCE_FULL_REVIEW: ${{ inputs.force-full-review }}
+        ENABLE_CONTEXT_STAGE: ${{ inputs.enable-context-stage }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       run: |
         set -euo pipefail
         mkdir -p .ai-review
 
-        # Resolve the review range once, deterministically. `git diff A...B`
-        # already means "merge base of A and B", but resolving the SHA
-        # explicitly puts it in the manifest and the job log, so a wrong-range
-        # review becomes diagnosable after the fact instead of invisible.
+        # Locked model IDs (not inputs). Keep in sync with ai-qa.
+        #
+        # Two cascades (Claude Code caps --fallback-model at 3 entries):
+        #   Context (no --json-schema): Claude → composer-2.5 → free.
+        #     composer is CLI-safe; claude/cursor/claude-* hang the CLI.
+        #   Review (has --json-schema): Claude → structured_output free only.
+        #     No Cursor model advertises structured_output on this gateway, and
+        #     Agent SDK docs: a mid-stream model fallback can retract an already
+        #     completed structured_output — landing on composer then yields the
+        #     inconclusive "success but no structured_output" failure mode.
+        SONNET="claude/claude-sonnet-5"
+        OPUS="claude/claude-opus-5"
+        # Context stage (top-level session) can use Haiku.
+        HAIKU="claude/claude-haiku-4-5-20251001"
+        # Task subagents under Opus inherit adaptive thinking; Haiku returns
+        # HTTP 400 on this gateway. Helper roster roles (history/scorer) use
+        # Sonnet so fan-out workers actually run (finder ≠ scorer still holds).
+        HELPER_MODEL="${SONNET}"
+        CURSOR="claude/cursor/composer-2.5"
+        FREE_SO="oc/nemotron-3.5-lightning-free,oc/deepseek-v4-flash-free,auto/best-free"
+        HAIKU_FALLBACK="${CURSOR},oc/nemotron-3.5-lightning-free,auto/best-free"
+        SONNET_FALLBACK="${FREE_SO}"
+        OPUS_FALLBACK="${FREE_SO}"
+        export SONNET OPUS HAIKU HELPER_MODEL
+
+        # Resolve the PR merge-base once (telemetry + meta base_sha). The
+        # active review range may be a delta since the last published review.
         BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
         HEAD_SHA="$(git rev-parse HEAD)"
-        echo "prep: range ${BASE_SHA}..${HEAD_SHA}"
 
-        git diff --numstat "${BASE_SHA}" HEAD > .ai-review/numstat.txt
+        # List prior reviews by this bot; write-delta.js decides full vs delta
+        # (ancestor check via git), writes .ai-review/delta.json and optional
+        # prior-review.md. Fail open to [] → full mode on API errors.
+        if ! gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" 2>/dev/null \
+          | jq -s 'add // []' > .ai-review/reviews.json; then
+          echo '[]' > .ai-review/reviews.json
+        fi
+
+        DELTA_OUT="$(
+          BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" \
+          FORCE_FULL_REVIEW="${FORCE_FULL_REVIEW:-false}" \
+          AUTHOR_LOGIN="${AUTHOR_LOGIN}" \
+          REVIEWS_JSON_PATH=".ai-review/reviews.json" \
+          node "${DELTA_CLI}"
+        )"
+        REVIEW_MODE="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^mode=//p' | tail -n1)"
+        REVIEW_BASE_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^review-base-sha=//p' | tail -n1)"
+        DELTA_BASE_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^delta-base-sha=//p' | tail -n1)"
+        PRIOR_HEAD_SHA="$(printf '%s\n' "${DELTA_OUT}" | sed -n 's/^prior-head-sha=//p' | tail -n1)"
+        REVIEW_MODE="${REVIEW_MODE:-full}"
+        REVIEW_BASE_SHA="${REVIEW_BASE_SHA:-${BASE_SHA}}"
+
+        echo "prep: merge-base ${BASE_SHA}..${HEAD_SHA} review_mode=${REVIEW_MODE} range ${REVIEW_BASE_SHA}..${HEAD_SHA}"
+
+        git diff --numstat "${REVIEW_BASE_SHA}" HEAD > .ai-review/numstat.txt
         # -U0 keeps the hunk headers (which carry the enclosing declaration)
         # without any body lines; only `diff --git` and `@@` lines are parsed.
-        git diff -U0 "${BASE_SHA}" HEAD \
+        git diff -U0 "${REVIEW_BASE_SHA}" HEAD \
           | grep -E '^(diff --git|@@)' > .ai-review/diff-headers.txt || true
         # Written to a file, never a step output: a PR title is attacker-
         # influenceable text and can contain newlines, which $GITHUB_OUTPUT
@@ -473,40 +475,94 @@ runs:
         gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title \
           --jq '.title' > .ai-review/pr-title.txt
 
-        BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" node "${MANIFEST_CLI}"
+        BASE_SHA="${BASE_SHA}" HEAD_SHA="${HEAD_SHA}" \
+          REVIEW_MODE="${REVIEW_MODE}" \
+          DELTA_BASE_SHA="${DELTA_BASE_SHA}" \
+          PRIOR_HEAD_SHA="${PRIOR_HEAD_SHA}" \
+          node "${MANIFEST_CLI}"
 
         FILES="$(jq -r '.file_count' .ai-review/manifest.json)"
         CHURN="$(jq -r '.churn' .ai-review/manifest.json)"
+        # Roster K drives OSH topology (spec §5.2 / Appendix A). Not file/churn
+        # thresholds — those inputs are deprecated for model selection.
+        K="$(jq -r '.k // 0' .ai-review/assignments.json)"
+        K="${K:-0}"
 
-        # Sonnet for ordinary diffs; Opus once a diff exceeds EITHER
-        # threshold. 7168977 narrowed the Sonnet band from 15/400 to 3/60,
-        # which routed nearly every real PR to Opus and took the review
-        # stage from ~10-13 min to a 35-min median (59-min max, jobs killed
-        # at callers' 60-min cap). Every consumer picked that up at once
-        # because they track this action at @main.
-        #
-        # Widened 15/400 -> 25/800. Measured across 682 review jobs in 7
-        # consumer repos: 89% of ALL traffic still routed to Opus at 15/400,
-        # and Opus runs cost 3x the wall-clock (28.1 min median vs 9.2) and
-        # 4x the spend ($13.22 vs $3.27) of Sonnet ones.
-        #
-        # This is NOT a depth concession. The approved parallel design puts
-        # every coverage reviewer on Sonnet under the OSH tiering, so this
-        # previews the agreed end state rather than deviating from it.
-        # Still a STOPGAP: the real fix is reviewing in parallel rather than
-        # in series, and BOTH thresholds are deleted when the review stage
-        # fans out. Not the long-term answer.
-        FILES_MAX="${FILES_MAX:-25}"
-        CHURN_MAX="${CHURN_MAX:-800}"
-        if [ "${FILES}" -le "${FILES_MAX}" ] && [ "${CHURN}" -le "${CHURN_MAX}" ]; then
-          MODEL="${SONNET:-claude-sonnet-5}"
+        # K≤1 (including empty-diff k:0): single Sonnet session emits
+        # --json-schema directly — no Opus parent, no independent scorer.
+        # K>1: Opus parent + Sonnet Task --agents; only Opus emits SO.
+        if [ "${K}" -le 1 ]; then
+          MODEL="${SONNET}"
+          FALLBACK="${SONNET_FALLBACK}"
+          OSH_MODE="collapse"
         else
-          MODEL="${OPUS:-claude-opus-5}"
+          MODEL="${OPUS}"
+          FALLBACK="${OPUS_FALLBACK}"
+          OSH_MODE="fanout"
         fi
+        echo "prep: osh-mode=${OSH_MODE} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
+
+        # Haiku Context stage: optional enrichment. Prep already wrote a
+        # deterministic context.md. Auto-skip when delta + K≤1 — scope is small
+        # enough that a second model hop is pure wall-clock; Review still
+        # must-reads the active range. Large/full reviews keep Haiku.
+        RUN_CONTEXT_STAGE=false
+        if [ "${ENABLE_CONTEXT_STAGE:-true}" = "true" ]; then
+          if [ "${REVIEW_MODE}" = "delta" ] && [ "${K}" -le 1 ]; then
+            echo "prep: skipping Haiku context (delta + K<=1); using deterministic context.md"
+          else
+            RUN_CONTEXT_STAGE=true
+          fi
+        else
+          echo "prep: skipping Haiku context (enable-context-stage=false); using deterministic context.md"
+        fi
+
+        # Mode-conditional review allowlist (collapse = prior least-privilege;
+        # fanout adds Task only). No Write on either path: Claude Code cannot
+        # scope Write to `.ai-review/` (see Derive step), so workers return
+        # findings via Task results and the parent aggregates into SO.
+        REVIEW_TOOLS_COLLAPSE='Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)'
+        REVIEW_TOOLS_FANOUT='Read,Grep,Glob,Task,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)'
+        if [ "${OSH_MODE}" = "fanout" ]; then
+          REVIEW_ALLOWED_TOOLS="${REVIEW_TOOLS_FANOUT}"
+        else
+          REVIEW_ALLOWED_TOOLS="${REVIEW_TOOLS_COLLAPSE}"
+        fi
+
+        # Policy file the review/retry prompts must obey (keeps one shared
+        # prompt body with mode-specific orchestration rules).
+        # Checked-in files — do NOT inline via YAML heredoc: column-0 heredoc
+        # bodies terminate the `run: |` block (CI: "could not find expected ':'").
+        if [ "${OSH_MODE}" = "fanout" ]; then
+          cp "${ACTION_PATH}/osh-policy-fanout.md" .ai-review/osh-policy.md
+        else
+          cp "${ACTION_PATH}/osh-policy-collapse.md" .ai-review/osh-policy.md
+        fi
+
+        # Pre-register Task agents (Sonnet) so the Opus parent can fan out in
+        # one parallel wave without improvising agent defs mid-review.
+        jq -c . "${ACTION_PATH}/osh-agents.json" > .ai-review/osh-agents.json
+        OSH_AGENTS="$(cat .ai-review/osh-agents.json)"
+
         {
           echo "files=${FILES}"
           echo "churn=${CHURN}"
+          echo "k=${K}"
+          echo "osh-mode=${OSH_MODE}"
+          echo "review-allowed-tools=${REVIEW_ALLOWED_TOOLS}"
           echo "model=${MODEL}"
+          echo "fallback-model=${FALLBACK}"
+          echo "haiku-model=${HAIKU}"
+          echo "haiku-fallback-model=${HAIKU_FALLBACK}"
+          echo "review-mode=${REVIEW_MODE}"
+          echo "run-context-stage=${RUN_CONTEXT_STAGE}"
+          echo "merge-base-sha=${BASE_SHA}"
+          echo "head-sha=${HEAD_SHA}"
+          echo "delta-base-sha=${DELTA_BASE_SHA}"
+          # Multiline-safe: agents JSON is one jq -c line but may be large.
+          echo "osh-agents<<OSH_AGENTS_EOF"
+          printf '%s\n' "${OSH_AGENTS}"
+          echo "OSH_AGENTS_EOF"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Resolve linked issues
@@ -549,11 +605,12 @@ runs:
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
-        inputs.enable-context-stage == 'true'
+        steps.route.outputs.run-context-stage == 'true'
       # continue-on-error: context.md is a non-essential optimization — the
-      # Review stage reads it only "if present" and works without it. A flaky
-      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
-      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
+      # Review stage reads it only "if present" and works without it. Prep
+      # already wrote a deterministic context.md; this stage may enrich it.
+      # A flaky Anthropic gateway or plugin-marketplace load can hang/error this
+      # cheap Haiku call (observed: is_error with num_turns:1, cost:0 after a long
       # stall); that must NOT sink the whole review. Composite-action steps
       # cannot set timeout-minutes, so graceful degradation here + the caller's
       # job-level timeout backstop is how we bound this failure mode.
@@ -586,23 +643,30 @@ runs:
         # Review stage's relative-path read of `context.md` at the repository root
         # resolves to the same file.
         claude_args: |
-          --model ${{ inputs.haiku-model }}
+          --model ${{ steps.route.outputs.haiku-model }}
+          --fallback-model ${{ steps.route.outputs.haiku-fallback-model }}
           --allowedTools "Read,Grep,Glob,Write,Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git remote show:*),Bash(git merge-base:*),Bash(git log:*),Bash(git show:*)"
         prompt: |
           Read `.ai-review/manifest.json` first: a prior deterministic step
-          already staged `base_sha`, `head_sha` and `changed_files`. Trust them —
+          already staged `base_sha`, `head_sha`, `review_mode`, `changed_files`,
+          and (when `review_mode` is `delta`) `delta_base_sha`. Trust them —
           do not run `git symbolic-ref`, `git merge-base` or `git remote show` to
           rediscover the default branch or the diff base. Diff with
-          `git diff <base_sha> HEAD` using the staged SHA, then read
-          the full contents of every changed file. Grep the repository for callers,
+          `git diff <delta_base_sha> HEAD` when `review_mode` is `delta`, else
+          `git diff <base_sha> HEAD`, then read the full contents of every
+          changed file. Grep the repository for callers,
           callees, and helper functions related to the changed code, so a reviewer
           has the surrounding context without re-deriving it.
 
-          Write a concise summary to `context.md` at the repository root covering:
+          Write (overwrite) a concise summary to `context.md` at the repository
+          root covering:
           - what changed, in plain language
           - which files/functions call into or are called by the changed code
           - any related helpers, shared utilities, or patterns the changed code
             reuses or should have reused
+
+          A prior prep step may already have written a deterministic
+          `context.md` inventory — replace it with this richer summary.
 
           Do NOT review the change. Do NOT judge correctness, quality, or security.
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
@@ -630,58 +694,97 @@ runs:
       id: context-verify
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        inputs.enable-context-stage == 'true'
+        steps.pr-state.outputs.skip != 'true'
       shell: bash
+      env:
+        RAN_HAIKU_CONTEXT: ${{ steps.route.outputs.run-context-stage }}
       run: |
         set -euo pipefail
-        # Durable regression check for the Task 2.4 fix-round finding that the
-        # Context stage's Write tool calls were silently denied (see the
-        # --allowedTools comment on the Context stage step above). This makes
-        # the handoff's health visible in every run's plain step log instead of
-        # requiring a permission_denials_count archaeology dig.
+        # Prep always writes deterministic context.md. When Haiku ran, this
+        # also catches the historical Write-permission denial (Task 2.4).
         if [ ! -s context.md ]; then
-          echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          if [ "${RAN_HAIKU_CONTEXT}" = "true" ]; then
+            echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          else
+            echo "::warning::context.md is missing or empty after prep — Review will proceed without handoff context."
+          fi
           exit 0
         fi
-        echo "context.md present: $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        if [ "${RAN_HAIKU_CONTEXT}" = "true" ]; then
+          echo "context.md present (after Haiku Context): $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        else
+          echo "context.md present (deterministic prep; Haiku Context skipped): $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        fi
         echo "--- context.md preview (first 20 lines) ---"
         head -n 20 context.md
 
-    - name: CI signal (re-review only)
+    - name: CI inventory and signal
       id: ci-signal
       if: steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
-        EVENT_NAME: ${{ github.event_name }}
         REPO: ${{ github.repository }}
         HEAD_SHA: ${{ steps.pr-state.outputs.head-sha }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        TESTPLAN_CLI: ${{ github.action_path }}/lib/testplan-ci.js
       run: |
         # Best-effort only — this step must never hard-fail the job, so it
-        # deliberately omits `set -e`. A normal pull_request run is the
-        # *first* CI job: no required check has a completed conclusion yet,
-        # so a real CI signal only exists on a manual workflow_dispatch
-        # re-review, after CI has already run once.
+        # deliberately omits `set -e`. Inventories check runs on every PR
+        # event (not only workflow_dispatch) into .ai-review/ci-checks.json
+        # and parses the PR Test Plan into .ai-review/test-plan-items.json
+        # for the review prompt. Aggregate pass/fail SIGNAL still requires
+        # every returned check to be completed — a first pull_request run
+        # usually yields no_ci while sibling jobs are still in progress.
         set -uo pipefail
+        mkdir -p .ai-review
         SIGNAL="no_ci"
-        if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-          CHECK_RUNS="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --jq '.check_runs' 2>/dev/null)"
-          if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
-            # If any returned check-run has not yet reached "completed"
-            # (queued/in_progress), the signal is inconclusive — never guess
-            # a pass/fail from a partial subset of still-running checks.
-            if echo "${CHECK_RUNS}" | jq -e 'any(.[]; .status != "completed")' >/dev/null 2>&1; then
-              SIGNAL="no_ci"
-            else
-              CONCLUSIONS="$(echo "${CHECK_RUNS}" | jq '[.[] | .conclusion]')"
-              if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
-                SIGNAL="timeout"
-              elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
-                SIGNAL="fail"
-              elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
-                SIGNAL="pass"
-              fi
+        CHECK_RUNS='[]'
+
+        if RAW="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/check-runs" 2>/dev/null)"; then
+          MERGED="$(printf '%s' "${RAW}" | jq -s '[.[].check_runs // [] | .[]]' 2>/dev/null || true)"
+          if [ -n "${MERGED}" ] && [ "${MERGED}" != "null" ]; then
+            CHECK_RUNS="${MERGED}"
+          fi
+        fi
+        printf '%s\n' "${CHECK_RUNS}" > .ai-review/check-runs.raw.json
+
+        PR_BODY=""
+        if [ -n "${PR_NUMBER:-}" ]; then
+          PR_BODY="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json body --jq '.body // ""' 2>/dev/null || true)"
+        fi
+        # Written to a file (never env): PR bodies can contain newlines and
+        # attacker-influenceable text.
+        printf '%s' "${PR_BODY}" > .ai-review/pr-body.md
+
+        PR_BODY_PATH=".ai-review/pr-body.md" \
+          CHECK_RUNS_PATH=".ai-review/check-runs.raw.json" \
+          AI_REVIEW_DIR=".ai-review" \
+          node "${TESTPLAN_CLI}" || {
+            echo "::warning::testplan-ci failed; writing empty Test Plan/CI artifacts so the review can still map coverage"
+            echo '{"schema":1,"items":[]}' > .ai-review/test-plan-items.json
+            echo '{"schema":1,"checks":[]}' > .ai-review/ci-checks.json
+          }
+        if [ ! -f .ai-review/test-plan-items.json ] || [ ! -f .ai-review/ci-checks.json ]; then
+          echo "::warning::Test Plan/CI artifacts missing after inventory; writing empty stubs"
+          echo '{"schema":1,"items":[]}' > .ai-review/test-plan-items.json
+          echo '{"schema":1,"checks":[]}' > .ai-review/ci-checks.json
+        fi
+
+        if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
+          # If any returned check-run has not yet reached "completed"
+          # (queued/in_progress), the signal is inconclusive — never guess
+          # a pass/fail from a partial subset of still-running checks.
+          if echo "${CHECK_RUNS}" | jq -e 'any(.[]; .status != "completed")' >/dev/null 2>&1; then
+            SIGNAL="no_ci"
+          else
+            CONCLUSIONS="$(echo "${CHECK_RUNS}" | jq '[.[] | .conclusion]')"
+            if echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "timed_out")' >/dev/null 2>&1; then
+              SIGNAL="timeout"
+            elif echo "${CONCLUSIONS}" | jq -e 'any(.[]; . == "failure" or . == "cancelled" or . == "action_required")' >/dev/null 2>&1; then
+              SIGNAL="fail"
+            elif echo "${CONCLUSIONS}" | jq -e 'all(.[]; . == "success" or . == "neutral" or . == "skipped")' >/dev/null 2>&1; then
+              SIGNAL="pass"
             fi
           fi
         fi
@@ -694,7 +797,7 @@ runs:
       # exits 1 (upstream flakiness). Don't crash the job — the retry step
       # below re-attempts, and Publish degrades gracefully if both miss.
       #
-      # --max-turns 200 (in claude_args below) was intended as a mechanical
+      # --max-turns 250 (in claude_args below) was intended as a mechanical
       # backstop for rubric.md's Angle C bound. DO NOT TRUST IT AS A CEILING:
       # a measured run (EdulyCom/eduly 31294407787) reported num_turns 208
       # under this cap with subtype "success", and grepping the eight
@@ -735,21 +838,27 @@ runs:
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         # Deliberately NOT steps.identity.outputs.author-token, for the same
-        # least-privilege reason as the Context stage: this step only reads the
-        # repo, calls the Anthropic API, and returns structured output — it
-        # never calls the GitHub API to post anything. The App-minted identity
-        # is reserved for the deterministic Publish review step below.
+        # least-privilege reason as the Context stage: this step reads the
+        # repo (and on fanout may spawn Task subagents), calls the Anthropic
+        # API, and returns structured output — it never calls the GitHub API
+        # to post anything. Allowlist is mode-conditional
+        # (`steps.route.outputs.review-allowed-tools`): collapse has no
+        # Write/Task; fanout adds Task only (no Write — unscopeable; see
+        # Derive). The App-minted identity is reserved for Publish below.
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
         plugins: superpowers@superpowers-marketplace
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
+          --max-turns 250
+          --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
+          --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           You are performing an automated code review. Attempt to load the
@@ -761,11 +870,23 @@ runs:
           command you ran and its actual output/exit code. If you assert a
           check passed, you must have run it and read the result this session.
 
+          Read `.ai-review/osh-policy.md` FIRST and obey it. Prep set
+          `OSH_MODE` (`collapse` or `fanout`) to match that file:
+          - collapse: single-session Sonnet review; no subagent fan-out.
+          - fanout: you are the Opus parent; spawn Task subagents using the
+            pre-registered `--agents` (`osh-coverage`, `osh-tracer`,
+            `osh-history`, `osh-scorer`) per `.ai-review/assignments.json` in
+            one parallel wave; only YOU emit structured output. Do not spawn
+            Haiku (inherits adaptive thinking → gateway 400). Workers return
+            findings via Task results (no Write tool).
+
           Read `${{ github.action_path }}/rubric.md`. This is the
           authoritative review methodology: an 8-angle scan (intent alignment
           first, then line-by-line diff, removed-behavior audit, cross-file
           tracing, reuse, simplification, efficiency, altitude), a severity
-          scale (P0-P3), and a full review checklist. Follow it.
+          scale (P0-P3), and a full review checklist. Follow it — under
+          fanout, coverage/coherence/scoring work is delegated per
+          osh-policy.md while you still own the final judgment.
 
           The PR number is available in the `PR_NUMBER` environment variable.
           Run `gh pr view "$PR_NUMBER" --json title,body,url,number` to read
@@ -782,34 +903,50 @@ runs:
           `.ai-review/linked-issues.json` is absent or empty, fall back to
           the PR title/body as the intent source.
 
-          Read `context.md` at the repository root (written by an earlier
-          context-gathering stage) for a summary of what changed and its
-          callers/callees/related helpers.
+          Read `context.md` at the repository root when present (deterministic
+          prep inventory and/or Haiku Context enrichment) for a summary of what
+          changed and its callers/callees/related helpers. Treat it as a hint
+          only — still read every changed file in full.
 
-          Read `.ai-review/manifest.json` FIRST. A prior deterministic step
-          already resolved the review range and staged the facts you would
-          otherwise re-derive: `base_sha` and `head_sha` (the exact range),
-          `changed_files` (the authoritative list), `symbol_manifest`
-          (declarations touched by the diff), plus `title_ok`,
-          `has_test_change` and `no_tests_for_changed_logic`.
+          Read `.ai-review/manifest.json` FIRST (after osh-policy). A prior
+          deterministic step already resolved the review range and staged the
+          facts you would otherwise re-derive: `base_sha` and `head_sha` (PR
+          merge-base and HEAD for telemetry), `review_mode` (`full` or
+          `delta`), `delta_base_sha` when mode is delta (the prior published
+          review HEAD — the start of this run's active range),
+          `changed_files` (the authoritative list for the active range only),
+          `symbol_manifest` (declarations touched by the diff), plus
+          `title_ok`, `has_test_change` and `no_tests_for_changed_logic`.
 
           TRUST THOSE VALUES. Do NOT run `git symbolic-ref`, `git merge-base`,
           `git remote show`, or `gh pr view` to work out the default branch,
           the diff base, or the changed-file list — they are already settled,
           and re-deriving them costs turns and risks reviewing the wrong range.
-          Diff with `git diff <base_sha> HEAD` using the staged SHA.
+          Diff with `git diff <delta_base_sha> HEAD` when `review_mode` is
+          `delta`, otherwise `git diff <base_sha> HEAD`.
 
-          Read the COMPLETE contents of every file in `changed_files` with
-          `Read` — never sample, truncate, or reason from the diff hunks alone.
-          There is no size cap on changed files; large files are why this diff
-          was routed to the stronger model. `changed_files` is the coverage
-          contract: every entry gets read in full. For callers/callees outside
-          the diff (Angle C), start from `symbol_manifest` and follow the
-          rubric's risk-based bound instead of reading every call site in
-          full — that angle has no natural stopping point and is the one place
-          exhaustiveness is not the goal.
+          When `review_mode` is `delta`, this run covers only commits after
+          the last published ai-review. If `.ai-review/prior-review.md`
+          exists, READ IT and carry findings forward: mark each prior
+          finding resolved (cite what fixed it) or still open (restate it
+          if it still applies). Do not drop open prior findings silently.
+          Neighbor files outside `changed_files` may be read when a prior
+          finding or an import requires it — that is targeted expansion,
+          not a second full-PR read.
 
-          Perform the full 8-angle scan from the rubric against the diff.
+          Must-read-all for the active range: under **collapse**, YOU read
+          the COMPLETE contents of every file in `changed_files` with `Read`
+          — never sample, truncate, or reason from the diff hunks alone.
+          Under **fanout**, coverage subagents satisfy that contract for
+          their `assigned_files`; you do not re-read every file unless
+          osh-policy conflict resolution needs a spot check. For
+          callers/callees outside the diff (Angle C), start from
+          `symbol_manifest` and follow the rubric's risk-based bound (or the
+          tracer role under fanout) — that angle has no natural stopping
+          point and is the one place exhaustiveness is not the goal.
+
+          Perform the full 8-angle scan from the rubric against the diff
+          (directly under collapse; via roster roles under fanout).
           Classify every confirmed or plausible finding into P0/P1/P2/P3 per
           the rubric's severity definitions, and count them.
 
@@ -833,18 +970,16 @@ runs:
           exercise), report `no_tests_for_changed_logic: false` — that row
           requires no tests, so none missing is not a defect.
 
-          Evaluate the PR description's checklist. If the PR body (or a
-          linked issue) contains `- [ ]`/`- [x]` checklist items, return a
-          `checklist` array: one entry per item with its `text` copied
-          verbatim (without the `- [ ]`/`- [x]` prefix), a `status` of
-          `verified` (you confirmed it is satisfied — cite how in
-          `evidence`), `failed` (you confirmed it is NOT satisfied), or
-          `unverifiable` (cannot be checked from code/tests, e.g. a manual
-          or post-merge step). Only mark `verified` with real evidence per
-          `/verification-before-completion`. A later deterministic step uses
-          this to tick verified boxes in the PR body; do not edit the PR body
-          yourself. Per the rubric, checklist status is a P2 reminder at
-          most — do not fail the review solely on incomplete checklist items.
+          Read `.ai-review/test-plan-items.json` and `.ai-review/ci-checks.json`
+          (written by Prep). Map each Test Plan / checklist item to the
+          inventoried CI checks. For each item that is **not covered** (or
+          only weakly covered) by CI, emit a normal `findings[]` entry with
+          severity P0–P3 judged via the rubric — CI is the source of truth
+          for "was this exercised?", not PR-body ticks. Leave the structured
+          `checklist` array empty (or omit it); Publish no longer ticks
+          checklist boxes and must not edit the PR body. Manual/post-merge
+          items with no plausible CI mapping may be omitted or filed at low
+          severity at your judgment — do not invent coverage.
 
           Write a complete review as `comment_markdown`: findings grouped by
           severity (P0 Blockers, P1 Should Fix, P2 Nice-to-Have, P3 Nits —
@@ -855,12 +990,18 @@ runs:
 
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
-          report, with your own confidence 0/25/50/75/100 and, where you would
-          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
-          you read in full — it is cross-checked against the staged manifest, so
-          a short list reads as incomplete coverage. A later non-gating step
-          aggregates these deterministically and compares the result against
-          your own `counts`; they do not affect this run's verdict.
+          report. Under **collapse**, include your own confidence 0/25/50/75/100
+          and, where you would reclassify it, `severity_confirmed`. Under
+          **fanout**, copy each finding's `confidence` and `severity_confirmed`
+          from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
+          scorer ran; worker severity labels may still seed the finding.
+          `files_reviewed` lists every file
+          read in full for the active range (yours under collapse; union of
+          coverage workers under fanout) — it is cross-checked against the
+          staged manifest, so a short list reads as incomplete coverage. A
+          later non-gating step aggregates these deterministically and
+          compares the result against your own `counts`; they do not affect
+          this run's verdict.
 
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
@@ -879,16 +1020,23 @@ runs:
       if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
       shell: bash
       env:
+        # Prefer the action output; fall back to the fixed path the pinned
+        # claude-code-action always writes (outputs can be missing when the
+        # step fails on a missing structured_output after logging session_id).
         EXEC_FILE: ${{ steps.review.outputs.execution_file }}
       run: |
         set -uo pipefail
-        if [ -n "${EXEC_FILE:-}" ] && [ -s "${EXEC_FILE}" ]; then
-          cp "${EXEC_FILE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
+        CANDIDATE="${EXEC_FILE:-}"
+        if [ -z "${CANDIDATE}" ] || [ ! -s "${CANDIDATE}" ]; then
+          CANDIDATE="${RUNNER_TEMP}/claude-execution-output.json"
+        fi
+        if [ -s "${CANDIDATE}" ]; then
+          cp "${CANDIDATE}" "${RUNNER_TEMP}/ai-review-exec-review-snapshot.json" || true
         fi
         exit 0
 
     # Retry blast-radius gate. The retry below re-runs the ENTIRE review at
-    # --max-turns 200 — it is not a cheap re-emit. After a long first attempt
+    # --max-turns 250 — it is not a cheap re-emit. After a long first attempt
     # it cannot finish inside any caller's timeout-minutes, so it only burns
     # tokens until the job is killed: review-stage durations up to 79.5 min
     # were measured, and 32 of 682 jobs died on the caller's clock.
@@ -899,6 +1047,11 @@ runs:
     # wins, and its duration_ms is the stage duration. Best-effort — any
     # parse failure leaves retry-ok=true, so this can only ever suppress a
     # retry that is provably too late, never block one on missing data.
+    #
+    # Also recovers session_id for the cheap repair step: when the review
+    # action fails on missing structured_output it may log "Set session_id"
+    # without exporting the output, which previously skipped repair entirely
+    # (observed on run 31997386554) and forced a full re-review.
     - name: Gate the review retry on elapsed review time
       id: retry_budget
       if: always() && steps.fork-guard.outputs.is-fork != 'true' && steps.pr-state.outputs.skip != 'true'
@@ -907,14 +1060,34 @@ runs:
         # 15 min. A retry starting later than this cannot complete within the
         # 25-min timeout docs/consumer-integration.md recommends.
         RETRY_BUDGET_MS: "900000"
+        REVIEW_SESSION_ID: ${{ steps.review.outputs.session_id }}
       run: |
         set -uo pipefail
         SNAPSHOT="${RUNNER_TEMP}/ai-review-exec-review-snapshot.json"
         RETRY_OK=true
         DURATION_MS=0
+        SESSION_ID="${REVIEW_SESSION_ID:-}"
         if [ -s "${SNAPSHOT}" ]; then
           DURATION_MS="$(jq -r '[.[] | select(.type == "result")] | last | .duration_ms // 0' \
             "${SNAPSHOT}" 2>/dev/null || echo 0)"
+          if [ -z "${SESSION_ID}" ]; then
+            SESSION_ID="$(jq -r '
+              [
+                .[]
+                | select(.type == "system" and .subtype == "init")
+                | .session_id // empty
+              ]
+              | map(select(length > 0))
+              | last // empty
+            ' "${SNAPSHOT}" 2>/dev/null || true)"
+          fi
+          if [ -z "${SESSION_ID}" ]; then
+            SESSION_ID="$(jq -r '
+              [.[] | select(.type == "result") | .session_id // empty]
+              | map(select(length > 0))
+              | last // empty
+            ' "${SNAPSHOT}" 2>/dev/null || true)"
+          fi
         fi
         case "${DURATION_MS}" in
           ''|*[!0-9]*) DURATION_MS=0 ;;
@@ -923,9 +1096,13 @@ runs:
           RETRY_OK=false
           echo "::warning::Review stage ran ${DURATION_MS}ms (>= ${RETRY_BUDGET_MS}ms budget); skipping the full-review retry, which could not finish inside the caller's timeout."
         fi
+        if [ -z "${SESSION_ID}" ]; then
+          echo "::warning::No review session_id in step outputs or execution snapshot; structured-output repair will be skipped."
+        fi
         {
           echo "retry-ok=${RETRY_OK}"
           echo "review-duration-ms=${DURATION_MS}"
+          echo "session_id=${SESSION_ID}"
         } >> "${GITHUB_OUTPUT}"
         exit 0
 
@@ -944,7 +1121,7 @@ runs:
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
         steps.review.outputs.structured_output == '' &&
-        steps.review.outputs.session_id != ''
+        steps.retry_budget.outputs.session_id != ''
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
         ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
@@ -955,8 +1132,9 @@ runs:
         github_token: ${{ inputs.github-token }}
         allowed_bots: ${{ inputs.allowed-bots }}
         claude_args: |
-          --resume ${{ steps.review.outputs.session_id }}
+          --resume ${{ steps.retry_budget.outputs.session_id }}
           --model ${{ steps.route.outputs.model }}
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
           --allowedTools "Read"
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
@@ -1037,6 +1215,7 @@ runs:
         API_TIMEOUT_MS: ${{ inputs.api-timeout-ms }}
         ANTHROPIC_CUSTOM_HEADERS: "${{ inputs.anthropic-auth-token != '' && format('Authorization: Bearer {0}', inputs.anthropic-auth-token) || '' }}"
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        OSH_MODE: ${{ steps.route.outputs.osh-mode }}
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key != '' && inputs.anthropic-api-key || inputs.anthropic-auth-token }}
         github_token: ${{ inputs.github-token }}
@@ -1045,47 +1224,69 @@ runs:
         plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git
         claude_args: |
           --model ${{ steps.route.outputs.model }}
-          --max-turns 200
-          --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh issue view:*),Bash(git diff:*),Bash(git symbolic-ref:*),Bash(git merge-base:*),Bash(git remote show:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(find:*),Bash(wc:*)"
+          --fallback-model ${{ steps.route.outputs.fallback-model }}
+          --max-turns 250
+          --allowedTools "${{ steps.route.outputs.review-allowed-tools }}"
+          --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
           This is a RETRY of an automated code review whose previous attempt
           ended without returning the required structured output. Emitting the
           structured output as your FINAL action is mandatory this time.
 
+          Read `.ai-review/osh-policy.md` and obey it (`OSH_MODE` is
+          `collapse` or `fanout`). Under fanout you are the Opus parent —
+          spawn Task subagents via pre-registered `--agents` (`osh-coverage`,
+          `osh-tracer`, `osh-history`, `osh-scorer`) per assignments.json in
+          one parallel wave; only YOU emit structured output. Do not spawn
+          Haiku. Under collapse, do not fan out.
+
           Populate the optional `findings` and `files_reviewed` fields of the
           structured output as well. `findings` is one entry per finding you
-          report, with your own confidence 0/25/50/75/100 and, where you would
-          reclassify it, `severity_confirmed`. `files_reviewed` lists every file
-          you read in full — it is cross-checked against the staged manifest, so
-          a short list reads as incomplete coverage. A later non-gating step
-          aggregates these deterministically and compares the result against
-          your own `counts`; they do not affect this run's verdict.
+          report. Under **collapse**, include your own confidence 0/25/50/75/100
+          and, where you would reclassify it, `severity_confirmed`. Under
+          **fanout**, copy each finding's `confidence` and `severity_confirmed`
+          from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
+          scorer ran. `files_reviewed` lists every file
+          read in full for the active range — it is cross-checked against the
+          staged manifest, so a short list reads as incomplete coverage. A
+          later non-gating step aggregates these deterministically and compares
+          the result against your own `counts`; they do not affect this run's
+          verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
-          scan + P0-P3 severities + checklist) and `context.md` at the repo root
+          scan + P0-P3 severities + review checklist) and `context.md` at the repo root
           if present. The PR number is in the `PR_NUMBER` environment variable;
           the PR head is already checked out. Read `.ai-review/manifest.json`
-          for the staged `base_sha`/`head_sha`/`changed_files` and trust them
-          rather than re-deriving the range; diff with
-          `git diff <base_sha> HEAD`. Run
-          `gh pr view "$PR_NUMBER" --json title,body,url,number` for the PR
+          for the staged `review_mode`/`base_sha`/`head_sha`/`delta_base_sha`/
+          `changed_files` and trust them rather than re-deriving the range;
+          diff with `git diff <delta_base_sha> HEAD` when `review_mode` is
+          `delta`, otherwise `git diff <base_sha> HEAD`. When
+          `.ai-review/prior-review.md` is present (delta or forced-full with
+          a prior), read it and mark prior findings resolved vs still-open.
+          Run `gh pr view "$PR_NUMBER" --json title,body,url,number` for the PR
           description only. Read
           `.ai-review/linked-issues.json` (repo root) if present and use each
           linked issue's acceptance criteria as the intent contract for Angle
-          H. Attempt to load `/verification-before-completion` and
-          `/requesting-code-review` (best-effort). Read complete file contents,
-          never just the diff hunks. Do NOT run tests or probe for a
-          toolchain — set `test_execution: "skipped"` (you have no shell
-          access to a test runner). You MAY populate the optional
-          `checklist` and `verification_evidence` fields; omit them if you
-          cannot assess them.
+          H. Read `.ai-review/test-plan-items.json` and
+          `.ai-review/ci-checks.json` if present: uncovered/weakly covered
+          Test Plan items become normal `findings[]` (P0–P3 via the rubric);
+          leave `checklist` empty — Publish does not tick PR-body boxes.
+          Attempt to load `/verification-before-completion` and
+          `/requesting-code-review` (best-effort). Under collapse, read
+          complete file contents (never just diff hunks). Under fanout,
+          coverage workers do that for assigned paths. Do NOT run tests or
+          probe for a toolchain — set `test_execution: "skipped"` (you have
+          no shell access to a test runner). You MAY populate
+          `verification_evidence` when you have real command output; omit it
+          if you cannot.
 
-          Perform the full review per the rubric, then write `comment_markdown`
-          (findings grouped by severity P0-P3 with "_None._" for empty sections,
-          plus strengths; no leading verdict token / confidence line / HTML
-          marker — the caller prepends its own banner). `counts` must be
-          accurate; a deterministic step recomputes the pass/fail decision.
+          Perform the full review per the rubric (and osh-policy), then write
+          `comment_markdown` (findings grouped by severity P0-P3 with
+          "_None._" for empty sections, plus strengths; no leading verdict
+          token / confidence line / HTML marker — the caller prepends its own
+          banner). `counts` must be accurate; a deterministic step recomputes
+          the pass/fail decision.
 
           Return your assessment via the required structured output schema. Do
           NOT end your turn without emitting the structured output.
@@ -1367,6 +1568,13 @@ runs:
 
     # Shadow aggregation — OBSERVATION ONLY, gates nothing.
     #
+    # Publish still consumes parent/collapsed-session structured_output (same
+    # as today) for both osh-mode=collapse and fanout. Under fanout the Opus
+    # parent is prompted to gather worker Task results into that SO; we do NOT
+    # wire multi-role findings files into the live gate yet — avoiding a
+    # half-broken aggregate path. This step still derives review-serial from
+    # the SO and compares aggregate.js in shadow only.
+    #
     # PR-C's plan is to replace structured_output with findings files on disk
     # and delete the repair/back-off/retry/salvage chain. That is the first
     # change in this migration that can wrongly BLOCK a developer's PR, and it
@@ -1375,10 +1583,11 @@ runs:
     #
     # This step runs the new deterministic aggregation next to the live path
     # and records whether the two agree. It reads the files the Derive step
-    # above produces from the schema-validated structured output (the model
-    # holds no Write grant — see that step's comment), runs lib/aggregate.js, feeds the result through the
-    # SAME lib/recompute.js the real verdict uses, and compares. Any divergence
-    # is a warning in the log and a row in the job summary.
+    # above produces from the schema-validated structured output (Review has
+    # no Write grant on collapse or fanout — workers return via Task; Derive
+    # writes the shadow artifacts), runs lib/aggregate.js, feeds the result
+    # through the SAME lib/recompute.js the real verdict uses, and compares.
+    # Any divergence is a warning in the log and a row in the job summary.
     #
     # Deliberately non-gating: `continue-on-error`, no outputs consumed by any
     # later step, and Publish below is untouched. Deleting --json-schema and the
@@ -1515,6 +1724,14 @@ runs:
           || steps.review.outputs.structured_output) }}
         RECOMPUTE_PATH: ${{ github.action_path }}/lib/recompute.js
         PUBLISH_LIB_PATH: ${{ github.action_path }}/lib/publish.js
+        METRICS_PATH: ${{ github.action_path }}/lib/metrics.js
+        ROUTED_MODEL: ${{ steps.route.outputs.model }}
+        REVIEW_LOG: ${{ runner.temp }}/ai-review-exec-review-snapshot.json
+        REPAIR_LOG: ${{ runner.temp }}/ai-review-exec-repair-snapshot.json
+        RETRY_LOG: ${{ steps.review_retry.outputs.execution_file }}
+        HEAD_SHA: ${{ steps.route.outputs.head-sha }}
+        MERGE_BASE_SHA: ${{ steps.route.outputs.merge-base-sha }}
+        REVIEW_MODE: ${{ steps.route.outputs.review-mode }}
       with:
         github-token: ${{ steps.identity-refresh.outputs.author-token }}
         script: |
@@ -1524,10 +1741,33 @@ runs:
             stripLeadingBannerArtifacts,
             buildReviewBody,
             buildInconclusiveBody,
-            tickVerifiedBoxes,
-            buildStatusBlock,
-            upsertStatusBlock,
           } = require(process.env.PUBLISH_LIB_PATH);
+          const { resolveModelUsed } = require(process.env.METRICS_PATH);
+
+          const readLog = (p) => {
+            try {
+              return JSON.parse(fs.readFileSync(p, "utf8"));
+            } catch {
+              return null;
+            }
+          };
+          const modelUsed = resolveModelUsed({
+            logs: [
+              readLog(process.env.RETRY_LOG),
+              readLog(process.env.REPAIR_LOG),
+              readLog(process.env.REVIEW_LOG),
+            ],
+            fallback: process.env.ROUTED_MODEL || "",
+          });
+
+          const reviewMeta =
+            process.env.HEAD_SHA && process.env.MERGE_BASE_SHA
+              ? {
+                  headSha: process.env.HEAD_SHA,
+                  baseSha: process.env.MERGE_BASE_SHA,
+                  mode: process.env.REVIEW_MODE === "delta" ? "delta" : "full",
+                }
+              : null;
 
           const prNumber = Number(process.env.PR_NUMBER);
           const passLabel = process.env.PASS_LABEL;
@@ -1552,7 +1792,10 @@ runs:
             } catch (e) {
               // No salvage file (step skipped, or nothing recoverable).
             }
-            const inconclusiveBody = buildInconclusiveBody(salvaged);
+            const inconclusiveBody = buildInconclusiveBody(salvaged, {
+              modelUsed,
+              reviewMeta,
+            });
             try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -1581,11 +1824,8 @@ runs:
             return;
           }
 
-          // verification_evidence is still needed below by the PR-body status
-          // block, independently of the verdict computation.
-          const verificationEvidence = Array.isArray(review.verification_evidence)
-            ? review.verification_evidence
-            : [];
+          // verification_evidence is consumed inside recompute (when present);
+          // no PR-body status-block write-back remains.
 
           const result = recompute(review, {
             confidenceThreshold,
@@ -1624,6 +1864,8 @@ runs:
             modelVerdict: review.verdict,
             blockers,
             commentBody,
+            modelUsed,
+            reviewMeta,
           });
 
           await github.rest.pulls.createReview({
@@ -1637,12 +1879,20 @@ runs:
           const winnerLabel = verdict === "pass" ? passLabel : failLabel;
           const loserLabel = verdict === "pass" ? failLabel : passLabel;
 
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: prNumber,
-            labels: [winnerLabel],
-          });
+          // Labels are cosmetic badges (ADR 0001); they must not swallow the
+          // gate outputs. The inconclusive path already treats addLabels as
+          // non-fatal; the happy path must too — a 403 (job token lacked
+          // issues: write) used to throw before core.setOutput("verdict").
+          try {
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: [winnerLabel],
+            });
+          } catch (e) {
+            core.warning(`Could not add label '${winnerLabel}': ${e.message}`);
+          }
 
           try {
             await github.rest.issues.removeLabel({
@@ -1655,50 +1905,20 @@ runs:
             if (err.status === 404 || err.status === 422) {
               core.info(`Label '${loserLabel}' not present; skipping.`);
             } else {
-              throw err;
+              core.warning(`Could not remove label '${loserLabel}': ${err.message}`);
             }
           }
 
-          // --- PR-body checklist verification (feature: update PR body) ------
-          // Reflect verified checklist items back into the PR description: tick
-          // boxes the model VERIFIED (with evidence) in place, and maintain a
-          // managed <!-- ai-review-status --> block with per-item status +
-          // evidence. Never unticks a human-checked box; never fails the job on
-          // error. Gated by the update-pr-body input. The PR body is re-fetched
-          // immediately before writing to minimize races with human edits.
-          if (
-            process.env.UPDATE_PR_BODY === "true" &&
-            Array.isArray(review.checklist) &&
-            review.checklist.length > 0
-          ) {
-            try {
-              const { data: prData } = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-              });
-              const originalBody = prData.body || "";
-
-              const { newBody: tickedBody, ticks } = tickVerifiedBoxes(originalBody, review.checklist);
-              const block = buildStatusBlock({ checklist: review.checklist, verificationEvidence, verdict });
-              const newBody = upsertStatusBlock(tickedBody, block);
-
-              if (newBody !== originalBody) {
-                await github.rest.pulls.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                  body: newBody,
-                });
-                core.info(
-                  `Updated PR body (ticked ${ticks} checkbox(es), refreshed status block).`
-                );
-              } else {
-                core.info("PR body already current; no change.");
-              }
-            } catch (err) {
-              core.warning(`Could not update PR body: ${err.message}`);
-            }
+          // --- PR-body checklist write-back (retired) ------------------------
+          // Spec §7.4: stop ticking verified boxes / status-block checklist
+          // write-back. update-pr-body remains accepted for compatibility but
+          // is a no-op — never tick or untick human boxes. Linked-issue
+          // updates are independent and unchanged.
+          if (process.env.UPDATE_PR_BODY === "true") {
+            core.info(
+              "update-pr-body: checklist tick / status-block write-back is retired; " +
+                "Test Plan gaps are findings vs CI (.ai-review/test-plan-items.json)."
+            );
           }
 
           core.setOutput("verdict", verdict);

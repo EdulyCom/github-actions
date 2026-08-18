@@ -10,8 +10,34 @@
 // `github`/`context` objects actions/github-script injects at runtime, and
 // this module intentionally has zero I/O.
 
+const { formatReviewMeta } = require("./delta.js");
+
 const STATUS_BLOCK_START = "<!-- ai-review-status -->";
 const STATUS_BLOCK_END = "<!-- /ai-review-status -->";
+
+/**
+ * Meta line immediately after `<!-- ai-review -->` (spec §6.1).
+ * @param {{ headSha?: string, baseSha?: string, mode?: string|null }|null|undefined} reviewMeta
+ * @returns {string[]}
+ */
+function metaLines(reviewMeta) {
+  if (!reviewMeta || !reviewMeta.headSha || !reviewMeta.baseSha) return [];
+  return [formatReviewMeta(reviewMeta)];
+}
+
+// Some structured-output paths deliver comment_markdown with literal
+// two-character "\n" sequences instead of real newlines (observed on
+// EdulyCom/github-actions#52 review 4949356509). GitHub then renders the
+// findings as one smashed line under the banner. Only rewrite when the
+// literal escapes dominate real newlines so a normal body that mentions
+// `\n` in prose/code is left alone.
+function unescapeLiteralNewlines(markdown) {
+  if (typeof markdown !== "string" || !markdown.includes("\\n")) return markdown;
+  const literal = (markdown.match(/\\n/g) || []).length;
+  const real = (markdown.match(/\n/g) || []).length;
+  if (literal === 0 || literal < real) return markdown;
+  return markdown.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
 
 // The review-stage prompt instructs the model not to prepend its own
 // verdict token / confidence-merge-risk line / HTML marker to
@@ -21,6 +47,7 @@ const STATUS_BLOCK_END = "<!-- /ai-review-status -->";
 // duplicate the banner above it.
 function stripLeadingBannerArtifacts(markdown) {
   if (!markdown) return markdown;
+  markdown = unescapeLiteralNewlines(markdown);
   const verdictTokenRe = /^\*\*(?:✅ PASS|❌ FAIL)\*\*\s*$/;
   const confidenceLineRe = /^Confidence:\s*\d+\s*·\s*Merge risk:\s*\S+\s*$/i;
   const htmlCommentRe = /^<!--.*-->\s*$/;
@@ -45,9 +72,17 @@ function stripLeadingBannerArtifacts(markdown) {
 /**
  * @param {{verdict: string, confidence: number, mergeRisk: string,
  *   counts: {p0:number,p1:number,p2:number,p3:number}, intentDeviated: boolean,
- *   modelVerdict: string|undefined, blockers: string[], commentBody: string}} args
+ *   modelVerdict: string|undefined, blockers: string[], commentBody: string,
+ *   modelUsed?: string|null,
+ *   reviewMeta?: { headSha: string, baseSha: string, mode: 'full'|'delta' }|null}} args
  *   `commentBody` must already be run through stripLeadingBannerArtifacts.
+ *   `reviewMeta` stamps the delta baseline (spec §6.1); Publish passes
+ *   current HEAD + PR merge-base + this run's full|delta mode.
  */
+function modelFooter(_modelUsed) {
+  return ["", "_Re-run this job if you need another review pass._"];
+}
+
 function buildReviewBody({
   verdict,
   confidence,
@@ -57,6 +92,8 @@ function buildReviewBody({
   modelVerdict,
   blockers,
   commentBody,
+  modelUsed,
+  reviewMeta,
 }) {
   const verdictLine = verdict === "pass" ? "**✅ PASS**" : "**❌ FAIL**";
   const rejectedBanner = intentDeviated ? "❌ **Rejected — wrong solution**\n\n" : "";
@@ -84,6 +121,7 @@ function buildReviewBody({
 
   return [
     "<!-- ai-review -->",
+    ...metaLines(reviewMeta),
     `${rejectedBanner}${verdictLine}`,
     ...(mismatchNote ? [mismatchNote] : []),
     ...(reasonNote ? [reasonNote] : []),
@@ -91,15 +129,29 @@ function buildReviewBody({
     "",
     `Confidence: ${confidence} · Merge risk: ${mergeRisk}`,
     `P0: ${counts.p0} · P1: ${counts.p1} · P2: ${counts.p2} · P3: ${counts.p3}`,
+    ...modelFooter(modelUsed),
     "",
     commentBody || "_No review content returned._",
   ].join("\n");
 }
 
-/** @param {string} salvaged possibly-empty text recovered from a missed structured output. */
-function buildInconclusiveBody(salvaged) {
+/**
+ * @param {string} salvaged possibly-empty text recovered from a missed structured output.
+ * @param {{modelUsed?: string|null,
+ *   reviewMeta?: { headSha: string, baseSha: string }|null}} [opts]
+ *   Inconclusive publishes omit mode or set mode=inconclusive so the next run
+ *   cannot treat the body as a delta baseline (spec §6.1).
+ */
+function buildInconclusiveBody(salvaged, opts = {}) {
+  const reviewMeta = opts && opts.reviewMeta;
+  const inconclusiveMeta =
+    reviewMeta && reviewMeta.headSha && reviewMeta.baseSha
+      ? { headSha: reviewMeta.headSha, baseSha: reviewMeta.baseSha, mode: "inconclusive" }
+      : null;
+  salvaged = unescapeLiteralNewlines(salvaged || "");
   return [
     "<!-- ai-review -->",
+    ...metaLines(inconclusiveMeta),
     "### ⚠️ AI Review — inconclusive (re-run required)",
     "",
     "The review model did not return a structured result after a",
@@ -125,6 +177,7 @@ function buildInconclusiveBody(salvaged) {
 /**
  * Ticks unchecked PR-body checkboxes whose text matches a VERIFIED checklist
  * item. Never unchecks a human-checked box (the regex only matches "[ ]").
+ * Kept for unit tests / compatibility; Publish no longer calls this (spec §7.4).
  * @param {string} originalBody
  * @param {{text: string, status: string, evidence?: string}[]} checklist
  * @returns {{newBody: string, ticks: number}}
@@ -205,6 +258,7 @@ function upsertStatusBlock(body, block) {
 }
 
 module.exports = {
+  unescapeLiteralNewlines,
   stripLeadingBannerArtifacts,
   buildReviewBody,
   buildInconclusiveBody,

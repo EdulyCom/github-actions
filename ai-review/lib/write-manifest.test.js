@@ -21,7 +21,7 @@ const {
 // filesystem, and its header called itself a "thin I/O wrapper" as the reason it
 // had no sibling test. `writeRoster` stretched that past the point where the
 // claim held: the size gate, the specifiers map, the byte fallback and the
-// best-effort catch are all decisions, not plumbing. The I/O is injected so they
+// fail-closed rethrow are all decisions, not plumbing. The I/O is injected so they
 // can be pinned without a temp directory or a chdir.
 //
 // `main` is the one exception, deliberately: it is real fs.readFileSync /
@@ -101,8 +101,8 @@ test("collectSpecifiers: binary is skipped by extension, not by hoping read thro
 //
 // The success path is exercised end to end in ai-review/action.yml against a
 // real repo (see the commit history); these pin the wiring around it — the I/O
-// is injected so the best-effort catch is reachable without a temp directory or
-// a chdir.
+// is injected so the fail-closed rethrow path is reachable without a temp
+// directory or a chdir.
 
 test("writeRoster: writes assignments.json and logs a summary on success", () => {
   const writes = [];
@@ -114,20 +114,25 @@ test("writeRoster: writes assignments.json and logs a summary on success", () =>
     has_logic_change: true,
     modifies_reviewer_guidance: false,
   };
+  const contexts = [];
   const roster = writeRoster(manifest, { "src/a.ts": 100, "src/b.ts": 200 }, {
     readText: () => "",
     writeJson: (p, obj) => writes.push([p, obj]),
+    writeContext: (m, r) => contexts.push([m, r]),
     log: (line) => logs.push(line),
   });
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], ".ai-review/assignments.json");
   assert.equal(writes[0][1].k, roster.k);
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0][1], roster);
   assert.ok(logs.some((l) => l.startsWith("roster: K=")));
+  assert.ok(logs.some((l) => l.includes("deterministic context.md")));
   assert.ok(logs.some((l) => l.startsWith("ai-review-roster {")));
-  assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
+  assert.ok(!logs.some((l) => l.includes("FAILED")));
 });
 
-test("writeRoster: a buildRoster throw is caught, logged, and never written", () => {
+test("writeRoster: a buildRoster throw is logged then rethrown (fail-closed)", () => {
   // Duplicate changed_files entries make buildRoster's own assertPartition
   // throw ("assigned twice") — a real failure mode, not a synthetic one, since
   // a caller could hand this a manifest with a duplicated path.
@@ -140,19 +145,22 @@ test("writeRoster: a buildRoster throw is caught, logged, and never written", ()
     has_logic_change: true,
     modifies_reviewer_guidance: false,
   };
-  const result = writeRoster(manifest, { "src/a.ts": 10 }, {
-    readText: () => "",
-    writeJson: (p, obj) => writes.push([p, obj]),
-    log: (line) => logs.push(line),
-  });
-  assert.equal(result, null);
+  assert.throws(
+    () =>
+      writeRoster(manifest, { "src/a.ts": 10 }, {
+        readText: () => "",
+        writeJson: (p, obj) => writes.push([p, obj]),
+        log: (line) => logs.push(line),
+      }),
+    /assigned twice/,
+  );
   assert.equal(writes.length, 0, "a failed build must never reach disk");
-  assert.ok(logs.some((l) => l.startsWith("roster: NOT EMITTED")));
-  assert.ok(logs.some((l) => l.startsWith("::warning::")));
+  assert.ok(logs.some((l) => l.startsWith("roster: FAILED")));
+  assert.ok(logs.some((l) => l.startsWith("::error::")));
   assert.ok(logs.some((l) => l.startsWith("ai-review-roster {") && l.includes('"status":"failed"')));
 });
 
-test("writeRoster: a multi-line error message doesn't split the NOT EMITTED log line", () => {
+test("writeRoster: a multi-line error message doesn't split the FAILED log line", () => {
   // The other two lines in this catch already went through one(); this one
   // didn't, so a multi-line error would break a scraper reading the log
   // line-by-line — the exact failure one()'s own comment describes.
@@ -166,24 +174,24 @@ test("writeRoster: a multi-line error message doesn't split the NOT EMITTED log 
     has_logic_change: true,
     modifies_reviewer_guidance: false,
   };
-  writeRoster(manifest, { "src/a.ts": 10 }, {
-    readText: () => "",
-    writeJson: () => {
-      throw new Error("line one\nline two\nline three");
-    },
-    log: (line) => logs.push(line),
-  });
-  const notEmitted = logs.find((l) => l.startsWith("roster: NOT EMITTED"));
-  assert.ok(notEmitted, "no NOT EMITTED line found");
-  assert.equal(notEmitted.trimEnd().includes("\n"), false, `split across lines: ${JSON.stringify(notEmitted)}`);
+  assert.throws(() =>
+    writeRoster(manifest, { "src/a.ts": 10 }, {
+      readText: () => "",
+      writeJson: () => {
+        throw new Error("line one\nline two\nline three");
+      },
+      log: (line) => logs.push(line),
+    }),
+  );
+  const failed = logs.find((l) => l.startsWith("roster: FAILED"));
+  assert.ok(failed, "no FAILED line found");
+  assert.equal(failed.trimEnd().includes("\n"), false, `split across lines: ${JSON.stringify(failed)}`);
 });
 
-test("writeRoster: a throw from writeJson (build succeeded, the write didn't) returns null too", () => {
+test("writeRoster: a throw from writeJson (build succeeded, the write didn't) fails closed", () => {
   // buildRoster can succeed and writeJson can still throw (disk full, bad path).
-  // The catch logs NOT EMITTED / a ::warning:: / status:"failed" telemetry in
-  // every case — the return value has to agree, or a caller reading it back
-  // would get a fully-built roster object for a run the log just called a
-  // failure.
+  // The catch logs FAILED / a ::error:: / status:"failed" telemetry, then
+  // rethrows — prep must not continue without assignments.json.
   const logs = [];
   const manifest = {
     changed_files: ["src/a.ts"],
@@ -192,15 +200,19 @@ test("writeRoster: a throw from writeJson (build succeeded, the write didn't) re
     has_logic_change: true,
     modifies_reviewer_guidance: false,
   };
-  const result = writeRoster(manifest, { "src/a.ts": 10 }, {
-    readText: () => "",
-    writeJson: () => {
-      throw new Error("ENOSPC");
-    },
-    log: (line) => logs.push(line),
-  });
-  assert.equal(result, null, "a write failure must not return a built roster");
-  assert.ok(logs.some((l) => l.startsWith("roster: NOT EMITTED") && l.includes("ENOSPC")));
+  assert.throws(
+    () =>
+      writeRoster(manifest, { "src/a.ts": 10 }, {
+        readText: () => "",
+        writeJson: () => {
+          throw new Error("ENOSPC");
+        },
+        log: (line) => logs.push(line),
+      }),
+    /ENOSPC/,
+  );
+  assert.ok(logs.some((l) => l.startsWith("roster: FAILED") && l.includes("ENOSPC")));
+  assert.ok(logs.some((l) => l.startsWith("::error::")));
 });
 
 // The comment above the `why` ternary exists because a real miscategorisation
@@ -271,16 +283,15 @@ test("writeRoster: a readText throw for one file degrades to a weaker cluster, n
     log: (line) => logs.push(line),
   });
   assert.notEqual(result, null);
-  assert.ok(!logs.some((l) => l.includes("NOT EMITTED")));
+  assert.ok(!logs.some((l) => l.includes("FAILED")));
 });
 
 // --- atomicWriteJson ----------------------------------------------------------
 //
-// writeRoster's catch reconciles four signals on a write failure — return
-// value, log line, ::warning::, telemetry — but a bare fs.writeFileSync could
-// still leave a truncated assignments.json on disk that the other four agree
-// doesn't exist. Real files on a real temp directory, not mocks: the property
-// under test is what actually lands on disk after a failure.
+// On a write failure writeRoster logs then rethrows (fail-closed). A bare
+// fs.writeFileSync could still leave a truncated assignments.json on disk
+// after prep already failed. Real files on a real temp directory, not mocks:
+// the property under test is what actually lands on disk after a failure.
 
 test("atomicWriteJson: writes the JSON, then removes the temp file", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-write-"));
@@ -356,6 +367,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
   const prevCwd = process.cwd();
   const prevBase = process.env.BASE_SHA;
   const prevHead = process.env.HEAD_SHA;
+  const prevMode = process.env.REVIEW_MODE;
+  const prevDelta = process.env.DELTA_BASE_SHA;
+  const prevPrior = process.env.PRIOR_HEAD_SHA;
   // Spies on the real fs.renameSync so this test proves the DEFAULT wiring --
   // main() -> writeRoster()/manifest write -> atomicWriteJson -> fs.renameSync
   // -- actually runs in production, not just that atomicWriteJson behaves
@@ -384,6 +398,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     fs.writeFileSync("src/a.ts", "export function widget() {\n  return 1;\n}\n");
     process.env.BASE_SHA = "base000";
     process.env.HEAD_SHA = "head111";
+    process.env.REVIEW_MODE = "delta";
+    process.env.DELTA_BASE_SHA = "prior222";
+    process.env.PRIOR_HEAD_SHA = "prior222";
 
     main();
 
@@ -392,6 +409,9 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     assert.deepEqual(manifest.changed_files, ["src/a.ts"]);
     assert.equal(manifest.base_sha, "base000");
     assert.equal(manifest.head_sha, "head111");
+    assert.equal(manifest.review_mode, "delta");
+    assert.equal(manifest.delta_base_sha, "prior222");
+    assert.equal(manifest.prior_head_sha, "prior222");
 
     const roster = JSON.parse(fs.readFileSync(".ai-review/assignments.json", "utf8"));
     assert.equal(roster.schema, 1);
@@ -404,6 +424,8 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
       [path.join(".ai-review", "assignments.json"), path.join(".ai-review", "manifest.json")].sort(),
       "manifest.json and/or assignments.json did not go through the atomic write path",
     );
+    assert.ok(fs.existsSync("context.md"), "main() must write deterministic context.md");
+    assert.match(fs.readFileSync("context.md", "utf8"), /deterministic prep/);
     assert.deepEqual(
       fs.readdirSync(".ai-review").filter((f) => f.includes(".tmp-")),
       [],
@@ -416,6 +438,12 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
     else process.env.BASE_SHA = prevBase;
     if (prevHead === undefined) delete process.env.HEAD_SHA;
     else process.env.HEAD_SHA = prevHead;
+    if (prevMode === undefined) delete process.env.REVIEW_MODE;
+    else process.env.REVIEW_MODE = prevMode;
+    if (prevDelta === undefined) delete process.env.DELTA_BASE_SHA;
+    else process.env.DELTA_BASE_SHA = prevDelta;
+    if (prevPrior === undefined) delete process.env.PRIOR_HEAD_SHA;
+    else process.env.PRIOR_HEAD_SHA = prevPrior;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

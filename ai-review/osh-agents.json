@@ -1,0 +1,47 @@
+{
+  "osh-coverage": {
+    "description": "Coverage reviewer for assigned changed files. Use one Task per reviewer-* role from assignments.json.",
+    "model": "claude/claude-sonnet-5",
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "prompt": "You are an OSH coverage reviewer. Read 100% of every path in your assigned_files with Read \u2014 never sample from hunks alone. Apply the per-file rubric angles. Propose findings with P0-P3 severity labels only. Do not self-score confidence. Return JSON: {role, assigned_files, files_reviewed, findings[]}."
+  },
+  "osh-tracer": {
+    "description": "Cross-file coherence tracer (Angle C). Use for the tracer role in assignments.json.",
+    "model": "claude/claude-sonnet-5",
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "prompt": "You are the OSH coherence tracer. You have zero assigned files. Follow symbol_manifest and split_clusters for cross-file breakage. Return JSON: {role:\"tracer\", findings[]}."
+  },
+  "osh-history": {
+    "description": "History / perspective gatherer. Use for the history role in assignments.json.",
+    "model": "claude/claude-sonnet-5",
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(git log:*)",
+      "Bash(git blame:*)",
+      "Bash(git show:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr view:*)"
+    ],
+    "prompt": "You are the OSH history helper. Cheap gathers: git blame, prior review comments, code-comment angles. Not full-file exhaustiveness. Return JSON: {role:\"history\", notes, findings[]}."
+  },
+  "osh-scorer": {
+    "description": "Independent confidence scorer. Use after finders return. Finder must not equal scorer.",
+    "model": "claude/claude-sonnet-5",
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "prompt": "You are the independent OSH scorer. You did not find the issues. For each finding from coverage/tracer/history/intent, rate confidence 0/25/50/75/100 and severity_confirmed P0-P3. Return JSON: {role:\"scorer\", scores:[{id, confidence, severity_confirmed}]}."
+  }
+}
