@@ -222,8 +222,6 @@ injection-safety rule.
 | `sonnet-churn-threshold` | **DEPRECATED** — accepted but ignored for model routing. Same as above. | No | `800` |
 | `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
-| `test-command` | **DEPRECATED — accepted but ignored.** The Review stage no longer runs tests; see [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests). | No | — |
-| `test-hint` | **DEPRECATED — accepted but ignored.** Same reason as `test-command`. | No | — |
 | `update-pr-body` | Accepted for compatibility. Checklist tick / status-block write-back is **retired**; the input is a no-op. Test Plan gaps are findings vs CI instead. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
 | `force-full-review` | When `true`, always review merge-base…HEAD instead of a delta since the last published ai-review. | No | `false` |
@@ -280,10 +278,10 @@ Publish still gates on that session's structured output. Multi-role
 
 ## Why the review no longer runs tests
 
-The Review stage used to be told to run the project's test suite. It no longer is, and
-`test-command` / `test-hint` are accepted but ignored.
+The Review stage used to be told to run the project's test suite. It no longer is;
+the old `test-command` / `test-hint` inputs were removed (not accepted, not ignored).
 
-**It never actually ran.** No consumer ever set `test-command`, no caller installs a
+**It never actually ran.** No consumer ever set those inputs, no caller installs a
 toolchain before the action, and this action ships none of its own
 ([ADR 0003](../docs/adr/0003-intent-alignment-test-execution-and-writeback.md) §2). Every
 sampled run reported `test_execution: skipped` after probing and failing —
@@ -296,7 +294,7 @@ sampled run reported `test_execution: skipped` after probing and failing —
 commit**. Allowlisting `npm`/`npx`/`yarn`/`pnpm`/`node`/`make`/`pytest` so it *could*
 run tests meant PR-authored scripts — a modified `package.json` `test` script, say —
 had a permitted path to execute on the runner, which for self-hosted fleets is
-persistent shared infrastructure. Those entries are now removed from `--allowedTools`,
+persistent shared infrastructure. Those entries are gone from `--allowedTools`,
 so this is enforced structurally rather than by prompt instruction.
 
 **Tests still gate your merges.** They run in your own CI lanes, downstream of this

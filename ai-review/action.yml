@@ -172,24 +172,6 @@ inputs:
       Optional override for the Anthropic API base URL (e.g. a caller's custom
       gateway). When omitted, the standard Anthropic endpoint is used.
     required: false
-  test-command:
-    description: >
-      DEPRECATED — accepted but ignored; the Review stage no longer runs
-      tests. It never successfully did: no consumer ever set this input, no
-      caller installs a toolchain before the action, and every sampled run
-      reported `test_execution: skipped`. Meanwhile the allowlist needed to
-      support it granted the review session shell access to npm/npx/yarn/
-      pnpm/node/make/pytest while checked out at the PR head commit — a
-      code-execution path from PR content onto the runner, for a capability
-      that never worked. Tests run in the caller's own CI lanes downstream
-      of this gate. Still accepted so existing callers do not break; will be
-      deleted in a future release. See ai-review/README.md.
-    required: false
-  test-hint:
-    description: >
-      DEPRECATED — accepted but ignored, for the same reason as
-      `test-command`. See that input's description.
-    required: false
   update-pr-body:
     description: >
       Accepted for compatibility. Checklist tick / status-block write-back
