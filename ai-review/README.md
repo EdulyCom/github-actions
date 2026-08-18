@@ -323,7 +323,7 @@ concurrency:
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 55
     permissions:
       contents: read
       pull-requests: write

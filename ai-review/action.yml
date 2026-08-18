@@ -749,13 +749,13 @@ runs:
           AI_REVIEW_DIR=".ai-review" \
           node "${TESTPLAN_CLI}" || {
             echo "::warning::testplan-ci failed; writing empty Test Plan/CI artifacts so the review can still map coverage"
-            echo '[]' > .ai-review/test-plan-items.json
-            echo '[]' > .ai-review/ci-checks.json
+            echo '{"schema":1,"items":[]}' > .ai-review/test-plan-items.json
+            echo '{"schema":1,"checks":[]}' > .ai-review/ci-checks.json
           }
         if [ ! -f .ai-review/test-plan-items.json ] || [ ! -f .ai-review/ci-checks.json ]; then
           echo "::warning::Test Plan/CI artifacts missing after inventory; writing empty stubs"
-          echo '[]' > .ai-review/test-plan-items.json
-          echo '[]' > .ai-review/ci-checks.json
+          echo '{"schema":1,"items":[]}' > .ai-review/test-plan-items.json
+          echo '{"schema":1,"checks":[]}' > .ai-review/ci-checks.json
         fi
 
         if [ -n "${CHECK_RUNS}" ] && [ "${CHECK_RUNS}" != "[]" ] && [ "${CHECK_RUNS}" != "null" ]; then
@@ -1865,12 +1865,20 @@ runs:
           const winnerLabel = verdict === "pass" ? passLabel : failLabel;
           const loserLabel = verdict === "pass" ? failLabel : passLabel;
 
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: prNumber,
-            labels: [winnerLabel],
-          });
+          // Labels are cosmetic badges (ADR 0001); they must not swallow the
+          // gate outputs. The inconclusive path already treats addLabels as
+          // non-fatal; the happy path must too — a 403 (job token lacked
+          // issues: write) used to throw before core.setOutput("verdict").
+          try {
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: [winnerLabel],
+            });
+          } catch (e) {
+            core.warning(`Could not add label '${winnerLabel}': ${e.message}`);
+          }
 
           try {
             await github.rest.issues.removeLabel({
@@ -1883,7 +1891,7 @@ runs:
             if (err.status === 404 || err.status === 422) {
               core.info(`Label '${loserLabel}' not present; skipping.`);
             } else {
-              throw err;
+              core.warning(`Could not remove label '${loserLabel}': ${err.message}`);
             }
           }
 

@@ -108,12 +108,24 @@ function extractPlainListItems(text) {
 }
 
 /**
+ * Prefer a completed check-run row when the Checks API returns the same
+ * name twice (in_progress then completed is common on first PR events).
+ * @param {string} status
+ * @returns {number}
+ */
+function checkRowRank(status) {
+  if (status === "completed") return 2;
+  if (status === "in_progress") return 1;
+  return 0;
+}
+
+/**
  * @param {unknown} checkRuns GitHub Checks API `.check_runs` array
  * @returns {{ name: string, conclusion: string|null, status: string }[]}
  */
 function summarizeCiChecks(checkRuns) {
   if (!Array.isArray(checkRuns)) return [];
-  const out = [];
+  const byName = new Map();
   for (const r of checkRuns) {
     if (!r || typeof r !== "object") continue;
     const name = typeof r.name === "string" ? r.name.trim() : "";
@@ -123,9 +135,13 @@ function summarizeCiChecks(checkRuns) {
       r.conclusion == null || r.conclusion === ""
         ? null
         : String(r.conclusion);
-    out.push({ name, conclusion, status });
+    const next = { name, conclusion, status };
+    const prev = byName.get(name);
+    if (!prev || checkRowRank(status) >= checkRowRank(prev.status)) {
+      byName.set(name, next);
+    }
   }
-  return out;
+  return [...byName.values()];
 }
 
 /**

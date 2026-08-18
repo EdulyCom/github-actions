@@ -83,9 +83,9 @@ churn). Full file contents are always read — never diff hunks alone.
 - **Gate contract unchanged.** `ai-review` still exposes the same four outputs
   and `ai-qa` is still informational-only. Verdicts are still recomputed
   deterministically, never taken from the model's self-report.
-- **New permission:** `ai-review` callers add `issues: read` (to resolve linked
-  issues); `ai-qa` already required `issues: write`, which now also covers the
-  linked-issue comments/state changes.
+- **New permission:** `ai-review` callers need `issues: write` (labels use
+  the Issues API; linked-issue resolution only needs read). `ai-qa` already
+  required `issues: write`, which also covers linked-issue comments/state.
 - **Trigger caveat:** because `ai-review` edits the PR body, callers must keep
   the default `pull_request` event types — adding `edited` would loop the
   review on its own body edits.

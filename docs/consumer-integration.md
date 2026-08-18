@@ -51,8 +51,8 @@ lives inside your own CI's job graph and shares its concurrency group:
 
 permissions:
   contents: read
-  pull-requests: write   # post the native PR review + labels
-  issues: read           # resolve + read the issues this PR closes
+  pull-requests: write   # post the native PR review
+  issues: write          # labels (Issues API) + read issues this PR closes
 
 concurrency:
   group: ci-pr-${{ github.event.pull_request.number || github.ref }}
@@ -63,11 +63,9 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     # Wall-clock backstop. Composite-action steps can't set timeout-minutes,
     # so this job-level cap is the only bound on a hung Anthropic gateway /
-    # plugin-marketplace load. Give it headroom for a roster-K review (Sonnet
-    # collapse or Opus fan-out) that reads full files, but keep it tight enough
-    # to fail fast on a stall (the Haiku context stage is best-effort and won't
-    # sink the review on its own).
-    timeout-minutes: 25
+    # plugin-marketplace load. Fan-out (Opus + Sonnet Tasks) regularly exceeds
+    # 25m; 30m cancelled mid-review before Publish. 55m covers review + repair.
+    timeout-minutes: 55
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:
@@ -107,8 +105,12 @@ jobs:
 ```
 
 This version of `ai-review` also **reads the issues your PR closes** (to
-judge intent against their acceptance criteria — hence `issues: read`). It
-maps the PR **Test Plan** / checklists to CI coverage and turns gaps into
+judge intent against their acceptance criteria). Labels go through the
+Issues API (`issues.addLabels`), so the job needs `issues: write` — the
+same scope `ai-review/README.md` and this repo's selftest use. Omitting
+App credentials authors the review as `github-actions[bot]` and still
+uses this job's `GITHUB_TOKEN`, so `issues: write` is required either way.
+It maps the PR **Test Plan** / checklists to CI coverage and turns gaps into
 normal findings; it does **not** tick checklist boxes or write an
 `<!-- ai-review-status -->` block (`update-pr-body` is accepted but a no-op
 for that path — see ADR 0006). On re-runs it prefers a **delta** range since
@@ -139,11 +141,11 @@ under the App identity. The action no-ops on the `workflow_dispatch` path (no
     name: 🤖 AI Review
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 25   # wall-clock backstop (see the note in §2a)
+    timeout-minutes: 55   # wall-clock backstop (see the note in §2a)
     permissions:
       contents: read
       pull-requests: write
-      issues: read
+      issues: write
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
     steps:

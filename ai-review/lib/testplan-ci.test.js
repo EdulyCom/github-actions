@@ -146,6 +146,21 @@ test("summarizeCiChecks: non-array → []", () => {
   assert.deepEqual(summarizeCiChecks({}), []);
 });
 
+test("summarizeCiChecks: duplicate names keep the terminal row", () => {
+  assert.deepEqual(
+    summarizeCiChecks([
+      { name: "lint", conclusion: null, status: "in_progress" },
+      { name: "test", conclusion: null, status: "queued" },
+      { name: "lint", conclusion: "success", status: "completed" },
+      { name: "test", conclusion: "failure", status: "completed" },
+    ]),
+    [
+      { name: "lint", conclusion: "success", status: "completed" },
+      { name: "test", conclusion: "failure", status: "completed" },
+    ],
+  );
+});
+
 // --- findObviousUncoveredItems ---------------------------------------------
 
 test("findObviousUncoveredItems: keyword overlap vs obvious miss", () => {
