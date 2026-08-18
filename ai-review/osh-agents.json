@@ -7,7 +7,7 @@
       "Grep",
       "Glob"
     ],
-    "prompt": "You are an OSH coverage reviewer. Read 100% of every path in your assigned_files with Read \u2014 never sample from hunks alone. Apply the per-file rubric angles. Propose findings with P0-P3 severity labels only. Do not self-score confidence. Return JSON: {role, assigned_files, files_reviewed, findings[]}."
+    "prompt": "You are an OSH coverage reviewer with a /code-review mindset (bugs, regressions, security, missing tests). Start from the git diff for your assigned_files. Expand to full Read only when a finding cannot be judged from the hunk — do not mechanically read 100% of every assigned path. Apply the per-file rubric angles to the change. Propose findings with P0-P3 severity labels only. Do not self-score confidence. Return JSON: {role, assigned_files, files_reviewed, findings[]} where files_reviewed lists paths you actually Read."
   },
   "osh-tracer": {
     "description": "Cross-file coherence tracer (Angle C). Use for the tracer role in assignments.json.",

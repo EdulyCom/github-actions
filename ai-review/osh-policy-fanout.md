@@ -27,8 +27,10 @@ the following in **one parallel wave** (do not serialize coverage then tracer
 then helpers — wall-clock is max(worker), not sum):
 
 1. **`osh-coverage`** — one Task per `reviewer-*` (`kind: coverage`): pass
-   that role's `assigned_files` in the Task prompt; read 100% of every path
-   with `Read`; propose findings with P0–P3 severity (finder labels only).
+   that role's `assigned_files` in the Task prompt; start from the diff for
+   those paths; expand to full `Read` when a /code-review finding cannot be
+   judged from the hunk — do not mechanically read 100% of every assigned
+   path; propose findings with P0–P3 severity (finder labels only).
 2. **`osh-tracer`** — `tracer` (`kind: coherence`): follow `symbol_manifest`
    / `split_clusters` for cross-file breakage (Angle C).
 3. **`osh-history`** — `history` (`kind: perspective`): git blame / prior
@@ -45,10 +47,10 @@ then helpers — wall-clock is max(worker), not sum):
 ## What you must not re-read
 
 Do **not** exhaustively re-read every file workers already covered unless
-conflict resolution or a spot-check needs it. Must-read-all for the active
-range is satisfied when coverage workers' `assigned_files` union equals
-`changed_files` (plus targeted neighbor reads when prior findings or imports
-require it).
+conflict resolution or a spot-check needs it. Coverage of the *change* is
+satisfied when workers have reviewed the active diff for their
+`assigned_files` (hunks first, full-file reads when the skill/rubric require
+them), plus targeted neighbor reads when prior findings or imports require it.
 
 ## Worker failures (fail closed, do not burn turns)
 

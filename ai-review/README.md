@@ -143,10 +143,10 @@ injection-safety rule.
    post-merge job).
 9. **Context handoff** — prep always writes a deterministic `context.md`
    (changed files, symbols, roster). An optional **Haiku Context stage**
-   may enrich it with callers/callees. Haiku is **auto-skipped** on
-   `delta` + roster `K≤1` (and whenever `enable-context-stage: 'false'`).
-   The stage is **best-effort** (`continue-on-error`); Review reads
-   `context.md` only "if present" and still must-reads every changed file.
+   may enrich it with callers/callees. Haiku is **auto-skipped** whenever
+   OSH routes to collapse (`K≤1` or churn ≤ 1500), and whenever
+   `enable-context-stage: 'false'`. The stage is **best-effort**
+   (`continue-on-error`); Review reads `context.md` only "if present".
    (Composite-action steps cannot set `timeout-minutes`; the caller job's
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
 10. **CI inventory + signal** — on every PR event (not only
@@ -162,15 +162,14 @@ injection-safety rule.
     signals, the review markdown body, optional `verification_evidence`, and
     a `test_execution` outcome). Uncovered Test Plan items vs CI become
     normal findings; the `checklist` field is left empty (Publish no longer
-    ticks boxes). It
-    reads **complete file contents** (never just diff hunks) and evaluates
-    the diff against the linked issues' acceptance criteria. It does **not**
+    ticks boxes). It uses a **/code-review** mindset (bugs, regressions,
+    security, missing tests): start from `git diff`, expand to full-file
+    `Read` only when a finding cannot be judged from the hunk. It does **not**
     run the project's tests — see
     [Why the review no longer runs tests](#why-the-review-no-longer-runs-tests);
     test *quality* is still assessed statically and still blocks the gate.
-    It loads the live
-    `/requesting-code-review` and `/verification-before-completion` skills
-    from the superpowers plugin: no `pass`/verified claim is accepted
+    It loads `/verification-before-completion` from the superpowers plugin
+    when available: no `pass`/verified claim is accepted
     without cited command output ("evidence before claims"). `claude-code-action`
     intermittently ends a successful session without emitting the structured
     output and exits 1. Three fallbacks recover this, cheapest first: a
@@ -219,7 +218,7 @@ injection-safety rule.
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
 | `sonnet-files-threshold` | **DEPRECATED** — accepted but ignored for model routing. Roster K selects Sonnet collapse vs Opus fan-out. | No | `25` |
 | `sonnet-churn-threshold` | **DEPRECATED** — accepted but ignored for model routing. Same as above. | No | `800` |
-| `enable-context-stage` | When `false`, never runs the Haiku Context stage. When `true` (default), Haiku may enrich `context.md`, but is still auto-skipped on delta + K≤1. Prep always writes a deterministic `context.md` first. Gate contract unchanged. | No | `true` |
+| `enable-context-stage` | When `false`, never runs the Haiku Context stage. When `true` (default), Haiku may enrich `context.md`, but is still auto-skipped on collapse routes (`K≤1` or churn ≤ 1500). Prep always writes a deterministic `context.md` first. Gate contract unchanged. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `update-pr-body` | Accepted for compatibility. Checklist tick / status-block write-back is **retired**; the input is a no-op. Test Plan gaps are findings vs CI instead. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |
@@ -232,9 +231,14 @@ On re-runs, prep looks for the latest published review body with
 `<!-- ai-review-meta head_sha=… base_sha=… mode=full|delta -->` line.
 When that prior `head_sha` is an ancestor of the current HEAD and the
 merge-base matches, the active range is **delta** (`prior_head…HEAD`) —
-smaller numstat / must-read set, with `.ai-review/prior-review.md` for
+smaller numstat / review scope, with `.ai-review/prior-review.md` for
 finding carry-forward. Full mode is used on first run, missing/inconclusive
 meta, force-push (non-ancestor), base SHA change, or `force-full-review: true`.
+
+**OSH routing:** roster `K` still packs from full-file bytes, but topology
+collapses to a single Sonnet session when `K≤1` **or** churn ≤ 1500 (so
+touching a large CSS file for a tiny tweak does not trigger Opus fan-out).
+Fan-out only when `K>1` **and** churn is above that ceiling.
 
 Coverage: `ai-review/lib/write-delta.test.js` exercises the ancestor check
 against a real git history (delta only includes the follow-up commit’s files;

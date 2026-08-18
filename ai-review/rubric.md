@@ -96,8 +96,9 @@ risk, not by exhaustiveness: prioritize call sites on security/auth paths, data
 mutation, and public API surface. A Grep match is enough to clear a call site whose
 usage is unambiguous from the match itself (e.g. a simple pass-through); spend a full
 `Read` only where the call site's correctness genuinely can't be judged from the match.
-This angle's bound is the only exception to "no sampling" — every changed file itself
-is still always read in full.
+Prefer hunks + targeted Grep over opening every changed file end-to-end; expand to a
+full `Read` when the diff alone cannot support a judgment (large renames, tangled
+control flow, security-sensitive paths).
 
 **D — Reuse**
 Flag new code that re-implements something the codebase already has. Grep adjacent files

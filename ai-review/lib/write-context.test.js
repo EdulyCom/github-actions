@@ -44,7 +44,7 @@ test("formatDeterministicContext: lists files, symbols, delta range, and roster"
   assert.match(md, /\*\*alpha\*\*/);
   assert.match(md, /roster K=1/);
   assert.match(md, /\*\*reviewer-1\*\*/);
-  assert.match(md, /Delta mode: must-read/);
+  assert.match(md, /Delta mode: review the active/);
 });
 
 test("writeDeterministicContext: writes context.md via injectable fs", () => {

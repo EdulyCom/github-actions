@@ -39,7 +39,9 @@ function formatDeterministicContext(manifest, roster) {
   lines.push("");
   lines.push(
     "Generated without a model call from `.ai-review/manifest.json` (and roster when present). " +
-      "Factual inventory only — not a review. The Review stage must still read every changed file in full.",
+      "Factual inventory only — not a review. The Review stage uses a /code-review " +
+      "mindset: start from the git diff and expand to full-file reads only when a " +
+      "finding cannot be judged from the hunk — not every changed file end-to-end.",
   );
   lines.push("");
   lines.push("## Range");
@@ -108,8 +110,8 @@ function formatDeterministicContext(manifest, roster) {
   );
   if (mode === "delta") {
     lines.push(
-      "- Delta mode: must-read every file in the active prior_head…HEAD range; " +
-        "pull neighbor files outside the delta when prior findings or imports require it.",
+      "- Delta mode: review the active prior_head…HEAD diff; expand to full " +
+        "file or neighbor reads when prior findings or imports require it.",
     );
   }
   lines.push("");

@@ -115,9 +115,9 @@ inputs:
       When 'true' (default) the Haiku context stage may run and enrich
       `context.md` for the review stage. Prep always writes a deterministic
       `context.md` first. Even when this input is 'true', Haiku is auto-skipped
-      on delta reviews with roster K≤1 (small incremental scope) to cut
-      wall-clock without changing the must-read gate. Set to 'false' to never
-      run Haiku Context.
+      whenever OSH routes to collapse (K≤1 or churn ≤ 1500) — a second model
+      hop adds little once skill-led reads start from the diff. Set to 'false'
+      to never run Haiku Context.
 
       Escape hatch, added after a measured stall: on run 31317613715 this
       stage sat silent for 27m27s between "Claude Code initialized" and its
@@ -483,35 +483,55 @@ runs:
 
         FILES="$(jq -r '.file_count' .ai-review/manifest.json)"
         CHURN="$(jq -r '.churn' .ai-review/manifest.json)"
-        # Roster K drives OSH topology (spec §5.2 / Appendix A). Not file/churn
-        # thresholds — those inputs are deprecated for model selection.
+        # Roster K sizes coverage packing (full-file bytes). Topology also
+        # respects churn: small diffs collapse to Sonnet even when K>1 because
+        # a large file body was touched (lib/osh-route.js). Fan-out only when
+        # K>1 AND churn is above the ceiling.
         K="$(jq -r '.k // 0' .ai-review/assignments.json)"
         K="${K:-0}"
+        CHURN="${CHURN:-0}"
 
-        # K≤1 (including empty-diff k:0): single Sonnet session emits
-        # --json-schema directly — no Opus parent, no independent scorer.
-        # K>1: Opus parent + Sonnet Task --agents; only Opus emits SO.
-        if [ "${K}" -le 1 ]; then
-          MODEL="${SONNET}"
-          FALLBACK="${SONNET_FALLBACK}"
-          OSH_MODE="collapse"
-        else
+        ROUTE_OUT="$(
+          K="${K}" CHURN="${CHURN}" ACTION_PATH="${ACTION_PATH}" node -e '
+            const { resolveOshRoute } = require(process.env.ACTION_PATH + "/lib/osh-route.js");
+            const r = resolveOshRoute({
+              k: process.env.K,
+              churn: process.env.CHURN,
+            });
+            process.stdout.write(
+              [
+                "osh-mode=" + r.oshMode,
+                "osh-reason=" + r.reason,
+                "run-context=" + (r.runContextStage ? "true" : "false"),
+                "collapse-churn-max=" + r.collapseChurnMax,
+              ].join("\n") + "\n"
+            );
+          '
+        )"
+        OSH_MODE="$(printf '%s\n' "${ROUTE_OUT}" | sed -n 's/^osh-mode=//p' | tail -n1)"
+        OSH_REASON="$(printf '%s\n' "${ROUTE_OUT}" | sed -n 's/^osh-reason=//p' | tail -n1)"
+        RUN_CONTEXT_FROM_ROUTE="$(printf '%s\n' "${ROUTE_OUT}" | sed -n 's/^run-context=//p' | tail -n1)"
+        OSH_MODE="${OSH_MODE:-collapse}"
+
+        if [ "${OSH_MODE}" = "fanout" ]; then
           MODEL="${OPUS}"
           FALLBACK="${OPUS_FALLBACK}"
-          OSH_MODE="fanout"
+        else
+          MODEL="${SONNET}"
+          FALLBACK="${SONNET_FALLBACK}"
         fi
-        echo "prep: osh-mode=${OSH_MODE} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
+        echo "prep: osh-mode=${OSH_MODE} reason=${OSH_REASON} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
 
-        # Haiku Context stage: optional enrichment. Prep already wrote a
-        # deterministic context.md. Auto-skip when delta + K≤1 — scope is small
-        # enough that a second model hop is pure wall-clock; Review still
-        # must-reads the active range. Large/full reviews keep Haiku.
+        # Haiku Context: optional enrichment. Prep already wrote deterministic
+        # context.md. Skip whenever routing collapses (K≤1 or small churn) —
+        # second model hop is wall-clock with little quality gain. Fan-out
+        # (large churn) keeps Haiku unless the input disables it.
         RUN_CONTEXT_STAGE=false
         if [ "${ENABLE_CONTEXT_STAGE:-true}" = "true" ]; then
-          if [ "${REVIEW_MODE}" = "delta" ] && [ "${K}" -le 1 ]; then
-            echo "prep: skipping Haiku context (delta + K<=1); using deterministic context.md"
-          else
+          if [ "${RUN_CONTEXT_FROM_ROUTE}" = "true" ]; then
             RUN_CONTEXT_STAGE=true
+          else
+            echo "prep: skipping Haiku context (collapse route reason=${OSH_REASON}); using deterministic context.md"
           fi
         else
           echo "prep: skipping Haiku context (enable-context-stage=false); using deterministic context.md"
@@ -861,14 +881,19 @@ runs:
           --agents '${{ steps.route.outputs.osh-agents }}'
           --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","confidence","merge_risk","intent","counts","review_event","comment_markdown"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"confidence":{"type":"integer","minimum":0,"maximum":100},"merge_risk":{"type":"string","enum":["low","med","high"]},"intent":{"type":"string","enum":["aligned","partial","deviated","skipped"]},"counts":{"type":"object","additionalProperties":false,"required":["p0","p1","p2","p3"],"properties":{"p0":{"type":"integer","minimum":0},"p1":{"type":"integer","minimum":0},"p2":{"type":"integer","minimum":0},"p3":{"type":"integer","minimum":0}}},"review_event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES"]},"comment_markdown":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","file","line","severity","summary","failure_scenario","reason","evidence","confidence"],"properties":{"id":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer","minimum":0},"severity":{"type":"string","enum":["P0","P1","P2","P3"]},"summary":{"type":"string"},"failure_scenario":{"type":"string"},"reason":{"type":"string"},"evidence":{"type":"string"},"confidence":{"type":"integer","enum":[0,25,50,75,100]},"severity_confirmed":{"type":"string","enum":["P0","P1","P2","P3"]}}}},"files_reviewed":{"type":"array","items":{"type":"string"}},"tests_failing":{"type":"boolean"},"coverage_below_threshold_on_critical_paths":{"type":"boolean"},"no_tests_for_changed_logic":{"type":"boolean"},"test_execution":{"type":"string","enum":["passed","failed","skipped","not_run"]},"verification_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["claim","command","result"],"properties":{"claim":{"type":"string"},"command":{"type":"string"},"result":{"type":"string"}}}},"checklist":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["text","status"],"properties":{"text":{"type":"string"},"status":{"type":"string","enum":["verified","failed","unverifiable"]},"evidence":{"type":"string"}}}}}}'
         prompt: |
-          You are performing an automated code review. Attempt to load the
-          live `/requesting-code-review` and `/verification-before-completion`
-          skills if the superpowers plugin installed successfully; if either
-          is unavailable, proceed without it — do not fail or block on a
-          missing plugin. Apply `/verification-before-completion` throughout:
-          treat NO pass/verified claim as valid without fresh evidence — the
-          command you ran and its actual output/exit code. If you assert a
-          check passed, you must have run it and read the result this session.
+          You are performing an automated PR review with a **/code-review**
+          mindset: prioritize bugs, behavioral regressions, security issues,
+          and missing tests. Findings are the primary deliverable, ordered by
+          severity (P0–P3). Do **not** make code changes. Do **not** dispatch
+          another reviewer / subagent for a second opinion — this session is
+          the review.
+
+          Attempt to load `/verification-before-completion` if the superpowers
+          plugin installed successfully; if unavailable, proceed without it —
+          do not fail or block on a missing plugin. Apply it throughout: treat
+          NO pass/verified claim as valid without fresh evidence — the command
+          you ran and its actual output/exit code. If you assert a check
+          passed, you must have run it and read the result this session.
 
           Read `.ai-review/osh-policy.md` FIRST and obey it. Prep set
           `OSH_MODE` (`collapse` or `fanout`) to match that file:
@@ -906,7 +931,8 @@ runs:
           Read `context.md` at the repository root when present (deterministic
           prep inventory and/or Haiku Context enrichment) for a summary of what
           changed and its callers/callees/related helpers. Treat it as a hint
-          only — still read every changed file in full.
+          only — expand into full-file reads when the diff alone cannot support
+          a /code-review judgment (security/auth, tangled control flow, callers).
 
           Read `.ai-review/manifest.json` FIRST (after osh-policy). A prior
           deterministic step already resolved the review range and staged the
@@ -934,16 +960,16 @@ runs:
           finding or an import requires it — that is targeted expansion,
           not a second full-PR read.
 
-          Must-read-all for the active range: under **collapse**, YOU read
-          the COMPLETE contents of every file in `changed_files` with `Read`
-          — never sample, truncate, or reason from the diff hunks alone.
-          Under **fanout**, coverage subagents satisfy that contract for
-          their `assigned_files`; you do not re-read every file unless
-          osh-policy conflict resolution needs a spot check. For
-          callers/callees outside the diff (Angle C), start from
-          `symbol_manifest` and follow the rubric's risk-based bound (or the
-          tracer role under fanout) — that angle has no natural stopping
-          point and is the one place exhaustiveness is not the goal.
+          **How to read code (/code-review, not must-read-all):** Start from
+          `git diff` for the active range. Expand to a full `Read` only when
+          a bug/regression/security/test gap cannot be judged from the hunk
+          (plus Grep for callers when Angle C needs it). Do **not**
+          mechanically open every byte of every `changed_files` entry — large
+          stylesheets/configs with tiny diffs are the common trap. Under
+          **fanout**, coverage workers follow the same rule for their
+          `assigned_files`. For callers/callees outside the diff (Angle C),
+          start from `symbol_manifest` and follow the rubric's risk-based
+          bound (or the tracer role under fanout).
 
           Perform the full 8-angle scan from the rubric against the diff
           (directly under collapse; via roster roles under fanout).
@@ -995,13 +1021,10 @@ runs:
           **fanout**, copy each finding's `confidence` and `severity_confirmed`
           from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
           scorer ran; worker severity labels may still seed the finding.
-          `files_reviewed` lists every file
-          read in full for the active range (yours under collapse; union of
-          coverage workers under fanout) — it is cross-checked against the
-          staged manifest, so a short list reads as incomplete coverage. A
-          later non-gating step aggregates these deterministically and
-          compares the result against your own `counts`; they do not affect
-          this run's verdict.
+          `files_reviewed` lists paths you actually opened with `Read` (or
+          reviewed substantially) — not a forced copy of `changed_files`.
+          A later non-gating step may aggregate these for telemetry; they do
+          not affect this run's verdict.
 
           Return your full assessment via the required structured output
           schema. `counts` must be accurate — a later deterministic step
@@ -1151,9 +1174,9 @@ runs:
 
           Populate the optional `findings` and `files_reviewed` fields too, from
           the analysis you already completed — one `findings` entry per finding
-          you reported with your own confidence 0/25/50/75/100, and every file
-          you read in full in `files_reviewed`. This is transcription of work
-          already done, not re-analysis.
+          you reported with your own confidence 0/25/50/75/100, and paths you
+          actually opened with `Read` in `files_reviewed`. This is transcription
+          of work already done, not re-analysis.
 
           Emitting the structured output is your only remaining task.
 
@@ -1247,12 +1270,10 @@ runs:
           and, where you would reclassify it, `severity_confirmed`. Under
           **fanout**, copy each finding's `confidence` and `severity_confirmed`
           from the `osh-scorer` agent (finder ≠ scorer) — do not self-score when a
-          scorer ran. `files_reviewed` lists every file
-          read in full for the active range — it is cross-checked against the
-          staged manifest, so a short list reads as incomplete coverage. A
-          later non-gating step aggregates these deterministically and compares
-          the result against your own `counts`; they do not affect this run's
-          verdict.
+          scorer ran. `files_reviewed` lists paths you actually opened with
+          `Read` — not a forced copy of `changed_files`. A later non-gating
+          step may aggregate these for telemetry; they do not affect this
+          run's verdict.
 
           Read `${{ github.action_path }}/rubric.md` (the authoritative 8-angle
           scan + P0-P3 severities + review checklist) and `context.md` at the repo root
@@ -1272,10 +1293,10 @@ runs:
           `.ai-review/ci-checks.json` if present: uncovered/weakly covered
           Test Plan items become normal `findings[]` (P0–P3 via the rubric);
           leave `checklist` empty — Publish does not tick PR-body boxes.
-          Attempt to load `/verification-before-completion` and
-          `/requesting-code-review` (best-effort). Under collapse, read
-          complete file contents (never just diff hunks). Under fanout,
-          coverage workers do that for assigned paths. Do NOT run tests or
+          Attempt to load `/verification-before-completion` (best-effort).
+          Apply the /code-review read rule: start from the active `git diff`;
+          expand to full-file `Read` only when a finding cannot be judged from
+          the hunk (collapse or fanout coverage workers). Do NOT run tests or
           probe for a toolchain — set `test_execution: "skipped"` (you have
           no shell access to a test runner). You MAY populate
           `verification_evidence` when you have real command output; omit it
