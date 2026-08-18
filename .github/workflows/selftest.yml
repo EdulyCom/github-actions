@@ -80,13 +80,17 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           EXPECT_HEAD: ${{ github.event.pull_request.head.sha }}
+          # Bound via env (never ${{ }} inside run:) so zizmor template-injection
+          # stays clean — verdict is only pass|fail from Publish, but the audit
+          # treats any in-run expansion as attacker-controllable.
+          VERDICT: ${{ steps.r.outputs.verdict }}
         run: |
           set -euo pipefail
           if [ -z "${EXPECT_HEAD}" ]; then
             EXPECT_HEAD="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')"
           fi
           BODY="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate \
-            | jq -rs --arg tip "${EXPECT_HEAD}" '
+            | jq -rs '
                 (add // [])
                 | map(select(.body != null and (.body | contains("<!-- ai-review-meta"))))
                 | sort_by(.submitted_at) | reverse
@@ -104,7 +108,6 @@ jobs:
           # Successful structured publishes stamp the PR tip; inconclusive may
           # still carry head_sha for the next full-force. When verdict is set
           # from Publish, expect the tip to match when mode is full|delta.
-          VERDICT="${{ steps.r.outputs.verdict }}"
           if [ "${VERDICT}" = "pass" ] || [ "${VERDICT}" = "fail" ]; then
             if echo "${META}" | grep -Eq 'mode=(full|delta)'; then
               echo "${META}" | grep -F "head_sha=${EXPECT_HEAD}"
