@@ -9,7 +9,7 @@ description: >
   job output rather than an identity-pinned Check Run, and why the review
   identity is cosmetic. The verdict is produced by a real two-stage AI
   review pipeline: a Haiku context stage summarizes the diff, then a
-  roster-K-routed Sonnet (collapse) or Opus (OSH fan-out) review stage
+  K-and-churn-routed Sonnet (collapse) or Opus (OSH fan-out) review stage
   performs the full rubric scan and returns a schema-validated result that
   a deterministic step recomputes the pass/fail decision from.
 
@@ -97,9 +97,10 @@ inputs:
   sonnet-files-threshold:
     description: >
       DEPRECATED — accepted for backward compatibility but ignored for model
-      routing. Review model selection uses roster K from
-      `.ai-review/assignments.json` (K≤1 → Sonnet collapse; K>1 → Opus OSH
-      parent). Formerly: max changed-file count for Sonnet when paired with
+      routing. Review model selection uses roster K plus churn from
+      `.ai-review/assignments.json` / the manifest (collapse when K≤1 or
+      churn ≤ 1500; Opus OSH parent only when K>1 and churn is above that
+      ceiling). Formerly: max changed-file count for Sonnet when paired with
       `sonnet-churn-threshold`.
     required: false
     default: "25"
@@ -382,10 +383,11 @@ runs:
       #
       # It also emits `.ai-review/assignments.json` — the review roster from
       # lib/roster.js: which reviewer reads which files, and under which model.
-      # Slice 3 (OSH): routing and the review prompt consume `.k` and the role
-      # list. K≤1 → single Sonnet session (collapse); K>1 → Opus parent that
-      # fans out native Sonnet Task workers per the roster. No Node
-      # Promise.race orchestrator — concurrency is Claude Code's scheduler.
+      # Slice 3 (OSH): routing consumes `.k` plus manifest churn
+      # (lib/osh-route.js). Collapse (Sonnet) when K≤1 or churn ≤ 1500;
+      # K>1 and churn above the ceiling → Opus parent that fans out native
+      # Sonnet Task workers per the roster. No Node Promise.race
+      # orchestrator — concurrency is Claude Code's scheduler.
       #
       # All parsing lives in lib/prep.js and lib/roster.js behind unit tests;
       # this step only runs git and hands stdout over. Nothing here is

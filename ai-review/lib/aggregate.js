@@ -24,12 +24,13 @@
 // steps still happen and the emitted schema is unchanged; only their order
 // differs, in the fail-closed direction that §7b itself argues for.
 //
-// Spec §6 step 2 is now implemented in full, over `assigned_files`: pairwise
-// disjoint, no stray path, union equal to `changed_files`, and every assigned
-// file claimed as reviewed. Disjointness was vacuous at roster size 1. All four
-// are asserted here as well as in `lib/roster.js` because that module can only
+// Spec §6 step 2's assignment partition is implemented over `assigned_files`:
+// pairwise disjoint, no stray path, union equal to `changed_files`.
+// Disjointness was vacuous at roster size 1. Those three properties are
+// asserted here as well as in `lib/roster.js` because that module can only
 // assert the roster it *emits*; a role file arrives from a model stage and can
-// claim an assignment the roster never made.
+// claim an assignment the roster never made. Completeness of `files_reviewed`
+// is telemetry only (/code-review may leave large files as hunk-only).
 //
 // Pure: no I/O, no process.env. The caller reads and parses the JSON files.
 

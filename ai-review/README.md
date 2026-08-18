@@ -72,16 +72,19 @@ injection-safety rule.
    model turns — a model that derives the diff base from a false premise
    reviews the wrong range and reports confidently on it.
 
-   The same step routes by roster **K** from `.ai-review/assignments.json`
-   (not file/churn size): **K≤1** → locked Sonnet (`claude/claude-sonnet-5`)
-   collapse — one session emits `--json-schema` directly; **K>1** → locked
-   Opus (`claude/claude-opus-5`) parent that fans out native Sonnet Task
-   subagents (`osh-coverage` / `osh-tracer` / `osh-history` / `osh-scorer`
-   via `--agents`; only the parent emits structured output). Haiku is not
-   used as a Task child of Opus (inherits adaptive thinking → gateway 400);
-   the optional context stage still uses Haiku as a top-level session.
-   Inputs `sonnet-files-threshold` / `sonnet-churn-threshold` remain accepted
-   for backward compatibility but are **deprecated for model routing**.
+   The same step packs roster **K** from full-file bytes in
+   `.ai-review/assignments.json`, then chooses topology from **K and churn**
+   (`lib/osh-route.js`): collapse to locked Sonnet (`claude/claude-sonnet-5`)
+   when **K≤1 or churn ≤ 1500** — one session emits `--json-schema` directly;
+   fan-out only when **K>1 and churn is above that ceiling** — locked Opus
+   (`claude/claude-opus-5`) parent with native Sonnet Task subagents
+   (`osh-coverage` / `osh-tracer` / `osh-history` / `osh-scorer` via
+   `--agents`; only the parent emits structured output). Haiku is not used
+   as a Task child of Opus (inherits adaptive thinking → gateway 400); the
+   optional context stage still uses Haiku as a top-level session, and is
+   auto-skipped on collapse. Inputs `sonnet-files-threshold` /
+   `sonnet-churn-threshold` remain accepted for backward compatibility but
+   are **deprecated for model routing**.
 
    It also writes `.ai-review/assignments.json`: the review roster —
    related changed files clustered, then packed into

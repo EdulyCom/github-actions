@@ -115,8 +115,9 @@ normal findings; it does **not** tick checklist boxes or write an
 `<!-- ai-review-status -->` block (`update-pr-body` is accepted but a no-op
 for that path — see ADR 0006). On re-runs it prefers a **delta** range since
 the last published `<!-- ai-review -->` unless `force-full-review` is set.
-Roster **K** selects Sonnet collapse (K≤1) vs Opus fan-out (K>1); size-based
-`sonnet-*-threshold` inputs are deprecated for routing.
+Roster **K** plus churn select topology: Sonnet collapse when K≤1 or churn
+≤ 1500; Opus fan-out only when K>1 and churn is above that ceiling.
+Size-based `sonnet-*-threshold` inputs are deprecated for routing.
 
 Then, in branch protection, require the `review-gate` job's status (and
 your terminal CI job, e.g. `build`) as required status checks. If this repo

@@ -9,8 +9,8 @@
 // for a few dozen churn lines.
 //
 // Rule: collapse (single Sonnet) when K≤1 OR churn ≤ COLLAPSE_CHURN_MAX.
-// Fan-out only when K>1 AND churn is above that ceiling. Must-read-all of
-// the active range is unchanged either way.
+// Fan-out only when K>1 AND churn is above that ceiling. Reviewers start
+// from the git diff either way (/code-review; not must-read-all).
 
 /** Max added+deleted lines that still prefer Sonnet collapse over Opus fan-out. */
 const COLLAPSE_CHURN_MAX = 1500;
