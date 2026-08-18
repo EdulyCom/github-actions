@@ -7,10 +7,11 @@ exposes the verdict as this action's own outputs
 workflow can gate its own heavier build/test/deploy jobs on
 `verdict == 'pass'`.
 
-The verdict comes from a real two-stage AI review: a Haiku context stage
-summarizes the diff, then a roster-K-routed Sonnet (collapse) or Opus
-(OSH fan-out) review stage performs the full rubric scan (see
-`ai-review/rubric.md`) and returns a schema-validated structured result.
+The verdict comes from a real AI review: prep writes a deterministic
+`context.md`, an optional Haiku Context stage may enrich it (auto-skipped on
+delta + K≤1), then a roster-K-routed Sonnet (collapse) or Opus (OSH fan-out)
+review stage performs the full rubric scan (see `ai-review/rubric.md`) and
+returns a schema-validated structured result.
 Model IDs are **locked in the action**
 (Claude primary → for context, Cursor `composer-2.5` then free; for schema
 reviews, structured_output free models only — Cursor has no SO on this
@@ -140,16 +141,14 @@ injection-safety rule.
    primary intent contract for the rubric's Angle H. ai-review only
    **reads** linked issues; it never mutates issue state (that is `ai-qa`'s
    post-merge job).
-9. **Context stage (Haiku)** — summarizes the diff and its
-   callers/callees/related helpers into `context.md` for the review stage
-   to read. This stage is **best-effort** (`continue-on-error`): `context.md`
-   is a non-essential optimization the review reads only "if present", so a
-   flaky Anthropic gateway or plugin-marketplace load that hangs/errors this
-   cheap Haiku call degrades gracefully instead of sinking the whole review.
+9. **Context handoff** — prep always writes a deterministic `context.md`
+   (changed files, symbols, roster). An optional **Haiku Context stage**
+   may enrich it with callers/callees. Haiku is **auto-skipped** on
+   `delta` + roster `K≤1` (and whenever `enable-context-stage: 'false'`).
+   The stage is **best-effort** (`continue-on-error`); Review reads
+   `context.md` only "if present" and still must-reads every changed file.
    (Composite-action steps cannot set `timeout-minutes`; the caller job's
    `timeout-minutes` is the wall-clock backstop — see the consumer guide.)
-   Set `enable-context-stage: 'false'` to skip this stage entirely; the
-   review reads `context.md` only "if present", so the gate is unaffected.
 10. **CI inventory + signal** — on every PR event (not only
     `workflow_dispatch`), inventories check runs for the PR HEAD into
     `.ai-review/ci-checks.json` and parses the PR Test Plan / checklists into
@@ -220,7 +219,7 @@ injection-safety rule.
 | `confidence-threshold` | Minimum **blocking-finding** confidence (0-100) required for a pass. The Publish step recomputes confidence from the review stage's P0/P1 counts and test-quality signals and compares it against this threshold. P2/P3 findings lower the *reported* confidence but are advisory and never block. | No | `90` |
 | `sonnet-files-threshold` | **DEPRECATED** — accepted but ignored for model routing. Roster K selects Sonnet collapse vs Opus fan-out. | No | `25` |
 | `sonnet-churn-threshold` | **DEPRECATED** — accepted but ignored for model routing. Same as above. | No | `800` |
-| `enable-context-stage` | When `false`, skips the Haiku context stage (and its `context.md` verification) entirely. The stage is best-effort and its output optional, so disabling it removes a wall-clock risk without changing the gate contract. | No | `true` |
+| `enable-context-stage` | When `false`, never runs the Haiku Context stage. When `true` (default), Haiku may enrich `context.md`, but is still auto-skipped on delta + K≤1. Prep always writes a deterministic `context.md` first. Gate contract unchanged. | No | `true` |
 | `api-timeout-ms` | Per-request timeout (ms) for every Claude stage, passed as `API_TIMEOUT_MS` (CLI default `600000`). **Does not bound the ~27.5-min stall** — a run with this set to `180000` still stalled 27m36s. It is a genuine per-request bound and fails a wedged request faster than the default, nothing more. | No | `180000` |
 | `update-pr-body` | Accepted for compatibility. Checklist tick / status-block write-back is **retired**; the input is a no-op. Test Plan gaps are findings vs CI instead. | No | `true` |
 | `update-linked-issues` | When `true`, the Review stage resolves and evaluates the issues the PR closes. ai-review only reads them; it never mutates issue state. | No | `true` |

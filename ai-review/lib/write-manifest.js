@@ -191,6 +191,27 @@ function writeRoster(manifest, sizes, io) {
 
     writeJson(path.join(DIR, "assignments.json"), roster);
 
+    // Always land a factual context.md before any optional Haiku stage so
+    // Review has handoff even when Context is skipped (delta+K≤1) or stalls.
+    // When `io` is injected for unit tests, skip the real write unless the
+    // test supplies `writeContext` (avoids polluting the workspace cwd).
+    try {
+      const { writeDeterministicContext } = require("./write-context.js");
+      let ctxWrite = writeDeterministicContext;
+      if (io) {
+        ctxWrite =
+          "writeContext" in io ? io.writeContext : () => {};
+      }
+      if (typeof ctxWrite === "function") {
+        ctxWrite(manifest, roster);
+        log("prep: wrote deterministic context.md\n");
+      }
+    } catch (err) {
+      log(
+        `::warning::prep: deterministic context.md failed (${err && err.message ? err.message : err}); Review will proceed without it\n`,
+      );
+    }
+
     log(
       `roster: K=${roster.k} over ${roster.changed_files.length} file(s); ` +
         `${roster.roles.map((r) => `${r.role}:${r.assigned_files.length}`).join(" ")}\n`,

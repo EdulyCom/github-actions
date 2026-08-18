@@ -114,15 +114,20 @@ test("writeRoster: writes assignments.json and logs a summary on success", () =>
     has_logic_change: true,
     modifies_reviewer_guidance: false,
   };
+  const contexts = [];
   const roster = writeRoster(manifest, { "src/a.ts": 100, "src/b.ts": 200 }, {
     readText: () => "",
     writeJson: (p, obj) => writes.push([p, obj]),
+    writeContext: (m, r) => contexts.push([m, r]),
     log: (line) => logs.push(line),
   });
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], ".ai-review/assignments.json");
   assert.equal(writes[0][1].k, roster.k);
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0][1], roster);
   assert.ok(logs.some((l) => l.startsWith("roster: K=")));
+  assert.ok(logs.some((l) => l.includes("deterministic context.md")));
   assert.ok(logs.some((l) => l.startsWith("ai-review-roster {")));
   assert.ok(!logs.some((l) => l.includes("FAILED")));
 });
@@ -419,6 +424,8 @@ test("main: writes manifest.json AND assignments.json against a real diff on dis
       [path.join(".ai-review", "assignments.json"), path.join(".ai-review", "manifest.json")].sort(),
       "manifest.json and/or assignments.json did not go through the atomic write path",
     );
+    assert.ok(fs.existsSync("context.md"), "main() must write deterministic context.md");
+    assert.match(fs.readFileSync("context.md", "utf8"), /deterministic prep/);
     assert.deepEqual(
       fs.readdirSync(".ai-review").filter((f) => f.includes(".tmp-")),
       [],

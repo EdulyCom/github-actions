@@ -59,10 +59,10 @@ jobs:
         uses: ./ai-review
         with:
           # Deliberately does NOT pass enable-context-stage: this self-test must
-          # exercise the same default configuration consumers get, and the
-          # context stage is on by default. A temporary "false" here during the
-          # 2026-08-09 stall diagnosis meant the default path went untested
-          # while it was live for every consumer — don't reintroduce that.
+          # exercise the same default configuration consumers get. Haiku Context
+          # still auto-skips on delta + K≤1 (deterministic context.md remains).
+          # Do not force 'false' here — that would leave the default path
+          # untested for full/K>1 reviews.
           pr-number: ${{ inputs.pr_number }}
           app-id: ${{ vars.MTM_BOT_APP_ID }}
           private-key: ${{ secrets.MTM_BOT_APP_PRIVATE_KEY }}

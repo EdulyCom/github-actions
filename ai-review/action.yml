@@ -112,9 +112,12 @@ inputs:
     default: "800"
   enable-context-stage:
     description: >
-      When 'true' (default) the Haiku context stage runs and writes
-      `context.md` for the review stage to read "if present". Set to 'false'
-      to skip it entirely.
+      When 'true' (default) the Haiku context stage may run and enrich
+      `context.md` for the review stage. Prep always writes a deterministic
+      `context.md` first. Even when this input is 'true', Haiku is auto-skipped
+      on delta reviews with roster K≤1 (small incremental scope) to cut
+      wall-clock without changing the must-read gate. Set to 'false' to never
+      run Haiku Context.
 
       Escape hatch, added after a measured stall: on run 31317613715 this
       stage sat silent for 27m27s between "Claude Code initialized" and its
@@ -127,8 +130,8 @@ inputs:
 
       The stage is already best-effort (`continue-on-error`) and its output is
       already optional, so disabling it removes a wall-clock risk without
-      changing the gate's contract. Defaults to 'true' so no consumer
-      behaviour changes on upgrade.
+      changing the gate's contract. Defaults to 'true' so large/full reviews
+      still get Haiku enrichment on upgrade.
     required: false
     default: "true"
   api-timeout-ms:
@@ -400,6 +403,7 @@ runs:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
         AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
         FORCE_FULL_REVIEW: ${{ inputs.force-full-review }}
+        ENABLE_CONTEXT_STAGE: ${{ inputs.enable-context-stage }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
       run: |
@@ -498,6 +502,21 @@ runs:
         fi
         echo "prep: osh-mode=${OSH_MODE} k=${K} model=${MODEL} files=${FILES} churn=${CHURN}"
 
+        # Haiku Context stage: optional enrichment. Prep already wrote a
+        # deterministic context.md. Auto-skip when delta + K≤1 — scope is small
+        # enough that a second model hop is pure wall-clock; Review still
+        # must-reads the active range. Large/full reviews keep Haiku.
+        RUN_CONTEXT_STAGE=false
+        if [ "${ENABLE_CONTEXT_STAGE:-true}" = "true" ]; then
+          if [ "${REVIEW_MODE}" = "delta" ] && [ "${K}" -le 1 ]; then
+            echo "prep: skipping Haiku context (delta + K<=1); using deterministic context.md"
+          else
+            RUN_CONTEXT_STAGE=true
+          fi
+        else
+          echo "prep: skipping Haiku context (enable-context-stage=false); using deterministic context.md"
+        fi
+
         # Mode-conditional review allowlist (collapse = prior least-privilege;
         # fanout adds Task only). No Write on either path: Claude Code cannot
         # scope Write to `.ai-review/` (see Derive step), so workers return
@@ -536,6 +555,7 @@ runs:
           echo "haiku-model=${HAIKU}"
           echo "haiku-fallback-model=${HAIKU_FALLBACK}"
           echo "review-mode=${REVIEW_MODE}"
+          echo "run-context-stage=${RUN_CONTEXT_STAGE}"
           echo "merge-base-sha=${BASE_SHA}"
           echo "head-sha=${HEAD_SHA}"
           echo "delta-base-sha=${DELTA_BASE_SHA}"
@@ -585,11 +605,12 @@ runs:
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
         steps.pr-state.outputs.skip != 'true' &&
-        inputs.enable-context-stage == 'true'
+        steps.route.outputs.run-context-stage == 'true'
       # continue-on-error: context.md is a non-essential optimization — the
-      # Review stage reads it only "if present" and works without it. A flaky
-      # Anthropic gateway or plugin-marketplace load can hang/error this cheap
-      # Haiku call (observed: is_error with num_turns:1, cost:0 after a long
+      # Review stage reads it only "if present" and works without it. Prep
+      # already wrote a deterministic context.md; this stage may enrich it.
+      # A flaky Anthropic gateway or plugin-marketplace load can hang/error this
+      # cheap Haiku call (observed: is_error with num_turns:1, cost:0 after a long
       # stall); that must NOT sink the whole review. Composite-action steps
       # cannot set timeout-minutes, so graceful degradation here + the caller's
       # job-level timeout backstop is how we bound this failure mode.
@@ -637,11 +658,15 @@ runs:
           callees, and helper functions related to the changed code, so a reviewer
           has the surrounding context without re-deriving it.
 
-          Write a concise summary to `context.md` at the repository root covering:
+          Write (overwrite) a concise summary to `context.md` at the repository
+          root covering:
           - what changed, in plain language
           - which files/functions call into or are called by the changed code
           - any related helpers, shared utilities, or patterns the changed code
             reuses or should have reused
+
+          A prior prep step may already have written a deterministic
+          `context.md` inventory — replace it with this richer summary.
 
           Do NOT review the change. Do NOT judge correctness, quality, or security.
           Do NOT produce a verdict, opinion, or recommendation of any kind. Your only
@@ -669,21 +694,27 @@ runs:
       id: context-verify
       if: >-
         steps.fork-guard.outputs.is-fork != 'true' &&
-        steps.pr-state.outputs.skip != 'true' &&
-        inputs.enable-context-stage == 'true'
+        steps.pr-state.outputs.skip != 'true'
       shell: bash
+      env:
+        RAN_HAIKU_CONTEXT: ${{ steps.route.outputs.run-context-stage }}
       run: |
         set -euo pipefail
-        # Durable regression check for the Task 2.4 fix-round finding that the
-        # Context stage's Write tool calls were silently denied (see the
-        # --allowedTools comment on the Context stage step above). This makes
-        # the handoff's health visible in every run's plain step log instead of
-        # requiring a permission_denials_count archaeology dig.
+        # Prep always writes deterministic context.md. When Haiku ran, this
+        # also catches the historical Write-permission denial (Task 2.4).
         if [ ! -s context.md ]; then
-          echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          if [ "${RAN_HAIKU_CONTEXT}" = "true" ]; then
+            echo "::warning::context.md is missing or empty after the Context stage ran — the Review stage will not have handoff context. Check the Context stage step's tool-permission denials."
+          else
+            echo "::warning::context.md is missing or empty after prep — Review will proceed without handoff context."
+          fi
           exit 0
         fi
-        echo "context.md present: $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        if [ "${RAN_HAIKU_CONTEXT}" = "true" ]; then
+          echo "context.md present (after Haiku Context): $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        else
+          echo "context.md present (deterministic prep; Haiku Context skipped): $(wc -l < context.md) lines, $(wc -c < context.md) bytes"
+        fi
         echo "--- context.md preview (first 20 lines) ---"
         head -n 20 context.md
 
@@ -872,9 +903,10 @@ runs:
           `.ai-review/linked-issues.json` is absent or empty, fall back to
           the PR title/body as the intent source.
 
-          Read `context.md` at the repository root (written by an earlier
-          context-gathering stage) for a summary of what changed and its
-          callers/callees/related helpers.
+          Read `context.md` at the repository root when present (deterministic
+          prep inventory and/or Haiku Context enrichment) for a summary of what
+          changed and its callers/callees/related helpers. Treat it as a hint
+          only — still read every changed file in full.
 
           Read `.ai-review/manifest.json` FIRST (after osh-policy). A prior
           deterministic step already resolved the review range and staged the
