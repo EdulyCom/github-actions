@@ -9,7 +9,8 @@ workflow can gate its own heavier build/test/deploy jobs on
 
 The verdict comes from a real AI review: prep writes a deterministic
 `context.md`, an optional Haiku Context stage may enrich it (auto-skipped on
-delta + K≤1), then a roster-K-routed Sonnet (collapse) or Opus (OSH fan-out)
+collapse: K≤1 or churn ≤ 1500), then a K-and-churn-routed Sonnet (collapse)
+or Opus (OSH fan-out)
 review stage performs the full rubric scan (see `ai-review/rubric.md`) and
 returns a schema-validated structured result.
 Model IDs are **locked in the action**
@@ -264,15 +265,16 @@ path); see
 [`docs/adr/0006-test-plan-ci-findings-and-osh-routing.md`](../docs/adr/0006-test-plan-ci-findings-and-osh-routing.md).
 `test_execution` stays `"skipped"` — no test runners in the allowlist.
 
-## OSH routing (roster K)
+## OSH routing (K and churn)
 
 Prep packs the active-range files into coverage bins and writes
-`.ai-review/assignments.json` with `.k`:
+`.ai-review/assignments.json` with `.k` (from full-file bytes). Topology
+then follows `lib/osh-route.js`:
 
-| K | Mode (`osh-mode`) | Review session |
+| Condition | Mode (`osh-mode`) | Review session |
 | --- | --- | --- |
-| ≤1 (incl. empty-diff `0`) | `collapse` | Single Sonnet + `--json-schema` (no Opus parent, no Haiku scorer) |
-| >1 (max 4) | `fanout` | Opus parent + Sonnet Task agents (`--agents`); only Opus emits SO |
+| K≤1 (incl. empty-diff `0`) **or** churn ≤ 1500 | `collapse` | Single Sonnet + `--json-schema` (no Opus parent, no Haiku scorer). Haiku Context skipped. |
+| K>1 **and** churn > 1500 (K max 4) | `fanout` | Opus parent + Sonnet Task agents (`--agents`); only Opus emits SO |
 
 Publish still gates on that session's structured output. Multi-role
 `aggregate.js` stays shadow/non-gating.
