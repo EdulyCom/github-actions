@@ -423,7 +423,7 @@ runs:
         #     completed structured_output — landing on composer then yields the
         #     inconclusive "success but no structured_output" failure mode.
         SONNET="claude/claude-sonnet-5"
-        OPUS="claude/claude-sonnet-5"
+        OPUS="claude/claude-opus-5"
         # Context stage (top-level session) can use Haiku.
         HAIKU="claude/claude-haiku-4-5-20251001"
         # Task subagents under Opus inherit adaptive thinking; Haiku returns
@@ -516,7 +516,7 @@ runs:
         OSH_MODE="${OSH_MODE:-collapse}"
 
         if [ "${OSH_MODE}" = "fanout" ]; then
-          MODEL="${OPUS}"
+          MODEL="${SONNET}"
           FALLBACK="${OPUS_FALLBACK}"
         else
           MODEL="${SONNET}"
