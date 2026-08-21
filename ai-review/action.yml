@@ -516,7 +516,7 @@ runs:
         OSH_MODE="${OSH_MODE:-collapse}"
 
         if [ "${OSH_MODE}" = "fanout" ]; then
-          MODEL="${OPUS}"
+          MODEL="${SONNET}"
           FALLBACK="${OPUS_FALLBACK}"
         else
           MODEL="${SONNET}"
