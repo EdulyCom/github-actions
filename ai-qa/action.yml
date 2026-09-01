@@ -101,7 +101,8 @@ inputs:
       closes the issue (this action owns "done" — turn off GitHub auto-close)
       and applies `pass-label`; on a FAIL it leaves the issue open (and
       reopens it if GitHub already auto-closed it) and applies `fail-label`.
-      Set to 'false' to leave linked issues untouched.
+      Also gates the `issues.closed` premature-reopen path. Set to 'false'
+      to leave linked issues untouched.
     required: false
     default: "true"
   cleanup-head-branch:
@@ -967,7 +968,7 @@ runs:
           }
 
     - name: Reopen prematurely closed issue
-      if: steps.route.outputs.mode == 'issue-closed'
+      if: steps.route.outputs.mode == 'issue-closed' && inputs.update-linked-issues == 'true'
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
         ISSUE_NUMBER: ${{ steps.route.outputs.issue-number }}
@@ -976,6 +977,7 @@ runs:
         STATE_REASON: ${{ steps.route.outputs.state-reason }}
         ISSUE_LABELS: ${{ steps.route.outputs.issue-labels }}
         PASS_LABEL: ${{ inputs.pass-label }}
+        UPDATE_LINKED_ISSUES: ${{ inputs.update-linked-issues }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         CLEANUP_PATH: ${{ github.action_path }}/lib/cleanup.js
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
@@ -1052,6 +1054,7 @@ runs:
             hasPassLabel,
             stateReason: process.env.STATE_REASON || '',
             linkedUndeliveredPr: linkedUndeliveredPr(prs, passLabel),
+            updateLinkedIssues: process.env.UPDATE_LINKED_ISSUES,
           });
           core.info(`Issue #${issueNumber} premature-close: ${decision.reason}`);
           if (!decision.reopen) return;

@@ -13,8 +13,8 @@ the head branch); this action owns the actual done signal:
 - **Issue-level.** On delivery **PASS**, **close** linked issues (turn off
   GitHub auto-close-on-merge so merge is not "done"). On **FAIL**, leave
   them open (reopen if GitHub already auto-closed them). On `issues.closed`,
-  reopen an issue closed before delivery was verified, unless this action
-  closed it or it is `not_planned`.
+  when `update-linked-issues` is on, reopen an issue closed before delivery
+  was verified, unless this action closed it or it is `not_planned`.
 
 An optional Claude review can still smoke-test the live app and evaluate a
 PR Test Plan; it is color on the report, not the reason this action exists.
@@ -54,10 +54,12 @@ prompt.)
 2. **Resolve author identity** — settles on one token and one identity
    string (`<app-slug>[bot]` or `github-actions[bot]`) reused by every
    later step.
-3. **Route event** — `push` and `pull_request` closed+merged take the
-   delivery path; closed-without-merge only cleans the head branch;
+3. **Route event** — `pull_request` closed+merged takes the delivery
+   path; closed-without-merge only cleans the head branch;
    `issues.closed` takes the premature-reopen path (PRs that fire as
-   issues are skipped).
+   issues are skipped). `push` is a legacy merged-delivery-only alias —
+   do not combine it with `pull_request: closed` or every merge runs
+   delivery twice.
 4. **Resolve merged PR and merge commit** — on `push`, looks up the pull
    request(s) associated with `github.sha` via
    `GET /repos/{owner}/{repo}/commits/{sha}/pulls` (works across merge,
@@ -113,7 +115,8 @@ prompt.)
 10. **Closed-without-merge / premature issue-close** — a `pull_request`
     closed event that was not merged only deletes the head branch. An
     `issues.closed` event reopens the issue if it was closed before delivery
-    (linked merged PR without `✓ /ai-qa`), unless this action closed it.
+    (linked merged PR without `✓ /ai-qa`), unless this action closed it,
+    `update-linked-issues` is `false`, or it is `not_planned`.
 
 ## Inputs
 
@@ -129,7 +132,7 @@ prompt.)
 | `pass-label` | Label applied when the overall QA signal (health + review) passes. Also applied to linked issues when `update-linked-issues` is on. | No | `✓ /ai-qa` |
 | `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues when `update-linked-issues` is on. | No | `✗ /ai-qa` |
 | `update-pr-body` | When `true`, the Publish step maintains a managed `<!-- ai-qa-status -->` block in the merged PR's description reflecting the latest QA status. | No | `true` |
-| `update-linked-issues` | When `true`, posts a sticky QA-status comment on each linked issue; on PASS **closes** the issue and applies `pass-label`; on FAIL leaves it open (reopens if GitHub auto-closed it) and applies `fail-label`. | No | `true` |
+| `update-linked-issues` | When `true`, posts a sticky QA-status comment on each linked issue; on PASS **closes** the issue and applies `pass-label`; on FAIL leaves it open (reopens if GitHub auto-closed it) and applies `fail-label`. Also gates the `issues.closed` premature-reopen path. | No | `true` |
 | `cleanup-head-branch` | When `true`, delete the PR head after a delivery PASS, or immediately on close-without-merge. Requires `contents: write` on `GITHUB_TOKEN`. | No | `true` |
 | `anthropic-api-key` | Anthropic API key for the review step. Optional — without it, the review quietly no-ops and the report still publishes from the deploy-health signal alone. | No | — |
 | `anthropic-auth-token` | Bearer token for a custom Anthropic-compatible gateway, used instead of `anthropic-api-key`. | No | — |
@@ -161,8 +164,6 @@ its own. Pass `test-hint` so the review knows this repo's build/test command.
 name: ai-qa
 
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [closed]
   issues:
@@ -196,16 +197,25 @@ Turn **off** GitHub auto-close (Settings → General → Issues → "Auto-close
 issues with merged linked pull requests") so merge is not treated as done;
 this action closes linked issues only after delivery PASS.
 
+Do **not** also register `push` to the default branch. `push` is a
+legacy merged-delivery-only alias for callers that cannot use
+`pull_request: types: [closed]`. Combining both fires two full
+delivery jobs on every merge (health, review, publish, cleanup) that
+race on issues and labels. Prefer the `pull_request` + `issues` pair
+above so close-without-merge and premature-issue-close hygiene also
+run.
+
 `issues: write` is required because comments, labels, close, and reopen go
 through the Issues API. `contents: write` is required to delete the head
 branch via `GITHUB_TOKEN` (the App author token is not granted Contents).
 
 ## Self-test
 
-`.github/workflows/ai-qa-selftest.yml` runs this action on push to `main`,
-`pull_request` closed, and `issues` closed. The merge path uses a trivial
-`health-url` (this repo's raw `README.md`) so the report/label/close/cleanup
-pipeline is exercised without a real deploy.
+`.github/workflows/ai-qa-selftest.yml` runs this action on `pull_request`
+closed and `issues` closed (not `push` — that would duplicate merged
+delivery). The merge path uses a trivial `health-url` (this repo's raw
+`README.md`) so the report/label/close/cleanup pipeline is exercised
+without a real deploy.
 
 To exercise the failure path (a deliberately broken or unreachable
 health-url timing out rather than hanging the job) or the sticky-comment

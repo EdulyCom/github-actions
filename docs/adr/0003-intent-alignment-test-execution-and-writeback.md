@@ -81,7 +81,7 @@ canonical skill.
   **reopens** it if GitHub already auto-closed it. It also maintains a
   `<!-- ai-qa-status -->` block in the PR body. A separate `issues.closed`
   path reopens an issue closed before delivery was verified, unless this
-  action closed it or it is `not_planned`.
+  action closed it, `update-linked-issues` is off, or it is `not_planned`.
 - Both are gated by `update-pr-body` / `update-linked-issues` (default `true`)
   and are wrapped so any write failure warns without failing the job.
 

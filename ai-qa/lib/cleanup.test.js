@@ -194,6 +194,33 @@ test("does not reopen when no linked undelivered PR exists", () => {
   assert.equal(d.reason, "no-undelivered-pr");
 });
 
+test("does not reopen when update-linked-issues is off", () => {
+  const base = {
+    closedByThisAction: false,
+    hasPassLabel: false,
+    stateReason: "completed",
+    linkedUndeliveredPr: true,
+  };
+  const off = shouldReopenPrematureClose({
+    ...base,
+    updateLinkedIssues: false,
+  });
+  assert.equal(off.reopen, false);
+  assert.equal(off.reason, "update-linked-issues-off");
+
+  const offStr = shouldReopenPrematureClose({
+    ...base,
+    updateLinkedIssues: "false",
+  });
+  assert.equal(offStr.reopen, false);
+  assert.equal(offStr.reason, "update-linked-issues-off");
+
+  // Omit the flag (and the action.yml default of true) — still reopen.
+  const omitted = shouldReopenPrematureClose(base);
+  assert.equal(omitted.reopen, true);
+  assert.equal(omitted.reason, "closed-before-delivery");
+});
+
 // --- linkedUndeliveredPr ----------------------------------------------------
 
 test("linkedUndeliveredPr is true when a merged PR lacks the pass label", () => {
