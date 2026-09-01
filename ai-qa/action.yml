@@ -1,16 +1,12 @@
 name: ai-qa
 description: >-
-  Post-merge, non-blocking QA signal. Runs after a push to the default branch:
-  resolves the pull request that was just merged, waits for the deploy to
-  become healthy, then has Claude perform a real agentic post-merge QA
-  review — smoke-testing the deployed app, reviewing the merged diff for
-  integration/runtime risks, and (at its own discretion) running the repo's
-  build/tests to confirm a suspected regression — and emits a P0–P3 verdict.
-  A deterministic step recomputes the pass/fail decision from the severity
-  counts and the deploy-health signal, then posts a report comment and a
-  pass/fail label on the merged PR. This action is informational only — it has
-  no `outputs:` block, never calls the Checks API, and gates nothing in the
-  calling workflow.
+  Post-merge delivery hygiene at PR and issue level. After a merge (push to
+  the default branch, or pull_request closed+merged) it waits for the deploy
+  to become healthy, optionally runs an agentic QA review, then: on PASS
+  closes linked issues and deletes the head branch; on FAIL leaves issues
+  open and keeps the branch. Closed-without-merge PRs only delete the head
+  branch. issues.closed reopens an issue closed before delivery. Informational
+  only — no outputs, no Checks API, gates nothing.
 
 inputs:
   app-id:
@@ -100,11 +96,21 @@ inputs:
     default: "true"
   update-linked-issues:
     description: >-
-      When 'true' (default), the Publish step resolves the issues the merged
-      PR closed and posts a sticky QA-status comment on each. On a FAIL it
-      also reopens a closed linked issue and applies `fail-label`; on a PASS
-      it applies `pass-label` and removes `fail-label`. Set to 'false' to
-      leave linked issues untouched.
+      When 'true' (default), after merged delivery the Publish step posts a
+      sticky QA-status comment on each issue the PR links. On a PASS it
+      closes the issue (this action owns "done" — turn off GitHub auto-close)
+      and applies `pass-label`; on a FAIL it leaves the issue open (and
+      reopens it if GitHub already auto-closed it) and applies `fail-label`.
+      Set to 'false' to leave linked issues untouched.
+    required: false
+    default: "true"
+  cleanup-head-branch:
+    description: >-
+      When 'true' (default), delete this PR's head branch after a delivery
+      PASS, or immediately when the PR is closed without merging. Fork heads,
+      the default branch, and a head still used by another open PR are never
+      deleted. A merged FAIL keeps the branch. Requires `contents: write` on
+      the caller job's GITHUB_TOKEN; missing permission degrades to a warning.
     required: false
     default: "true"
 
@@ -144,37 +150,100 @@ runs:
           } >> "${GITHUB_OUTPUT}"
         fi
 
+    - name: Route event
+      id: route
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_MERGED: ${{ github.event.pull_request.merged }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        ISSUE_NUMBER: ${{ github.event.issue.number }}
+        ISSUE_IS_PR: ${{ github.event.issue.pull_request != null && 'true' || 'false' }}
+        SENDER_LOGIN: ${{ github.event.sender.login }}
+        STATE_REASON: ${{ github.event.issue.state_reason }}
+        ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+        PUSH_SHA: ${{ github.sha }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        REPO: ${{ github.repository }}
+        CLEANUP_PATH: ${{ github.action_path }}/lib/cleanup.js
+      run: |
+        set -euo pipefail
+        node <<'NODE'
+        const fs = require("fs");
+        const { resolveMode } = require(process.env.CLEANUP_PATH);
+        const r = resolveMode({
+          eventName: process.env.EVENT_NAME,
+          eventAction: process.env.EVENT_ACTION,
+          issueIsPr: process.env.ISSUE_IS_PR,
+          prMerged: process.env.PR_MERGED,
+        });
+        const headRepo = process.env.PR_HEAD_REPO || "";
+        const repo = process.env.REPO || "";
+        const isCross = !!(headRepo && repo && headRepo !== repo);
+        const lines = [
+          `mode=${r.mode}`,
+          `reason=${r.reason}`,
+          `pr-number=${process.env.PR_NUMBER || ""}`,
+          `merge-sha=${process.env.PR_MERGE_SHA || process.env.PUSH_SHA || ""}`,
+          `head-ref=${process.env.PR_HEAD_REF || ""}`,
+          `issue-number=${process.env.ISSUE_NUMBER || ""}`,
+          `sender-login=${process.env.SENDER_LOGIN || ""}`,
+          `state-reason=${process.env.STATE_REASON || ""}`,
+          `issue-labels=${process.env.ISSUE_LABELS || ""}`,
+          `default-branch=${process.env.DEFAULT_BRANCH || ""}`,
+          `is-cross-repo=${isCross ? "true" : "false"}`,
+        ];
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, lines.join("\n") + "\n");
+        console.log(`ai-qa route: ${r.mode} (${r.reason})`);
+        NODE
+
     - name: Resolve merged PR and merge commit
       id: merge
+      if: steps.route.outputs.mode == 'merged-delivery'
       shell: bash
       env:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
         REPO: ${{ github.repository }}
         MERGE_SHA: ${{ github.sha }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_PR_NUMBER: ${{ steps.route.outputs.pr-number }}
+        EVENT_MERGE_SHA: ${{ steps.route.outputs.merge-sha }}
       run: |
         set -uo pipefail
         PR_NUMBER=""
-        for attempt in 1 2 3 4 5; do
-          PR_JSON="$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls" 2>/dev/null || echo '[]')"
-          PR_NUMBER="$(echo "${PR_JSON}" | jq -r '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty')"
-          if [ -n "${PR_NUMBER}" ]; then
-            break
+        RESOLVED_SHA="${MERGE_SHA}"
+        if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${EVENT_PR_NUMBER}" ]; then
+          PR_NUMBER="${EVENT_PR_NUMBER}"
+          if [ -n "${EVENT_MERGE_SHA}" ]; then
+            RESOLVED_SHA="${EVENT_MERGE_SHA}"
           fi
-          if [ "${attempt}" -lt 5 ]; then
-            sleep 3
-          fi
-        done
+        else
+          for attempt in 1 2 3 4 5; do
+            PR_JSON="$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls" 2>/dev/null || echo '[]')"
+            PR_NUMBER="$(echo "${PR_JSON}" | jq -r '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number // empty')"
+            if [ -n "${PR_NUMBER}" ]; then
+              break
+            fi
+            if [ "${attempt}" -lt 5 ]; then
+              sleep 3
+            fi
+          done
+        fi
         if [ -z "${PR_NUMBER}" ]; then
           echo "::notice::ai-qa skipped — no merged pull request is associated with commit ${MERGE_SHA} after 5 attempts (a direct push to the default branch, or GitHub has not yet indexed the association)"
           echo "skip=true" >> "${GITHUB_OUTPUT}"
         else
           echo "skip=false" >> "${GITHUB_OUTPUT}"
           echo "pr-number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
-          echo "merge-sha=${MERGE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "merge-sha=${RESOLVED_SHA}" >> "${GITHUB_OUTPUT}"
         fi
 
     - name: Check out merge commit
-      if: steps.merge.outputs.skip != 'true'
+      if: steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true'
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         ref: ${{ steps.merge.outputs.merge-sha }}
@@ -185,7 +254,7 @@ runs:
 
     - name: Resolve PR context and linked issues
       id: prcontext
-      if: steps.merge.outputs.skip != 'true'
+      if: steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ steps.identity.outputs.author-token }}
@@ -205,7 +274,7 @@ runs:
         : > .ai-qa/test-plan.md
         echo '[]' > .ai-qa/linked-issues.json
         if [ -n "${PR_NUMBER}" ]; then
-          gh pr view "${PR_NUMBER}" --repo "${REPO}" --json number,title,body,url \
+          gh pr view "${PR_NUMBER}" --repo "${REPO}" --json number,title,body,url,headRefName,isCrossRepository,mergedAt,createdAt,state,baseRefName \
             > .ai-qa/pr-meta.json 2>/dev/null || printf '{}' > .ai-qa/pr-meta.json
           # Extract the "Test Plan" section: from a "# … Test Plan" heading up to
           # the next markdown heading. `#+` (not `#{1,6}`) for mawk portability.
@@ -236,7 +305,7 @@ runs:
 
     - name: Wait for deploy health
       id: health
-      if: steps.merge.outputs.skip != 'true'
+      if: steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true'
       shell: bash
       env:
         HEALTH_URL: ${{ inputs.health-url }}
@@ -267,7 +336,7 @@ runs:
     # so the QA review can Read it with a stable relative path.
     - name: Stage QA rubric
       id: prep
-      if: steps.merge.outputs.skip != 'true'
+      if: steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -292,7 +361,7 @@ runs:
     - name: Resolve locked models
       id: models
       if: >-
-        steps.merge.outputs.skip != 'true' &&
+        steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true' &&
         (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
       shell: bash
       run: |
@@ -310,7 +379,7 @@ runs:
       id: review
       continue-on-error: true
       if: >-
-        steps.merge.outputs.skip != 'true' &&
+        steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true' &&
         (inputs.anthropic-api-key != '' || inputs.anthropic-auth-token != '')
       uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
       env:
@@ -384,7 +453,7 @@ runs:
 
     - name: Publish report
       id: publish
-      if: always() && steps.merge.outputs.skip != 'true'
+      if: always() && steps.route.outputs.mode == 'merged-delivery' && steps.merge.outputs.skip != 'true'
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
         AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
@@ -402,6 +471,9 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         REVIEW_EXEC_FILE: ${{ steps.review.outputs.execution_file }}
         REPORT_FOOTER_PATH: ${{ github.action_path }}/lib/report-footer.js
+        CLEANUP_PATH: ${{ github.action_path }}/lib/cleanup.js
+        CLEANUP_HEAD_BRANCH: ${{ inputs.cleanup-head-branch }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         # Same locked primary the review stage was started with (steps.models).
         # Prefer the execution-log model when present; otherwise the requested
         # primary — never a second hardcoded literal that can drift from --model.
@@ -411,6 +483,7 @@ runs:
         script: |
           const fs = require('fs');
           const { formatModelFooter, modelFromExecutionLog } = require(process.env.REPORT_FOOTER_PATH);
+          const { shouldDeleteHeadBranch, shouldCloseIssue } = require(process.env.CLEANUP_PATH);
 
           let modelUsed = '';
           try {
@@ -489,6 +562,42 @@ runs:
             mergeRisk = 'low';
           }
 
+          let prMeta = {};
+          try {
+            const parsedMeta = JSON.parse(fs.readFileSync('.ai-qa/pr-meta.json', 'utf8'));
+            if (parsedMeta && typeof parsedMeta === 'object') prMeta = parsedMeta;
+          } catch (err) {
+            core.info(`No pr-meta file to read: ${err.message}`);
+          }
+          const headRef = typeof prMeta.headRefName === 'string' ? prMeta.headRefName.trim() : '';
+          let otherOpenPrCount = 0;
+          if (headRef && !prMeta.isCrossRepository) {
+            try {
+              const { data: openHeads } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${headRef}`,
+                per_page: 5,
+              });
+              otherOpenPrCount = Array.isArray(openHeads) ? openHeads.length : 0;
+            } catch (err) {
+              core.warning(`Could not list open PRs for head ${headRef}: ${err.message}`);
+            }
+          }
+          const branchDecision = shouldDeleteHeadBranch({
+            cleanupEnabled: process.env.CLEANUP_HEAD_BRANCH === 'true',
+            deliveryOk: overallPass,
+            merged: true,
+            headRef,
+            defaultBranch: process.env.DEFAULT_BRANCH || '',
+            isCrossRepository: !!prMeta.isCrossRepository,
+            otherOpenPrCount,
+          });
+          core.setOutput('delete-head-branch', branchDecision.delete ? 'true' : 'false');
+          core.setOutput('head-ref', headRef);
+          core.info(`Head-branch cleanup: ${branchDecision.reason} (delete=${branchDecision.delete})`);
+
           const body = [];
           body.push('<!-- ai-qa -->');
           body.push(overallPass ? '### ✅ ai-qa: PASS' : '### ❌ ai-qa: FAIL');
@@ -510,6 +619,13 @@ runs:
             }
           } else {
             body.push(`| QA review | ⚠️ did not run — reporting deploy-health signal only |`);
+          }
+          if (headRef) {
+            body.push(
+              branchDecision.delete
+                ? `| Head branch | will delete \`${headRef}\` |`
+                : `| Head branch | kept \`${headRef}\` (${branchDecision.reason}) |`
+            );
           }
 
           if (modelSummary) {
@@ -621,7 +737,6 @@ runs:
 
           let linkedIssues = [];
           try {
-            const fs = require('fs');
             const parsedIssues = JSON.parse(fs.readFileSync('.ai-qa/linked-issues.json', 'utf8'));
             if (Array.isArray(parsedIssues)) linkedIssues = parsedIssues;
           } catch (err) {
@@ -656,8 +771,38 @@ runs:
                   });
                 }
 
-                // On FAIL, reopen a linked issue the merge auto-closed.
-                if (!overallPass && String(issue.state || '').toLowerCase() === 'closed') {
+                let liveState = String(issue.state || '').toLowerCase();
+                try {
+                  const { data: liveIssue } = await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: num,
+                  });
+                  liveState = String(liveIssue.state || '').toLowerCase();
+                } catch (e) {
+                  core.warning(`Could not re-fetch #${num}: ${e.message}`);
+                }
+
+                // Close on delivery PASS (this action owns "done"). On FAIL,
+                // leave open — and reopen if GitHub already auto-closed it.
+                const closeDecision = shouldCloseIssue({
+                  deliveryOk: overallPass,
+                  linkedToThisPr: true,
+                });
+                if (closeDecision.close && liveState !== 'closed') {
+                  try {
+                    await github.rest.issues.update({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: num,
+                      state: 'closed',
+                      state_reason: 'completed',
+                    });
+                    core.info(`Closed linked issue #${num} (${closeDecision.reason}).`);
+                  } catch (e) {
+                    core.warning(`Could not close #${num}: ${e.message}`);
+                  }
+                } else if (!overallPass && liveState === 'closed') {
                   try {
                     await github.rest.issues.update({
                       owner: context.repo.owner,
@@ -665,7 +810,7 @@ runs:
                       issue_number: num,
                       state: 'open',
                     });
-                    core.info(`Reopened linked issue #${num} (QA failed).`);
+                    core.info(`Reopened linked issue #${num} (delivery not verified).`);
                   } catch (e) {
                     core.warning(`Could not reopen #${num}: ${e.message}`);
                   }
@@ -736,4 +881,218 @@ runs:
             } catch (err) {
               core.warning(`Could not update PR body: ${err.message}`);
             }
+          }
+
+    - name: Cleanup head branch
+      if: always() && steps.route.outputs.mode == 'merged-delivery' && steps.publish.outputs.delete-head-branch == 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        HEAD_REF: ${{ steps.publish.outputs.head-ref }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const headRef = process.env.HEAD_REF;
+          if (!headRef) {
+            core.info('No head ref to delete.');
+            return;
+          }
+          try {
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${headRef}`,
+            });
+            core.info(`Deleted head branch ${headRef}.`);
+          } catch (err) {
+            if (err.status === 404) {
+              core.info(`Head branch ${headRef} already gone.`);
+            } else {
+              core.warning(`Could not delete head branch ${headRef}: ${err.message}`);
+            }
+          }
+
+    - name: Cleanup unmerged head branch
+      if: steps.route.outputs.mode == 'unmerged-close'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        HEAD_REF: ${{ steps.route.outputs.head-ref }}
+        DEFAULT_BRANCH: ${{ steps.route.outputs.default-branch }}
+        IS_CROSS_REPO: ${{ steps.route.outputs.is-cross-repo }}
+        CLEANUP_HEAD_BRANCH: ${{ inputs.cleanup-head-branch }}
+        CLEANUP_PATH: ${{ github.action_path }}/lib/cleanup.js
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { shouldDeleteHeadBranch } = require(process.env.CLEANUP_PATH);
+          const headRef = process.env.HEAD_REF || '';
+          let otherOpenPrCount = 0;
+          if (headRef && process.env.IS_CROSS_REPO !== 'true') {
+            try {
+              const { data: openHeads } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${headRef}`,
+                per_page: 5,
+              });
+              otherOpenPrCount = Array.isArray(openHeads) ? openHeads.length : 0;
+            } catch (err) {
+              core.warning(`Could not list open PRs for head ${headRef}: ${err.message}`);
+            }
+          }
+          const decision = shouldDeleteHeadBranch({
+            cleanupEnabled: process.env.CLEANUP_HEAD_BRANCH === 'true',
+            deliveryOk: false,
+            merged: false,
+            headRef,
+            defaultBranch: process.env.DEFAULT_BRANCH || '',
+            isCrossRepository: process.env.IS_CROSS_REPO === 'true',
+            otherOpenPrCount,
+          });
+          core.info(`Unmerged head cleanup: ${decision.reason} (delete=${decision.delete})`);
+          if (!decision.delete || !headRef) return;
+          try {
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${headRef}`,
+            });
+            core.info(`Deleted unmerged head branch ${headRef}.`);
+          } catch (err) {
+            if (err.status === 404) {
+              core.info(`Head branch ${headRef} already gone.`);
+            } else {
+              core.warning(`Could not delete head branch ${headRef}: ${err.message}`);
+            }
+          }
+
+    - name: Reopen prematurely closed issue
+      if: steps.route.outputs.mode == 'issue-closed'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      env:
+        ISSUE_NUMBER: ${{ steps.route.outputs.issue-number }}
+        SENDER_LOGIN: ${{ steps.route.outputs.sender-login }}
+        AUTHOR_LOGIN: ${{ steps.identity.outputs.author-login }}
+        STATE_REASON: ${{ steps.route.outputs.state-reason }}
+        ISSUE_LABELS: ${{ steps.route.outputs.issue-labels }}
+        PASS_LABEL: ${{ inputs.pass-label }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        CLEANUP_PATH: ${{ github.action_path }}/lib/cleanup.js
+        GH_TOKEN: ${{ steps.identity.outputs.author-token }}
+        REPO: ${{ github.repository }}
+      with:
+        github-token: ${{ steps.identity.outputs.author-token }}
+        script: |
+          const { execFileSync } = require('child_process');
+          const {
+            shouldReopenPrematureClose,
+            linkedUndeliveredPr,
+          } = require(process.env.CLEANUP_PATH);
+
+          const issueNumber = Number(process.env.ISSUE_NUMBER);
+          if (!issueNumber) {
+            core.info('No issue number on this event.');
+            return;
+          }
+
+          const passLabel = process.env.PASS_LABEL || '';
+          const labels = (process.env.ISSUE_LABELS || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const hasPassLabel = labels.includes(passLabel);
+          const closedByThisAction =
+            (process.env.SENDER_LOGIN || '') === (process.env.AUTHOR_LOGIN || '');
+
+          let prs = [];
+          try {
+            const owner = process.env.REPO.split('/')[0];
+            const name = process.env.REPO.split('/')[1];
+            const query =
+              'query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){issue(number:$n){timelineItems(first:50,itemTypes:[CONNECTED_EVENT,CROSS_REFERENCED_EVENT]){nodes{__typename ... on ConnectedEvent { subject { ... on PullRequest { number state merged labels(first:20){nodes{name}} } } } ... on CrossReferencedEvent { source { ... on PullRequest { number state merged labels(first:20){nodes{name}} } } }}}}}';
+            const raw = execFileSync(
+              'gh',
+              [
+                'api',
+                'graphql',
+                '-f',
+                `query=${query}`,
+                '-F',
+                `owner=${owner}`,
+                '-F',
+                `repo=${name}`,
+                '-F',
+                `n=${issueNumber}`,
+              ],
+              {
+                encoding: 'utf8',
+                env: { ...process.env, GH_TOKEN: process.env.GH_TOKEN },
+              }
+            );
+            const parsed = JSON.parse(raw);
+            const issue = (((parsed || {}).data || {}).repository || {}).issue || {};
+            const nodes = ((issue.timelineItems || {}).nodes) || [];
+            const seen = new Set();
+            for (const n of nodes) {
+              const pr = (n && (n.subject || n.source)) || null;
+              if (!pr || !pr.number || seen.has(pr.number)) continue;
+              seen.add(pr.number);
+              prs.push({
+                number: pr.number,
+                merged: !!(pr.merged || pr.state === 'MERGED'),
+                labels: ((pr.labels && pr.labels.nodes) || []).map((x) => x.name),
+              });
+            }
+          } catch (err) {
+            core.warning(`Could not resolve linked PRs for #${issueNumber}: ${err.message}`);
+          }
+
+          const decision = shouldReopenPrematureClose({
+            closedByThisAction,
+            hasPassLabel,
+            stateReason: process.env.STATE_REASON || '',
+            linkedUndeliveredPr: linkedUndeliveredPr(prs, passLabel),
+          });
+          core.info(`Issue #${issueNumber} premature-close: ${decision.reason}`);
+          if (!decision.reopen) return;
+
+          try {
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'open',
+            });
+            const marker = '<!-- ai-qa-issue -->';
+            const body = [
+              marker,
+              `⚠️ **ai-qa: reopened** — this issue was closed before delivery was verified (${decision.reason}).`,
+              '',
+              `_Turn off GitHub auto-close (Settings → General → Issues) so merge is not "done." [QA run](${process.env.RUN_URL})_`,
+            ].join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            }
+            core.info(`Reopened issue #${issueNumber}.`);
+          } catch (err) {
+            core.warning(`Could not reopen #${issueNumber}: ${err.message}`);
           }

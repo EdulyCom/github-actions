@@ -16,9 +16,10 @@ across the tasks tracked in `docs/plan.md`:
   way, the label is a badge for humans — CI gates on the `verdict` output,
   never on the label. See `docs/adr/0001-ci-native-ai-review-gate.md` for
   why this shape was chosen over an identity-pinned Check Run.
-- **`ai-qa`** — runs a post-merge, non-blocking QA pass against a deployed
-  environment (health check + smoke test) and reports its result as a
-  signal, not a merge gate.
+- **`ai-qa`** — post-merge **delivery hygiene** (not a second review): poll
+  deploy health, close linked issues only after PASS, delete the head branch
+  on PASS or on close-without-merge, and reopen issues closed before
+  delivery. Optional agentic smoke review. Informational only.
 - **`auto-assign`** — assigns a PR's author as its assignee when the PR is
   opened or marked ready for review.
 

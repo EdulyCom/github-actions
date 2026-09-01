@@ -3,9 +3,13 @@ name: ai-qa selftest
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [closed]
+  issues:
+    types: [closed]
 
 concurrency:
-  group: ai-qa-selftest
+  group: ai-qa-selftest-${{ github.event.pull_request.number || github.event.issue.number || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -13,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       issues: write
     steps:
@@ -30,5 +34,5 @@ jobs:
           # No Anthropic credential passed → the agentic QA review no-ops and
           # the report publishes from the (always-healthy) deploy signal alone.
           # This keeps the self-test cheap and deterministic; it proves the
-          # resolve-PR → health-poll → publish-comment/label pipeline end to end.
+          # resolve-PR → health-poll → publish-comment/label/hygiene pipeline.
           health-url: https://raw.githubusercontent.com/EdulyCom/github-actions/main/README.md

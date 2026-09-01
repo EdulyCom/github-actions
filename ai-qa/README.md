@@ -1,29 +1,30 @@
 # `ai-qa`
 
-Runs a post-merge, **non-blocking** QA signal after a push to the default
-branch: resolves the pull request that was just merged, waits for a
-caller-supplied deploy health endpoint to come up, then has **Claude perform a
-real agentic post-merge QA review** of the merged and deployed state — smoke-
-testing the live app, reviewing the merged diff for integration/runtime risks,
-and (only at its own discretion) running the repo's build/tests to confirm a
-suspected regression. A deterministic step recomputes a pass/fail verdict from
-the review's severity counts and the deploy-health signal, then posts a report
-comment and a pass/fail label on the merged PR.
+**Delivery hygiene** after a change is merged (or a PR/issue is closed) —
+not a second code review. Pre-merge CI and `ai-review` already judged the
+diff. GitHub treats merge as "done" (auto-close issues, optionally delete
+the head branch); this action owns the actual done signal:
 
-This replaces the earlier design, which mechanically ran a caller-supplied
-`test-command`. Post-merge, pre-merge CI has *already* built and tested the
-diff, so re-running the same command added little; an agentic review instead
-catches what pre-merge cannot — a deploy that came up broken, runtime
-regressions, and config/integration drift that only surface in the integrated
-environment. See [`rubric.md`](./rubric.md) for the QA rubric the review
-follows (severities, deployment gate, verdict rules).
+- **PR-level.** Merged: poll `health-url`, optionally run an agentic QA
+  review, then on **PASS** delete the head branch; on **FAIL** keep it.
+  Closed without merge: delete the head branch (GitHub never does this).
+  Never deletes the default branch, a fork head, or a ref still used by
+  another open PR.
+- **Issue-level.** On delivery **PASS**, **close** linked issues (turn off
+  GitHub auto-close-on-merge so merge is not "done"). On **FAIL**, leave
+  them open (reopen if GitHub already auto-closed them). On `issues.closed`,
+  reopen an issue closed before delivery was verified, unless this action
+  closed it or it is `not_planned`.
+
+An optional Claude review can still smoke-test the live app and evaluate a
+PR Test Plan; it is color on the report, not the reason this action exists.
+A deterministic step recomputes pass/fail from severity counts and deploy
+health, then posts a report comment and labels. See [`rubric.md`](./rubric.md)
+for the optional review rubric.
 
 Unlike `ai-review`, this action is purely informational. It has **no
 `outputs:` block**, never calls the Checks API, and gates nothing in the
-calling workflow — by the time it runs, the PR is already merged, so there is
-nothing left to block. It exists to surface "did the thing that just merged
-actually come up healthy and behave correctly" as a comment and label, not to
-approve or reject anything.
+calling workflow.
 
 See
 [`docs/adr/0001-ci-native-ai-review-gate.md`](../docs/adr/0001-ci-native-ai-review-gate.md)
@@ -53,13 +54,17 @@ prompt.)
 2. **Resolve author identity** — settles on one token and one identity
    string (`<app-slug>[bot]` or `github-actions[bot]`) reused by every
    later step.
-3. **Resolve merged PR and merge commit** — looks up the pull request(s)
-   associated with the pushed commit (`github.sha`) via
-   `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, which correctly
-   resolves the source PR across merge, squash, and rebase strategies, and
-   picks the most recently merged one. If none is found (e.g. a direct
-   push straight to the default branch), every remaining step is skipped
-   with a `::notice::` — non-blocking by design, nothing to report against.
+3. **Route event** — `push` and `pull_request` closed+merged take the
+   delivery path; closed-without-merge only cleans the head branch;
+   `issues.closed` takes the premature-reopen path (PRs that fire as
+   issues are skipped).
+4. **Resolve merged PR and merge commit** — on `push`, looks up the pull
+   request(s) associated with `github.sha` via
+   `GET /repos/{owner}/{repo}/commits/{sha}/pulls` (works across merge,
+   squash, and rebase) and picks the most recently merged one. On
+   `pull_request` closed+merged, uses the event's PR number and merge
+   commit. If none is found, remaining delivery steps are skipped with a
+   `::notice::`.
 4. **Check out merge commit** — checks out the resolved commit (with
    `fetch-depth: 2`, so the review can diff it against its first parent —
    the change that just merged) with `persist-credentials: false`.
@@ -94,16 +99,21 @@ prompt.)
    decision from the review's severity counts and the deploy-health signal
    (a non-healthy deploy is an automatic P0; PASS iff deploy healthy AND
    P0=P1=P2=0), never trusting the model's own `verdict`. It posts (or
-   updates, via a hidden `<!-- ai-qa -->` anchor, so re-runs don't stack
-   duplicate comments) a report comment with the signals, the review summary,
-   and the full QA report, then reconciles `pass-label`/`fail-label` on the
-   PR. When `update-linked-issues` is `true` it posts a sticky QA-status
-   comment on each linked issue and — on a FAIL — **reopens** a linked issue
-   the merge auto-closed and applies `fail-label` (on a PASS it applies
-   `pass-label`). When `update-pr-body` is `true` it maintains a managed
-   `<!-- ai-qa-status -->` block in the merged PR's description. If no
-   Anthropic credential is configured, the review is skipped and the report
-   is published from the deploy-health signal alone.
+   updates, via a hidden `<!-- ai-qa -->` anchor) a report comment and
+   reconciles `pass-label`/`fail-label` on the PR. When
+   `update-linked-issues` is `true` it posts a sticky QA-status comment on
+   each linked issue; on **PASS** it **closes** the issue (delivery is done)
+   and applies `pass-label`; on **FAIL** it leaves the issue open (and
+   reopens it if GitHub already auto-closed it) and applies `fail-label`.
+   When `cleanup-head-branch` is `true` and delivery PASSed, it deletes the
+   PR head branch. When `update-pr-body` is `true` it maintains a managed
+   `<!-- ai-qa-status -->` block in the PR description. If no Anthropic
+   credential is configured, the review is skipped and the report is
+   published from the deploy-health signal alone.
+10. **Closed-without-merge / premature issue-close** — a `pull_request`
+    closed event that was not merged only deletes the head branch. An
+    `issues.closed` event reopens the issue if it was closed before delivery
+    (linked merged PR without `✓ /ai-qa`), unless this action closed it.
 
 ## Inputs
 
@@ -117,9 +127,10 @@ prompt.)
 | `test-hint` | Optional free-text describing how to build/test this repo. Handed to the review as context — Claude MAY run it at its discretion to confirm a suspected regression, never mechanically. Consumer must provision the toolchain first. | No | `""` |
 | `allowed-tools` | Tool allowlist passed to the review's `--allowedTools` (read/grep the code, `curl` the deploy, `git` the diff, optionally run a JS/TS build/test). Override to widen or narrow. | No | *(read/grep/glob + curl/git + node/npm/npx/yarn/pnpm/corepack)* |
 | `pass-label` | Label applied when the overall QA signal (health + review) passes. Also applied to linked issues when `update-linked-issues` is on. | No | `✓ /ai-qa` |
-| `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues (and the merge-auto-closed issue is reopened) when `update-linked-issues` is on. | No | `✗ /ai-qa` |
+| `fail-label` | Label applied when the overall QA signal fails. Also applied to linked issues when `update-linked-issues` is on. | No | `✗ /ai-qa` |
 | `update-pr-body` | When `true`, the Publish step maintains a managed `<!-- ai-qa-status -->` block in the merged PR's description reflecting the latest QA status. | No | `true` |
-| `update-linked-issues` | When `true`, the Publish step posts a sticky QA-status comment on each linked issue; on a FAIL it reopens a closed linked issue and applies `fail-label`, on a PASS it applies `pass-label`. | No | `true` |
+| `update-linked-issues` | When `true`, posts a sticky QA-status comment on each linked issue; on PASS **closes** the issue and applies `pass-label`; on FAIL leaves it open (reopens if GitHub auto-closed it) and applies `fail-label`. | No | `true` |
+| `cleanup-head-branch` | When `true`, delete the PR head after a delivery PASS, or immediately on close-without-merge. Requires `contents: write` on `GITHUB_TOKEN`. | No | `true` |
 | `anthropic-api-key` | Anthropic API key for the review step. Optional — without it, the review quietly no-ops and the report still publishes from the deploy-health signal alone. | No | — |
 | `anthropic-auth-token` | Bearer token for a custom Anthropic-compatible gateway, used instead of `anthropic-api-key`. | No | — |
 | `anthropic-base-url` | Optional custom Anthropic-compatible API base URL. | No | — |
@@ -152,9 +163,13 @@ name: ai-qa
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [closed]
+  issues:
+    types: [closed]
 
 permissions:
-  contents: read
+  contents: write   # delete head branch (GITHUB_TOKEN); 403 degrades to a warning
   pull-requests: write
   issues: write
 
@@ -177,21 +192,20 @@ jobs:
           test-hint: "yarn nx run-many -t build,test"
 ```
 
-`issues: write` is required (in addition to `pull-requests: write`) because
-the report comment and label both go through the Issues API — the PR is
-already merged and closed by the time this runs, so a formal
-`pulls.createReview` (what `ai-review` uses) isn't applicable here; a plain
-issue comment is.
+Turn **off** GitHub auto-close (Settings → General → Issues → "Auto-close
+issues with merged linked pull requests") so merge is not treated as done;
+this action closes linked issues only after delivery PASS.
+
+`issues: write` is required because comments, labels, close, and reopen go
+through the Issues API. `contents: write` is required to delete the head
+branch via `GITHUB_TOKEN` (the App author token is not granted Contents).
 
 ## Self-test
 
-`.github/workflows/ai-qa-selftest.yml` runs this action against every push
-to this repo's own `main` — i.e. every PR merged here exercises `ai-qa` for
-real, against the actual merge commit `github.sha` resolves to. It uses a
-deliberately trivial happy-path config (`health-url` pointing at this
-repo's own raw `README.md`) purely to prove the report/label pipeline end to
-end; it is not a substitute for testing a real deploy-health endpoint with a
-real agentic review.
+`.github/workflows/ai-qa-selftest.yml` runs this action on push to `main`,
+`pull_request` closed, and `issues` closed. The merge path uses a trivial
+`health-url` (this repo's raw `README.md`) so the report/label/close/cleanup
+pipeline is exercised without a real deploy.
 
 To exercise the failure path (a deliberately broken or unreachable
 health-url timing out rather than hanging the job) or the sticky-comment
