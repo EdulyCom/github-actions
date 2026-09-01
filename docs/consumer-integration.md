@@ -166,13 +166,15 @@ keep it decoupled — see [`auto-assign/README.md`](../auto-assign/README.md).
 
 ### 2c. `ai-qa.yml`
 
-Runs after a merge, as a non-blocking signal against your deployed
-environment — it does not gate anything and does not need a `review-gate`
-style job. Post-merge, Claude performs an agentic QA review: it smoke-tests
-the deployed app, reviews the merged diff for integration/runtime risks, and
-(only at its discretion) may run your build/tests to confirm a suspected
-regression. Provision any toolchain that review might need *before* the
-action — it ships none of its own:
+Runs after a merge (and on PR/issue close) as **delivery hygiene** — it does
+not gate anything and does not need a `review-gate` job. Merge is not done:
+this action closes linked issues only after deploy health PASSes, and deletes
+the head branch on PASS (or immediately if the PR was closed without merging).
+Turn **off** GitHub's **Auto-close issues with merged linked pull requests**
+(Settings → General → Issues) so GitHub does not close issues at merge time.
+
+The optional agentic review still smoke-tests the deploy; provision any
+toolchain it might need *before* the action:
 
 ```yaml
 name: ai-qa
@@ -180,9 +182,13 @@ name: ai-qa
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [closed]
+  issues:
+    types: [closed]
 
 permissions:
-  contents: read
+  contents: write   # delete head branch; 403 degrades to a warning
   pull-requests: write
   issues: write
 
@@ -209,17 +215,15 @@ must set it to a real value for your deployment. `test-hint` is optional
 free-text guidance describing how to build/test this repo; the review runs it
 only if it decides to (it is not a mechanical command), so it need not be
 exhaustive. Unlike `ai-review`, the report `ai-qa` posts is a plain PR
-comment (the PR is already merged and closed by the time this runs, so a
-formal `pulls.createReview` isn't applicable) plus a `✓`/`✗ /ai-qa` label —
-both go through the Issues API, hence `issues: write` above in addition to
-`pull-requests: write`. That same `issues: write` also covers this version's
-new behavior: `ai-qa` **evaluates the PR's Test Plan** (if the body has one)
-against the deployed app, and — with `update-linked-issues`/`update-pr-body`
-left on — posts a sticky QA-status comment on each issue the PR closed
-(reopening a merge-closed issue and labeling it on a FAIL) and refreshes a
-managed status block in the PR body. The Anthropic credential is optional
-here (see section 1) — omit it and `ai-qa` still reports the deploy-health
-signal, just without the agentic review.
+comment (the PR is already merged and closed by the time the delivery path
+runs, so a formal `pulls.createReview` isn't applicable) plus a `✓`/`✗ /ai-qa`
+label — both go through the Issues API, hence `issues: write`. That same
+scope covers close/reopen of linked issues. `contents: write` is required to
+delete the head branch via `GITHUB_TOKEN`. With `update-linked-issues` left
+on, a PASS **closes** each linked issue; a FAIL leaves it open (and reopens
+it if GitHub already auto-closed it). The Anthropic credential is optional
+(see section 1) — omit it and `ai-qa` still reports deploy health and runs
+hygiene, just without the agentic review.
 
 ## 3. Cutting over from an old identity-pinned check
 

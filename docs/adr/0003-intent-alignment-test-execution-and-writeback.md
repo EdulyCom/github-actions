@@ -75,9 +75,13 @@ canonical skill.
   block. It **never unchecks a human's box**, re-fetches the body immediately
   before writing, and is idempotent. It never mutates issue state.
 - **`ai-qa` → issues + PR body:** posts a sticky `<!-- ai-qa-issue -->`
-  status comment on each linked issue; on a FAIL it **reopens** an issue the
-  merge auto-closed and applies `fail-label` (PASS → `pass-label`); it also
-  maintains a `<!-- ai-qa-status -->` block in the PR body.
+  status comment on each linked issue. On a **PASS** it **closes** the issue
+  (delivery is "done" — consumers should turn off GitHub's auto-close-on-merge
+  so merge is not treated as done). On a **FAIL** it leaves the issue open, and
+  **reopens** it if GitHub already auto-closed it. It also maintains a
+  `<!-- ai-qa-status -->` block in the PR body. A separate `issues.closed`
+  path reopens an issue closed before delivery was verified, unless this
+  action closed it or it is `not_planned`.
 - Both are gated by `update-pr-body` / `update-linked-issues` (default `true`)
   and are wrapped so any write failure warns without failing the job.
 
