@@ -109,11 +109,16 @@ function shouldCloseIssue(opts) {
  *   hasPassLabel?: boolean,
  *   stateReason?: string|null,
  *   linkedUndeliveredPr?: boolean,
+ *   updateLinkedIssues?: boolean|string,
  * }} opts
  * @returns {{ reopen: boolean, reason: string }}
  */
 function shouldReopenPrematureClose(opts) {
   const o = opts || {};
+  // Explicit false only — omit/undefined keeps the action.yml default (on).
+  if (o.updateLinkedIssues === false || o.updateLinkedIssues === "false") {
+    return { reopen: false, reason: "update-linked-issues-off" };
+  }
   if (o.closedByThisAction) {
     return { reopen: false, reason: "closed-by-this-action" };
   }

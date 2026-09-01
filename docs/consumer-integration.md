@@ -180,8 +180,6 @@ toolchain it might need *before* the action:
 name: ai-qa
 
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [closed]
   issues:
@@ -221,7 +219,13 @@ label — both go through the Issues API, hence `issues: write`. That same
 scope covers close/reopen of linked issues. `contents: write` is required to
 delete the head branch via `GITHUB_TOKEN`. With `update-linked-issues` left
 on, a PASS **closes** each linked issue; a FAIL leaves it open (and reopens
-it if GitHub already auto-closed it). The Anthropic credential is optional
+it if GitHub already auto-closed it). The same flag also gates the
+`issues.closed` premature-reopen path. Do **not** also register `push` to
+the default branch alongside `pull_request: closed` — both take the
+merged-delivery path, so every merge would run two full jobs that race
+on issues and labels. `push` remains a legacy merged-delivery-only alias
+for callers that cannot use `pull_request: types: [closed]`. The Anthropic
+credential is optional
 (see section 1) — omit it and `ai-qa` still reports deploy health and runs
 hygiene, just without the agentic review.
 
