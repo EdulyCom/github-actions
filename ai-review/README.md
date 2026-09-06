@@ -16,7 +16,14 @@ returns a schema-validated structured result.
 Model IDs are **locked in the action**
 (Claude primary → for context, Cursor `composer-2.5` then free; for schema
 reviews, structured_output free models only — Cursor has no SO on this
-gateway). The posted PR review footer names the model that
+gateway). Before Context/Review, a short Claude health probe
+(`POST /v1/messages`) decides whether the gateway's Claude OAuth is
+usable: if it is dead or unreachable, Context + Review + fan-out agents
+rebind to free SO (`oc/nemotron-3.5-lightning-free` primary) for that run
+and emit `ai-review-provider-health {…}`; the next run after you reconnect
+Claude automatically returns to Claude primary. Claude Code's
+`--fallback-model` alone does **not** cover OAuth expiry (it waits for an
+overload-style response). The posted PR review footer names the model that
 actually ran and hints to re-run the job for another pass. The `Publish review`
 step never trusts
 the model's self-reported verdict directly — it deterministically
