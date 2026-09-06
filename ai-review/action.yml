@@ -616,22 +616,7 @@ runs:
           STATUS_CODE="${HTTP_CODE}" \
           BODY_FILE="${PROBE_BODY_FILE}" \
           ERROR_KIND="${ERROR_KIND}" \
-          PROVIDER_HEALTH_JS="${PROVIDER_HEALTH_JS}" \
-          node <<'NODE'
-const fs = require("fs");
-const ph = require(process.env.PROVIDER_HEALTH_JS);
-const bodyFile = process.env.BODY_FILE || "";
-let body = "";
-try {
-  if (bodyFile && fs.existsSync(bodyFile)) body = fs.readFileSync(bodyFile, "utf8");
-} catch { /* ignore */ }
-const out = ph.classifyProbeResult({
-  statusCode: process.env.STATUS_CODE,
-  body,
-  errorKind: process.env.ERROR_KIND || undefined,
-});
-process.stdout.write(JSON.stringify(out));
-NODE
+          node "${PROVIDER_HEALTH_JS}" classify
         )" || CLASSIFIED='{"status":"unknown","reason":"classify-failed"}'
         rm -f "${PROBE_BODY_FILE}"
         HEALTH_STATUS="$(printf '%s' "${CLASSIFIED}" | jq -r '.status // "unknown"')"
@@ -644,21 +629,7 @@ NODE
           HAIKU="${HAIKU}" \
           HAIKU_FALLBACK="${HAIKU_FALLBACK}" \
           HELPER_MODEL="${HELPER_MODEL}" \
-          PROVIDER_HEALTH_JS="${PROVIDER_HEALTH_JS}" \
-          node <<'NODE'
-const ph = require(process.env.PROVIDER_HEALTH_JS);
-const out = ph.resolveModelsForHealth({
-  status: process.env.HEALTH_STATUS,
-  claude: {
-    model: process.env.MODEL,
-    fallbackModel: process.env.FALLBACK,
-    haikuModel: process.env.HAIKU,
-    haikuFallbackModel: process.env.HAIKU_FALLBACK,
-    helperModel: process.env.HELPER_MODEL,
-  },
-});
-process.stdout.write(JSON.stringify(out));
-NODE
+          node "${PROVIDER_HEALTH_JS}" resolve
         )" || true
         if [ -z "${REBOUND}" ] || ! printf '%s' "${REBOUND}" | jq -e . >/dev/null 2>&1; then
           echo "::warning::provider-health resolve failed; forcing free SO primary"
@@ -677,15 +648,7 @@ NODE
         if [ "${USE_FREE}" = "true" ]; then
           echo "::warning::Claude provider health=${HEALTH_STATUS} (${HEALTH_REASON}); rebinding Context/Review/agents to free SO primary ${MODEL}"
           HELPER_MODEL="${HELPER_MODEL}" \
-          PROVIDER_HEALTH_JS="${PROVIDER_HEALTH_JS}" \
-          node <<'NODE'
-const fs = require("fs");
-const ph = require(process.env.PROVIDER_HEALTH_JS);
-const path = ".ai-review/osh-agents.json";
-const agents = JSON.parse(fs.readFileSync(path, "utf8"));
-const out = ph.rewriteAgentsModels(agents, process.env.HELPER_MODEL);
-fs.writeFileSync(path, JSON.stringify(out));
-NODE
+            node "${PROVIDER_HEALTH_JS}" rewrite-agents .ai-review/osh-agents.json
           OSH_AGENTS="$(jq -c . .ai-review/osh-agents.json)"
         fi
 

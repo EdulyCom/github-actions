@@ -110,3 +110,63 @@ module.exports = {
   resolveModelsForHealth,
   rewriteAgentsModels,
 };
+
+// CLI for action.yml (must not use column-0 bash heredocs inside `run: |` —
+// they terminate the YAML block). Env-driven; never prints secrets.
+if (require.main === module) {
+  const fs = require("fs");
+  const cmd = process.argv[2] || "";
+
+  if (cmd === "classify") {
+    let body = "";
+    const bodyFile = process.env.BODY_FILE || "";
+    try {
+      if (bodyFile && fs.existsSync(bodyFile)) body = fs.readFileSync(bodyFile, "utf8");
+    } catch {
+      /* ignore */
+    }
+    process.stdout.write(
+      JSON.stringify(
+        classifyProbeResult({
+          statusCode: process.env.STATUS_CODE,
+          body,
+          errorKind: process.env.ERROR_KIND || undefined,
+        })
+      )
+    );
+    process.exit(0);
+  }
+
+  if (cmd === "resolve") {
+    process.stdout.write(
+      JSON.stringify(
+        resolveModelsForHealth({
+          status: process.env.HEALTH_STATUS,
+          claude: {
+            model: process.env.MODEL,
+            fallbackModel: process.env.FALLBACK,
+            haikuModel: process.env.HAIKU,
+            haikuFallbackModel: process.env.HAIKU_FALLBACK,
+            helperModel: process.env.HELPER_MODEL,
+          },
+        })
+      )
+    );
+    process.exit(0);
+  }
+
+  if (cmd === "rewrite-agents") {
+    const path = process.argv[3];
+    if (!path) {
+      console.error("usage: provider-health.js rewrite-agents <agents.json>");
+      process.exit(2);
+    }
+    const modelId = process.env.HELPER_MODEL || FREE_SO_PRIMARY;
+    const agents = JSON.parse(fs.readFileSync(path, "utf8"));
+    fs.writeFileSync(path, JSON.stringify(rewriteAgentsModels(agents, modelId)));
+    process.exit(0);
+  }
+
+  console.error("usage: provider-health.js classify|resolve|rewrite-agents");
+  process.exit(2);
+}
