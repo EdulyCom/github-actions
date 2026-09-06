@@ -408,6 +408,12 @@ runs:
         ENABLE_CONTEXT_STAGE: ${{ inputs.enable-context-stage }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        # Claude OAuth health probe (lib/provider-health.js) — same credential
+        # the Context/Review stages use. Bound via env (never interpolated into
+        # the script body).
+        ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic-auth-token != '' && inputs.anthropic-auth-token || inputs.anthropic-api-key }}
+        PROVIDER_HEALTH_JS: ${{ github.action_path }}/lib/provider-health.js
       run: |
         set -euo pipefail
         mkdir -p .ai-review
@@ -565,6 +571,100 @@ runs:
         # one parallel wave without improvising agent defs mid-review.
         jq -c . "${ACTION_PATH}/osh-agents.json" > .ai-review/osh-agents.json
         OSH_AGENTS="$(cat .ai-review/osh-agents.json)"
+
+        # --- Claude provider health probe ---------------------------------
+        # Claude Code --fallback-model does NOT promote free models on
+        # OmniRoute Claude-OAuth expiry (fast 401 → CLI retries primary until
+        # API_TIMEOUT_MS). Probe here and rebind primaries when dead/unknown.
+        # Next run after OAuth reconnect sees alive and uses Claude again.
+        HEALTH_STATUS="unknown"
+        HEALTH_REASON="missing-config"
+        PROBE_MS=0
+        PROBE_BODY_FILE="$(mktemp)"
+        ERROR_KIND=""
+        HTTP_CODE="0"
+        if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+          ERROR_KIND="missing-config"
+        else
+          BASE_URL="${ANTHROPIC_BASE_URL%/}"
+          START_MS="$(date +%s%3N)"
+          set +e
+          HTTP_CODE="$(curl -sS -m 10 -o "${PROBE_BODY_FILE}" -w "%{http_code}" \
+            -X POST "${BASE_URL}/v1/messages" \
+            -H "Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}" \
+            -H "content-type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -d '{"model":"claude/claude-sonnet-5","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+            2>/dev/null)"
+          CURL_EC=$?
+          set -e
+          END_MS="$(date +%s%3N)"
+          PROBE_MS=$((END_MS - START_MS))
+          case "${HTTP_CODE}" in
+            ''|*[!0-9]*) HTTP_CODE="0" ;;
+          esac
+          if [ "${CURL_EC}" -ne 0 ] && [ "${HTTP_CODE}" = "0" ]; then
+            if [ "${CURL_EC}" -eq 28 ]; then
+              ERROR_KIND="timeout"
+            else
+              ERROR_KIND="network"
+            fi
+          fi
+        fi
+
+        CLASSIFIED="$(
+          STATUS_CODE="${HTTP_CODE}" \
+          BODY_FILE="${PROBE_BODY_FILE}" \
+          ERROR_KIND="${ERROR_KIND}" \
+          node "${PROVIDER_HEALTH_JS}" classify
+        )" || CLASSIFIED='{"status":"unknown","reason":"classify-failed"}'
+        rm -f "${PROBE_BODY_FILE}"
+        HEALTH_STATUS="$(printf '%s' "${CLASSIFIED}" | jq -r '.status // "unknown"')"
+        HEALTH_REASON="$(printf '%s' "${CLASSIFIED}" | jq -r '.reason // "unknown"')"
+
+        REBOUND="$(
+          HEALTH_STATUS="${HEALTH_STATUS}" \
+          MODEL="${MODEL}" \
+          FALLBACK="${FALLBACK}" \
+          HAIKU="${HAIKU}" \
+          HAIKU_FALLBACK="${HAIKU_FALLBACK}" \
+          HELPER_MODEL="${HELPER_MODEL}" \
+          node "${PROVIDER_HEALTH_JS}" resolve
+        )" || true
+        if [ -z "${REBOUND}" ] || ! printf '%s' "${REBOUND}" | jq -e . >/dev/null 2>&1; then
+          echo "::warning::provider-health resolve failed; forcing free SO primary"
+          REBOUND="$(jq -nc \
+            --arg m "oc/nemotron-3.5-lightning-free" \
+            --arg f "oc/deepseek-v4-flash-free,auto/best-free" \
+            '{useFree:true,model:$m,fallbackModel:$f,haikuModel:$m,haikuFallbackModel:$f,helperModel:$m}')"
+        fi
+        USE_FREE="$(printf '%s' "${REBOUND}" | jq -r '.useFree')"
+        MODEL="$(printf '%s' "${REBOUND}" | jq -r '.model')"
+        FALLBACK="$(printf '%s' "${REBOUND}" | jq -r '.fallbackModel')"
+        HAIKU="$(printf '%s' "${REBOUND}" | jq -r '.haikuModel')"
+        HAIKU_FALLBACK="$(printf '%s' "${REBOUND}" | jq -r '.haikuFallbackModel')"
+        HELPER_MODEL="$(printf '%s' "${REBOUND}" | jq -r '.helperModel')"
+
+        if [ "${USE_FREE}" = "true" ]; then
+          echo "::warning::Claude provider health=${HEALTH_STATUS} (${HEALTH_REASON}); rebinding Context/Review/agents to free SO primary ${MODEL}"
+          HELPER_MODEL="${HELPER_MODEL}" \
+            node "${PROVIDER_HEALTH_JS}" rewrite-agents .ai-review/osh-agents.json
+          OSH_AGENTS="$(jq -c . .ai-review/osh-agents.json)"
+        fi
+
+        case "${PROBE_MS}" in
+          ''|*[!0-9]*) PROBE_MS=0 ;;
+        esac
+        if [ "${USE_FREE}" != "true" ] && [ "${USE_FREE}" != "false" ]; then
+          USE_FREE=false
+        fi
+        echo "ai-review-provider-health $(jq -nc \
+          --arg status "${HEALTH_STATUS}" \
+          --arg primary "${MODEL}" \
+          --arg reason "${HEALTH_REASON}" \
+          --argjson probe_ms "${PROBE_MS}" \
+          --argjson use_free "${USE_FREE}" \
+          '{status:$status,primary:$primary,reason:$reason,probe_ms:$probe_ms,use_free:$use_free}')"
 
         {
           echo "files=${FILES}"
