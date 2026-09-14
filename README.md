@@ -1,80 +1,36 @@
-# github-actions
+# github-actions — RETIRED
+
+> **Status (2026-09-14):** This repository is **retired**. Do not add new callers.
+>
+> Replacement:
+> - **PR review / merge gate:** [Cursor Bugbot](https://cursor.com/docs/bugbot) (enable per repo; require the `Cursor Bugbot` check; turn on fail-on-unresolved when available)
+> - **Auto-assign + unmerged branch cleanup:** Cursor Automations (drafts in [`docs/superpowers/automations/2026-09-14-retire-github-actions-drafts.md`](docs/superpowers/automations/2026-09-14-retire-github-actions-drafts.md)); interim local workflows ship in consumers until Automations are saved
+> - **Issue close + merged branch delete:** GitHub native settings (`delete_branch_on_merge` + auto-close linked issues)
+>
+> Design: [`docs/superpowers/specs/2026-09-14-retire-github-actions-design.md`](docs/superpowers/specs/2026-09-14-retire-github-actions-design.md)  
+> Plan: [`docs/superpowers/plans/2026-09-14-retire-github-actions.md`](docs/superpowers/plans/2026-09-14-retire-github-actions.md)  
+> Enable Bugbot script: [`scripts/enable-bugbot-consumers.sh`](scripts/enable-bugbot-consumers.sh) (needs `CURSOR_API_KEY`)
+>
+> Consumer cutover PRs:
+> - https://github.com/EdulyCom/infra-template/pull/404
+> - https://github.com/EdulyCom/infra-payload/pull/44
+> - https://github.com/aikstudio/aik/pull/53
+> - https://github.com/Lagn-App/lagn/pull/250
+> - https://github.com/EdulyCom/ezzu/pull/1059
+> - https://github.com/EdulyCom/eduly/pull/4659
+
+---
+
+# github-actions (historical)
 
 Shared GitHub Actions for CI-native AI-assisted PR review, post-merge QA,
-and PR auto-assignment — packaged as composite actions any organization can
-consume from a thin caller workflow in its own repos.
+and PR auto-assignment — packaged as composite actions. Superseded by the
+stack above; kept for history until this repo is archived.
 
-This repo is being built out to provide three composite actions, landing
-across the tasks tracked in `docs/plan.md`:
+## Former actions
 
-- **`ai-review`** — runs an AI code review against a PR's diff and exposes a
-  `verdict` job output (plus `confidence`, `merge_risk`, and a review
-  comment) that a consumer's own CI uses as an ordinary job dependency to
-  gate heavier build/test/deploy lanes. It optionally authors the review and
-  a pass/fail label under a GitHub App's identity if the caller supplies
-  App credentials; otherwise it falls back to `github-actions[bot]`. Either
-  way, the label is a badge for humans — CI gates on the `verdict` output,
-  never on the label. See `docs/adr/0001-ci-native-ai-review-gate.md` for
-  why this shape was chosen over an identity-pinned Check Run.
-- **`ai-qa`** — post-merge **delivery hygiene** (not a second review): poll
-  deploy health, close linked issues only after PASS, delete the head branch
-  on PASS or on close-without-merge, and reopen issues closed before
-  delivery. Optional agentic smoke review. Informational only.
-- **`auto-assign`** — assigns a PR's author as its assignee when the PR is
-  opened or marked ready for review.
+- **`ai-review`** — CI-native AI review gate via job output
+- **`ai-qa`** — post-merge delivery hygiene
+- **`auto-assign`** — assign PR author
 
-## Who is this for
-
-Any organization or repository. Every action's defaults are
-organization-agnostic — nothing in this repo hardcodes a specific org, App,
-model provider, or environment. `EdulyCom` is this project's first
-consumer, wired up through its own repos' caller workflows, but it is an
-example, not a dependency of this repo. See `docs/consumer-integration.md`
-for what a new consumer needs to configure and which caller workflows to
-copy.
-
-## How to consume this
-
-Reference an action by path from your own workflow, e.g.:
-
-```yaml
-- uses: EdulyCom/github-actions/ai-review@main
-  with:
-    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-```
-
-First-party actions in this repo are consumed via a floating `@main`
-reference, guarded by `CODEOWNERS`-reviewed changes to this repo rather than
-pinned release tags — see `docs/adr/0001-ci-native-ai-review-gate.md` for
-why that trade-off is intentional here (and why every *third-party* action
-this repo itself depends on is instead pinned to a full commit SHA).
-
-Start with `docs/consumer-integration.md` for the secrets/variables to set
-and the caller workflows to copy into a consuming repo.
-
-## License
-
-This repository is public, but no `LICENSE` file has been added yet — that
-decision is deliberately deferred. Under GitHub's default terms, a public
-repo without a license file grants no reuse rights beyond viewing the
-source; external reuse of the actions in this repo cannot begin until a
-license is chosen. This does not affect EdulyCom's own internal use of this
-repo, since EdulyCom already holds the necessary rights as the repo's
-owning organization.
-
-## Further reading
-
-- [`docs/consumer-integration.md`](docs/consumer-integration.md) — practical
-  setup guide for a consuming repository: required secrets/variables and the
-  caller workflows to copy.
-- [`docs/adr/0001-ci-native-ai-review-gate.md`](docs/adr/0001-ci-native-ai-review-gate.md)
-  — the architectural decisions behind the gate mechanism, the authoring
-  identity model, the composite-actions-vs-reusable-workflow choice, the
-  parameterization surface, the public/generalized posture, and the
-  supply-chain and least-privilege posture this repo follows.
-- [`docs/adr/0006-test-plan-ci-findings-and-osh-routing.md`](docs/adr/0006-test-plan-ci-findings-and-osh-routing.md)
-  — Test Plan ↔ CI findings (checklist ticks retired), delta reviews, and
-  roster-K Sonnet collapse / Opus fan-out routing.
-- [`docs/plan.md`](docs/plan.md) — the full build-out plan this repo is
-  being implemented against, including the phase/task breakdown and the
-  locked design decisions behind it.
+See git history and `docs/adr/` for the design that was replaced.
